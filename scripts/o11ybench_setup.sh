@@ -67,7 +67,9 @@ if [ "$SKIP_SYNC" -eq 0 ]; then
   else
     echo "mise not found: relying on uv-managed Python 3.14 (uv sync downloads it)"
   fi
-  (cd "$BENCH_DIR" && uv sync && uv run python -m scripts.sync_tasks)
+  # Pin the interpreter o11y-bench's mise.toml asks for: an unpinned sync can pick a newer CPython with no
+  # prebuilt wheels (fastuuid) and fall back to compiling Rust, which needs the Xcode license accepted.
+  (cd "$BENCH_DIR" && uv sync --python 3.14 && uv run --python 3.14 python -m scripts.sync_tasks)
 fi
 
 step "Check that Harbor can load the agent"

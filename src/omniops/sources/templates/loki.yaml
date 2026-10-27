@@ -35,7 +35,9 @@ query_languages:
     quantile_over_time(0.99, {...} | json | unwrap duration_ms [5m]) by (service_name).
     OmniOps replaces the placeholders $__auto / $__interval with the query step and $__range with
     the whole window, so count_over_time({...}[$__auto]) gives non-overlapping buckets that sum to
-    the true total.
+    the true total. After a parser, add | __error__="" before counting or filtering on parsed
+    fields: lines the parser could not read carry an __error__ label and otherwise leak into
+    counts (e.g. {job=~".+"} | json | __error__="" | status >= 500).
 pitfalls:
   - "Timestamps on the wire are nanosecond Unix epochs; the engine converts SQL ts bounds for you - never put times inside LogQL."
   - "An unknown label, label value or field returns 0 rows, not an error. Confirm names with the *_labels / *_label_values (or *_series) tables of the same source before concluding that logs are absent."
