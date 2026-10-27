@@ -1,0 +1,44 @@
+{
+  "platform": "newrelic",
+  "description": "New Relic Slack destination via workflows (default notification): an active critical-priority issue with policy, condition and impacted entity, plus Acknowledge / Close / View issue buttons.",
+  "provenance": "New Relic docs: notification integrations (Slack destination, default notification or Handlebars-enriched template) and message templates (issueTitle, issuePageUrl, priority, state, accumulations.policyName, accumulations.conditionName, entitiesData, createdAt epoch ms). Issue titles follow New Relic's \"<entity> query result is > X for N minutes on '<condition>'\" form; the issue page link carries the issue UUID. Block layout reconstructed from those fields.",
+  "event": {
+    "type": "message",
+    "user": "U05NRAPP01",
+    "bot_id": "B05NEWRELC",
+    "app_id": "A05NEWRELC",
+    "bot_profile": {"id": "B05NEWRELC", "app_id": "A05NEWRELC", "name": "New Relic", "deleted": false, "team_id": "T01ACME"},
+    "text": "Critical priority issue is active: checkout-service query result is > 5.0 for 5 minutes on 'Error rate'",
+    "blocks": [
+      {"type": "section", "block_id": "a1", "text": {"type": "mrkdwn", "text": ":red_circle: *Critical priority issue is active*"}},
+      {"type": "section", "block_id": "a2", "text": {"type": "mrkdwn", "text": "*<https://radar-api.service.newrelic.com/accounts/1234567/issues/0ea2df1c-adab-45d2-aae0-042b609d2322?notifier=SLACK|checkout-service query result is &gt; 5.0 for 5 minutes on 'Error rate'>*"}},
+      {"type": "section", "block_id": "a3", "fields": [
+        {"type": "mrkdwn", "text": "*Policy*\nCheckout Golden Signals"},
+        {"type": "mrkdwn", "text": "*Condition*\nError rate"},
+        {"type": "mrkdwn", "text": "*Impacted entities*\ncheckout-service"},
+        {"type": "mrkdwn", "text": "*Account*\n1234567"}
+      ]},
+      {"type": "actions", "block_id": "a4", "elements": [
+        {"type": "button", "action_id": "ack", "text": {"type": "plain_text", "text": "Acknowledge"}, "value": "ack"},
+        {"type": "button", "action_id": "close", "text": {"type": "plain_text", "text": "Close"}, "value": "close"},
+        {"type": "button", "action_id": "view", "text": {"type": "plain_text", "text": "View issue"}, "url": "https://radar-api.service.newrelic.com/accounts/1234567/issues/0ea2df1c-adab-45d2-aae0-042b609d2322?notifier=SLACK"}
+      ]}
+    ],
+    "ts": "1792504985.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504985.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "newrelic",
+    "title": "checkout-service query result is > 5.0 for 5 minutes on 'Error rate'",
+    "rule_name": "Checkout Golden Signals / Error rate",
+    "status": "firing",
+    "raw_status": "active",
+    "severity": "critical",
+    "incident_id": "0ea2df1c-adab-45d2-aae0-042b609d2322",
+    "service": "checkout-service",
+    "group": "checkout-service",
+    "url": "https://radar-api.service.newrelic.com/accounts/1234567/issues/0ea2df1c-adab-45d2-aae0-042b609d2322?notifier=SLACK"
+  }
+}

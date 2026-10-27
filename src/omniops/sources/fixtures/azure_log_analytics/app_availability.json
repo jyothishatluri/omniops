@@ -1,0 +1,66 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "Name",
+          "type": "string"
+        },
+        {
+          "name": "Location",
+          "type": "string"
+        },
+        {
+          "name": "Tests",
+          "type": "long"
+        },
+        {
+          "name": "Failures",
+          "type": "long"
+        },
+        {
+          "name": "AvgDurationMs",
+          "type": "real"
+        },
+        {
+          "name": "FailureMessage",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:40:00Z",
+          "checkout-home-page",
+          "West Europe",
+          1,
+          0,
+          412.7,
+          ""
+        ],
+        [
+          "2026-10-01T11:45:00Z",
+          "checkout-home-page",
+          "West Europe",
+          1,
+          1,
+          30001.2,
+          "Request timed out after 30 seconds"
+        ],
+        [
+          "2026-10-01T11:45:00Z",
+          "checkout-home-page",
+          "East US",
+          1,
+          1,
+          30000.4,
+          "Request timed out after 30 seconds"
+        ]
+      ]
+    }
+  ]
+}

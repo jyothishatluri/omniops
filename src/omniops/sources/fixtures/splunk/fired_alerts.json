@@ -1,0 +1,37 @@
+{
+  "links": {},
+  "origin": "https://localhost:8089/servicesNS/admin/search/alerts/fired_alerts",
+  "updated": "2012-10-25T09:20:04-07:00",
+  "generator": {"build": "138753", "version": "5.0"},
+  "entry": [
+    {
+      "name": "rt_scheduler__admin__search__MyAlert_at_1351181001_5.31_1351181987",
+      "id": "https://localhost:8089/servicesNS/nobody/search/alerts/fired_alerts/rt_scheduler__admin__search__MyAlert_at_1351181001_5.31_1351181987",
+      "updated": "2012-10-25T09:19:47-07:00",
+      "published": "2012-10-25T09:19:47-07:00",
+      "links": {
+        "alternate": "/servicesNS/nobody/search/alerts/fired_alerts/rt_scheduler__admin__search__MyAlert_at_1351181001_5.31_1351181987",
+        "list": "/servicesNS/nobody/search/alerts/fired_alerts/rt_scheduler__admin__search__MyAlert_at_1351181001_5.31_1351181987",
+        "remove": "/servicesNS/nobody/search/alerts/fired_alerts/rt_scheduler__admin__search__MyAlert_at_1351181001_5.31_1351181987",
+        "job": "/servicesNS/nobody/search/search/jobs/rt_scheduler__admin__search__MyAlert_at_1351181001_5.31",
+        "savedsearch": "/servicesNS/nobody/search/saved/searches/MyAlert"
+      },
+      "author": "admin",
+      "acl": {"app": "search", "can_list": true, "can_write": true, "modifiable": false, "owner": "admin", "perms": {"read": ["admin"], "write": ["admin"]}, "removable": true, "sharing": "app"},
+      "content": {
+        "actions": "",
+        "alert_type": "real time",
+        "digest_mode": false,
+        "expiration_time_rendered": "2012-10-26 09:19:47 PDT",
+        "savedsearch_name": "MyAlert",
+        "severity": 3,
+        "sid": "rt_scheduler__admin__search__MyAlert_at_1351181001_5.31",
+        "trigger_time": 1351181987,
+        "trigger_time_rendered": "2012-10-25 09:19:47 PDT",
+        "triggered_alerts": 5
+      }
+    }
+  ],
+  "paging": {"total": 1, "perPage": 30, "offset": 0},
+  "messages": []
+}

@@ -1,0 +1,25 @@
+{
+  "id": 1,
+  "uid": "kLtEtcRGk",
+  "orgId": 1,
+  "name": "test_datasource",
+  "type": "graphite",
+  "typeLogoUrl": "",
+  "access": "proxy",
+  "url": "http://mydatasource.com",
+  "password": "",
+  "user": "",
+  "database": "",
+  "basicAuth": false,
+  "basicAuthUser": "",
+  "basicAuthPassword": "",
+  "withCredentials": false,
+  "isDefault": false,
+  "jsonData": {
+    "graphiteType": "default",
+    "graphiteVersion": "1.1"
+  },
+  "secureJsonFields": {},
+  "version": 1,
+  "readOnly": false
+}

@@ -1,0 +1,11 @@
+{
+    "status": "success",
+    "data": [
+        "__name__",
+        "@aws.account",
+        "@aws.region",
+        "@resource.service.name",
+        "@resource.cloud.region",
+        "InstanceId"
+    ]
+}

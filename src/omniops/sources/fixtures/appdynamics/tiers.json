@@ -1,0 +1,8 @@
+[
+  {"id": 8, "name": "Address-Services", "type": "Application Server", "agentType": "APP_AGENT", "numberOfNodes": 1},
+  {"id": 16, "name": "Customer-Survey-Services", "type": "Application Server", "agentType": "APP_AGENT", "numberOfNodes": 1},
+  {"id": 9, "name": "ECommerce-Services", "type": "Application Server", "agentType": "APP_AGENT", "numberOfNodes": 2},
+  {"id": 12, "name": "Inventory-Services", "type": "Application Server", "agentType": "APP_AGENT", "numberOfNodes": 1},
+  {"id": 17, "name": "Order-Processing-Services", "type": "Application Server", "agentType": "APP_AGENT", "numberOfNodes": 1},
+  {"id": 18, "name": "Web-Tier-Services", "type": "Web Server", "agentType": "NATIVE_WEB_SERVER", "numberOfNodes": 1}
+]

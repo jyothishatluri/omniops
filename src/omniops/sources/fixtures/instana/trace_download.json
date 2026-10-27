@@ -1,0 +1,37 @@
+{
+  "items": [
+    {
+      "id": "daa9141549aea210",
+      "timestamp": 1688544599223,
+      "parentId": null,
+      "foreignParentId": null,
+      "name": "GET /api/shipping/cities/dk",
+      "duration": 30,
+      "minSelfTime": 1,
+      "networkTime": null,
+      "callCount": 1,
+      "errorCount": 0,
+      "destination": {
+        "service": {
+          "id": "ce4b152bac7b99744d8314838e49b799afd6dd96",
+          "label": "nginx-web"
+        },
+        "endpoint": {
+          "id": "wAS2omB44e0EK4xqL7f-e-wt4C4",
+          "label": "upstream shipping",
+          "type": "HTTP"
+        },
+        "technologies": []
+      },
+      "cursor": {
+        "@class": ".IngestionOffsetCursor",
+        "ingestionTime": 1688547327000,
+        "offset": 1
+      }
+    }
+  ],
+  "canLoadMore": false,
+  "totalHits": 3,
+  "totalRepresentedItemCount": 3,
+  "totalRetainedItemCount": 3
+}

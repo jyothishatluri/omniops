@@ -1,0 +1,1 @@
+{"status":"success","data":{"cortex_ring_tokens":[{"type":"gauge","help":"Number of tokens in the ring","unit":""}],"http_requests_total":[{"type":"counter","help":"Number of HTTP requests","unit":""},{"type":"counter","help":"Amount of HTTP requests","unit":""}]}}

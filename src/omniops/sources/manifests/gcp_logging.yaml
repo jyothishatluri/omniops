@@ -1,0 +1,380 @@
+# Google Cloud Logging API v2 reached directly over HTTPS (OAuth2 bearer from a service account or
+# Application Default Credentials; no MCP, no client library).
+#
+#   base:   https://logging.googleapis.com
+#   search: POST /v2/entries:list  {resourceNames, filter, orderBy, pageSize, pageToken}
+#   auth:   OAuth2 scope https://www.googleapis.com/auth/logging.read (roles/logging.viewer;
+#           Data Access audit logs need roles/logging.privateLogViewer)
+#   time:   there are no time parameters: the window is part of the Logging-query-language filter
+#           (timestamp >= "RFC3339" AND timestamp <= "RFC3339"); entry timestamps are RFC 3339 with
+#           up to 9 fractional digits.
+#   quota:  entries.list is limited to 60 requests per minute per project (not raisable) and page
+#           tokens live 24 h; an empty page WITH a nextPageToken means "search not finished".
+# Research notes: docs/sources/gcp_logging.md
+source: gcp_logging
+display_name: Google Cloud Logging
+vendor: Google Cloud
+description: >-
+  Cloud Logging v2: log entry search (entries:list with the Logging query language, newest first),
+  log names, log buckets (retention) and log-based metric definitions. Includes Cloud Audit Logs
+  (admin activity = deploys/config changes).
+docs_url: https://docs.cloud.google.com/logging/docs/reference/v2/rest
+categories: [logs, changes]
+base_url: "{{ env.GCP_LOGGING_BASE_URL }}"
+env:
+  - {name: GCP_PROJECT_ID, description: "Project id whose logs are searched (resourceNames projects/<id>)."}
+  - {name: GCP_CREDENTIALS_FILE, description: "Optional service-account JSON key path; Application Default Credentials otherwise. Needs roles/logging.viewer (roles/logging.privateLogViewer for Data Access audit logs)."}
+  - {name: GCP_LOGGING_BASE_URL, default: "https://logging.googleapis.com", description: "API endpoint override (one of the regional endpoints listed on the API reference, Private Service Connect, proxy)."}
+required_env: [GCP_PROJECT_ID]
+auth:
+  type: gcp_service_account
+  scope: https://www.googleapis.com/auth/logging.read
+  credentials_file: "{{ env.GCP_CREDENTIALS_FILE }}"
+rate_limit:
+  concurrency: 2
+  requests_per_minute: 55
+  notes: >-
+    entries.list: 60 requests per minute per project (also per folder/org/billing account), cannot be
+    increased; Google says the method "isn't intended for high-volume retrieval". 429 RESOURCE_EXHAUSTED
+    when exceeded. Up to 100 resourceNames per request; page tokens valid 24 hours.
+retention:
+  logs: 400d
+  changes: 400d
+errors:
+  - {path: "$.error.message", non_empty: true, message: "$.error.message", hint: "Google API error (permission, quota or invalid filter syntax)"}
+ui_base_url: "https://console.cloud.google.com"
+pitfalls:
+  - "Retention is per log bucket: _Default keeps 30 days unless changed (1-3650 days), _Required (admin activity / system event audit logs) keeps 400 days. A window older than the bucket's retention returns 0 rows - that is missing data, not absence of errors. Check gcp_logging_buckets.retention_days."
+  - "entries:list is quota-limited to 60 requests/min per project: narrow the window, the resource type and the log first, then widen. Never page through hours of verbose logs; aggregate with gcp_monitoring log_entry_count instead."
+  - "Unknown jsonPayload / labels keys silently match nothing (keys are case-sensitive): look at one entry's json_payload before filtering on a field."
+  - "Severity is an enum: DEFAULT < DEBUG < INFO < NOTICE < WARNING < ERROR < CRITICAL < ALERT < EMERGENCY. Use min_severity = 'ERROR' for 'errors and worse'; many apps log errors as plain text with severity DEFAULT, so also search the text."
+  - "The trace field holds 'projects/P/traces/<32-hex id>' (GKE, Cloud Run, App Engine) or the bare id; trace_id is the bare id. spanId is 16 hex chars, while Cloud Trace v1 span ids are decimal (gcp_trace span_id_hex converts)."
+query_languages:
+  gcp_logging_query: >-
+    Logging query language (filter). Comparisons: = != > < >= <= : (has substring) =~ (RE2 regex) !~.
+    Booleans AND OR NOT (UPPERCASE; precedence NOT, OR, AND; adjacent terms are AND-ed; '-' = NOT).
+    Fields: resource.type="k8s_container" resource.labels.namespace_name="checkout"
+    resource.labels.container_name="api" resource.labels.service_name="checkout" (Cloud Run)
+    severity>=ERROR textPayload:"timeout" jsonPayload.message=~"(?i)connection (refused|reset)"
+    httpRequest.status>=500 labels."k8s-pod/app"="checkout" trace="projects/P/traces/<id>"
+    protoPayload.methodName:"Deploy" log_id("cloudaudit.googleapis.com/activity") (log_id takes the
+    UN-encoded id; logName needs %2F). Full-text: SEARCH("timeout") (token, case-insensitive) or a bare
+    word (slow global substring). String comparisons ignore case, regexes do not ((?i) to ignore).
+    Missing fields fail silently; test existence with field:*. Prefer indexed fields (resource.*,
+    logName, severity, timestamp, trace, httpRequest.status, labels.*) and AND over OR.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_logging_entries
+    title: Log entry search (entries:list)
+    description: >-
+      Search log entries newest first. The time window (ts) is always pushed into the filter. Narrow with
+      resource_type (k8s_container, cloud_run_revision, gce_instance, http_load_balancer, cloudsql_database,
+      cloud_function, gae_app, audited_resource ...), service (Cloud Run service_name, GKE container_name or
+      pod label app, App Engine module_id, function_name), namespace, pod, log (log id, e.g. 'stdout',
+      'stderr', 'run.googleapis.com/requests', 'cloudaudit.googleapis.com/activity'), level (exact severity)
+      or min_severity, status_code, trace_id, author/method_name (audit logs) and query (any Logging query
+      language expression, AND-ed). message is the best text: textPayload, jsonPayload.message/msg, an
+      audit-log summary (method + resource + status) or the request line; json_payload/proto_payload keep
+      the full structured payload (json_payload->>'field').
+    kind: logs
+    request:
+      method: POST
+      path: /v2/entries:list
+      body:
+        resourceNames: "{{ (filters.project | as_list | format_each('projects/{}')) if filters.project else ['projects/' ~ env.GCP_PROJECT_ID] }}"
+        filter: >-
+          {{ ([
+               'timestamp >= ' ~ (time.start | rfc3339_ms | quote),
+               'timestamp <= ' ~ (time.end | rfc3339_ms | quote),
+               ('(' ~ (filters.log | as_list | map('quote') | list | join_or('log_id({})', ' OR ', false)) ~ ')') if filters.log else none,
+               ('resource.type = ' ~ (filters.resource_type | as_list | map('quote') | list | join_or('{}'))) if filters.resource_type else none,
+               ('severity = ' ~ (filters.level | as_list | map('upper') | list | join_or('{}'))) if filters.level else none,
+               ('severity >= ' ~ (filters.min_severity | upper)) if filters.min_severity else none,
+               ('(' ~ (filters.service | as_list | map('quote') | list | join_or('resource.labels.service_name = {} OR resource.labels.container_name = {} OR labels."k8s-pod/app" = {} OR resource.labels.module_id = {} OR resource.labels.function_name = {}', ' OR ', false)) ~ ')') if filters.service else none,
+               ('resource.labels.namespace_name = ' ~ (filters.namespace | as_list | map('quote') | list | join_or('{}'))) if filters.namespace else none,
+               ('resource.labels.pod_name = ' ~ (filters.pod | quote)) if filters.pod else none,
+               ('resource.labels.instance_id = ' ~ (filters.host | quote)) if filters.host else none,
+               ('(trace = ' ~ (filters.trace_id | quote) ~ ' OR trace = ' ~ (('projects/' ~ env.GCP_PROJECT_ID ~ '/traces/' ~ filters.trace_id) | quote) ~ ')') if filters.trace_id else none,
+               ('spanId = ' ~ (filters.span_id | quote)) if filters.span_id else none,
+               ('httpRequest.status ' ~ (filters.status_code__op or '=') ~ ' ' ~ (filters.status_code | int)) if filters.status_code else none,
+               ('protoPayload.authenticationInfo.principalEmail = ' ~ (filters.author | quote)) if filters.author else none,
+               ('protoPayload.methodName = ' ~ (filters.method_name | quote)) if filters.method_name else none,
+               ('(' ~ filters.query ~ ')') if filters.query else none
+             ] | compact | join(' AND ')) }}
+        orderBy: "timestamp {{ 'asc' if (filters.order_by | lower) == 'asc' else 'desc' }}"
+        pageSize: "{{ [limit or 1000, 1000] | min }}"
+    filters:
+      - {column: query, description: "Logging query language expression, AND-ed with the other filters", examples: ['jsonPayload.message =~ "(?i)timeout|connection refused"']}
+      - {column: resource_type, ops: ["=", "in"], fan_out: false, description: "Monitored resource type", examples: ["k8s_container"]}
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Service name: matches resource.labels.service_name (Cloud Run), container_name (GKE), labels.\"k8s-pod/app\", module_id (App Engine) or function_name", examples: ["checkout"]}
+      - {column: namespace, ops: ["=", "in"], fan_out: false, description: "GKE namespace (resource.labels.namespace_name)"}
+      - {column: pod, description: "GKE pod name (exact)"}
+      - {column: host, description: "Compute Engine instance id (resource.labels.instance_id)"}
+      - {column: log, ops: ["=", "in"], fan_out: false, description: "Log id, not URL-encoded: stdout, stderr, run.googleapis.com/requests, run.googleapis.com/stderr, cloudaudit.googleapis.com/activity, cloudaudit.googleapis.com/data_access, requests (load balancer), syslog", examples: ["cloudaudit.googleapis.com/activity"]}
+      - {column: level, ops: ["=", "in"], fan_out: false, description: "Exact severity (UPPERCASE): DEFAULT DEBUG INFO NOTICE WARNING ERROR CRITICAL ALERT EMERGENCY"}
+      - {column: min_severity, description: "Severity floor: 'ERROR' = ERROR, CRITICAL, ALERT, EMERGENCY", examples: ["ERROR"]}
+      - {column: status_code, type: BIGINT, ops: ["=", ">", ">=", "<", "<="], description: "httpRequest.status (request logs)"}
+      - {column: trace_id, description: "Trace id (32 hex); matches both the bare id and projects/P/traces/<id>"}
+      - {column: span_id, description: "Span id (16 hex)"}
+      - {column: author, description: "Audit logs: principal email that made the call"}
+      - {column: method_name, description: "Audit logs: exact protoPayload.methodName, e.g. google.cloud.run.v2.Services.UpdateService"}
+      - {column: project, ops: ["=", "in"], fan_out: false, description: "Project id(s) to search instead of GCP_PROJECT_ID (resourceNames, up to 100)"}
+      - {column: order_by, description: "desc (default, newest first) | asc"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, control_lookback: 6h}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: body.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.entries[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "When the event occurred (UTC)"}
+      - {name: receive_ts, type: TIMESTAMP, path: receiveTimestamp, transform: auto_time, description: "When Logging received it (ingest lag = receive_ts - ts)"}
+      - {name: level, expr: "_.severity or 'DEFAULT'", description: "Severity (DEFAULT when the entry has none)"}
+      - {name: severity_num, type: BIGINT, expr: "{'DEFAULT': 0, 'DEBUG': 100, 'INFO': 200, 'NOTICE': 300, 'WARNING': 400, 'ERROR': 500, 'CRITICAL': 600, 'ALERT': 700, 'EMERGENCY': 800}.get(_.severity or 'DEFAULT')", description: "Numeric severity for ordering/comparison in SQL (ERROR = 500)"}
+      - name: message
+        expr: >-
+          _.textPayload or _.jsonPayload.message or _.jsonPayload.msg or
+          (((_.protoPayload.methodName or '') ~ ' ' ~ (_.protoPayload.resourceName or '') ~ ((' -> ' ~ _.protoPayload.status.message) if _.protoPayload.status.message else '')) if _.protoPayload.methodName else none) or
+          (((_.httpRequest.requestMethod or '') ~ ' ' ~ _.httpRequest.requestUrl ~ ' ' ~ (_.httpRequest.status or '')) if _.httpRequest.requestUrl else none) or
+          ((_.jsonPayload | json) if _.jsonPayload else none)
+        transform: redact
+        description: "textPayload, jsonPayload.message/msg, audit summary (method resource -> status), request line, or the jsonPayload as JSON text; credentials masked"
+      - {name: log_name, path: logName, description: "projects/P/logs/<URL-encoded log id>"}
+      - {name: log, expr: "((_.logName or '').split('/logs/') | last | replace('%2F', '/')) if _.logName else none", description: "Decoded log id (stdout, cloudaudit.googleapis.com/activity ...)"}
+      - {name: project, expr: "_.logName.split('/')[1] if _.logName else none", description: "Project that stores the entry"}
+      - {name: resource_type, path: "resource.type"}
+      - {name: resource_labels, type: JSON, path: "resource.labels"}
+      - {name: labels, type: JSON, path: labels, description: "Entry labels (k8s-pod/<label>, compute.googleapis.com/resource_name, instanceId ...)"}
+      - {name: service, expr: "_.resource.labels.service_name or _.resource.labels.container_name or _.labels['k8s-pod/app'] or _.resource.labels.module_id or _.resource.labels.function_name or _.protoPayload.serviceName", description: "Derived service: Cloud Run service_name, GKE container_name / pod label app, App Engine module_id, function_name, audit-log serviceName"}
+      - {name: namespace, path: "resource.labels.namespace_name"}
+      - {name: pod, path: "resource.labels.pod_name"}
+      - {name: container, path: "resource.labels.container_name"}
+      - {name: cluster, path: "resource.labels.cluster_name"}
+      - {name: host, expr: "_.resource.labels.instance_id or _.labels['compute.googleapis.com/resource_name'] or _.resource.labels.node_name or _.resource.labels.instanceId"}
+      - {name: location, expr: "_.resource.labels.location or _.resource.labels.zone or _.resource.labels.region"}
+      - {name: trace_id, expr: "((_.trace or '').split('/') | last) if _.trace else none", description: "Bare 32-hex trace id"}
+      - {name: trace, path: trace, description: "Raw trace field (often projects/P/traces/<id>)"}
+      - {name: span_id, path: spanId, description: "16-hex span id"}
+      - {name: trace_sampled, type: BOOLEAN, path: traceSampled}
+      - {name: http_method, path: "httpRequest.requestMethod"}
+      - {name: request_url, path: "httpRequest.requestUrl", transform: redact}
+      - {name: status_code, type: BIGINT, path: "httpRequest.status"}
+      - {name: duration_ms, type: DOUBLE, expr: "((_.httpRequest.latency[:-1] | float) * 1000) if _.httpRequest.latency else none", description: "httpRequest.latency ('0.250s') in ms"}
+      - {name: user_agent, path: "httpRequest.userAgent"}
+      - {name: remote_ip, path: "httpRequest.remoteIp"}
+      - {name: author, path: "protoPayload.authenticationInfo.principalEmail", description: "Audit logs: who made the call"}
+      - {name: method_name, path: "protoPayload.methodName", description: "Audit logs: API method (e.g. google.cloud.run.v2.Services.UpdateService, io.k8s.apps.v1.deployments.patch)"}
+      - {name: resource_name, path: "protoPayload.resourceName", description: "Audit logs: the resource acted on"}
+      - {name: title, expr: "((_.protoPayload.methodName or '') ~ ' ' ~ (_.protoPayload.resourceName or '')) if _.protoPayload.methodName else none", description: "Audit logs: '<method> <resource>' (change-event title)"}
+      - {name: text_payload, path: textPayload}
+      - {name: json_payload, type: JSON, path: jsonPayload}
+      - {name: proto_payload, type: JSON, path: protoPayload}
+      - {name: insert_id, path: insertId}
+      - {name: operation_id, path: "operation.id"}
+      - {name: source_location, type: JSON, path: sourceLocation}
+      - {name: error_group_ids, expr: "(_.errorGroups | map(attribute='id') | join(',')) if _.errorGroups else none", description: "Error Reporting group ids linked to the entry (join gcp_error_reporting_groups.group_id)"}
+      - {name: query, filter_only: true}
+      - {name: min_severity, filter_only: true}
+      - {name: order_by, filter_only: true}
+    max_rows: 3000
+    sort_hint: "newest first (orderBy timestamp desc); ties by insertId"
+    pitfalls:
+      - "The engine always adds the ts window to the filter; a filter without a time bound would scan the whole retention."
+      - "An empty page with a nextPageToken means the search had not finished, not 'no logs': the engine keeps following the token (max 3 pages); if you still get nothing, narrow by resource_type/log/service."
+      - "service matches several label conventions with OR; when the result is empty, look at resource_labels of a sample entry (SELECT resource_type, resource_labels ... LIMIT 5) and filter on the real label with query."
+      - "GKE container logs: log = 'stdout' / 'stderr' (resource k8s_container); Cloud Run: run.googleapis.com/stdout, run.googleapis.com/stderr, run.googleapis.com/requests (request logs with httpRequest.status/latency)."
+      - "Change events: log = 'cloudaudit.googleapis.com/activity' (Admin Activity, always on, 400 d) - deploys (Cloud Run UpdateService/ReplaceService, GKE io.k8s.apps.v1.deployments.patch/update), IAM and config changes; Data Access logs are usually disabled."
+    examples:
+      - sql: >-
+          SELECT ts, service, level, message FROM gcp_logging_entries
+          WHERE resource_type = 'k8s_container' AND namespace = 'checkout' AND min_severity = 'ERROR'
+            AND ts BETWEEN TIMESTAMP '2026-10-20 13:45:00' AND TIMESTAMP '2026-10-20 14:15:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Error logs of a GKE namespace around an alert.
+      - sql: >-
+          SELECT substr(message, 1, 120) AS msg, count(*) AS n, min(ts) AS first_seen
+          FROM gcp_logging_entries
+          WHERE service = 'payments-api' AND resource_type = 'cloud_run_revision' AND min_severity = 'WARNING'
+            AND ts >= TIMESTAMP '2026-10-20 13:00:00' AND ts < TIMESTAMP '2026-10-20 15:00:00'
+          GROUP BY 1 ORDER BY n DESC LIMIT 20
+        description: Top warning/error messages of a Cloud Run service.
+      - sql: >-
+          SELECT date_trunc('minute', ts) AS minute, count(*) AS errors_5xx, avg(duration_ms) AS avg_ms
+          FROM gcp_logging_entries
+          WHERE log = 'run.googleapis.com/requests' AND service = 'checkout' AND status_code >= 500
+            AND ts >= TIMESTAMP '2026-10-20 13:30:00' AND ts < TIMESTAMP '2026-10-20 14:30:00'
+          GROUP BY 1 ORDER BY 1
+        description: 5xx request logs per minute (Cloud Run request log).
+      - sql: >-
+          SELECT ts, author, method_name, resource_name FROM gcp_logging_entries
+          WHERE log = 'cloudaudit.googleapis.com/activity'
+            AND query = 'protoPayload.methodName:("UpdateService" OR "ReplaceService" OR "deployments.patch" OR "deployments.update")'
+            AND ts >= TIMESTAMP '2026-10-20 10:00:00'
+          ORDER BY ts DESC
+        description: Deploys / config changes before the incident (Admin Activity audit logs).
+      - sql: "SELECT ts, service, level, message FROM gcp_logging_entries WHERE trace_id = '382d4f4c6b7bb2f4a972559d9085001d' AND ts >= TIMESTAMP '2026-10-20 13:00:00' ORDER BY ts"
+        description: All logs written while serving one trace.
+    tests:
+      - {sql: "SELECT count(*) AS n FROM gcp_logging_entries WHERE log = 'cloudaudit.googleapis.com/activity'", min_rows: 0}
+    fixtures:
+      - file: entries_list.json
+        filters: {log: my-test-log}
+        expect_rows: 2
+        expect_columns: {ts: "2018-11-01T18:39:31.114507977Z", message: My second entry, log: my-test-log, project: myloggingproject, resource_type: global, level: DEFAULT, insert_id: jpj9zjf73t1mn}
+        note: "Official docs 'Quickstart: write and query log entries with the gcloud CLI' (logging/docs/write-query-log-entries-gcloud) APIs Explorer entries.list response: the jsonPayload and textPayload entries of my-test-log, values as documented."
+      - file: entries_request_log.json
+        filters: {resource_type: cloud_run_revision}
+        expect_rows: 2
+        expect_columns: {status_code: 503, duration_ms: 3500.0, trace_id: 382d4f4c6b7bb2f4a972559d9085001d, span_id: 000000000000004a, service: checkout, level: ERROR, severity_num: 500, http_method: GET, log: run.googleapis.com/requests}
+        note: "Built strictly from the documented LogEntry / HttpRequest schema (severity enum, httpRequest.status integer, latency Duration '3.5s', trace projects/P/traces/<id>, spanId 16 hex, traceSampled) plus a Cloud Audit Logs AuditLog protoPayload (methodName, resourceName, authenticationInfo.principalEmail); values illustrative."
+      - file: entries_audit_title.json
+        filters: {log: cloudaudit.googleapis.com/activity}
+        expect_rows: 1
+        expect_columns: {author: deployer@my-project.iam.gserviceaccount.com, method_name: google.cloud.run.v2.Services.UpdateService, title: "google.cloud.run.v2.Services.UpdateService projects/my-project/locations/us-central1/services/checkout", log: cloudaudit.googleapis.com/activity, level: NOTICE}
+        note: "Built strictly from the LogEntry schema with a Cloud Audit Logs AuditLog protoPayload (@type type.googleapis.com/google.cloud.audit.AuditLog, serviceName, methodName, resourceName, authenticationInfo.principalEmail); values illustrative."
+      - file: google_error.json
+        expect_error: "Invalid filter"
+        note: "Google API error envelope {error: {code, message, status}} answered with 200 by a proxy; proves the source-level error rule fires. Message text illustrative."
+    ui_link: "https://console.cloud.google.com/logs/query;query={{ (filters.query or '') | urlencode }};timeRange={{ (time.start | rfc3339) | urlencode }}%2F{{ (time.end | rfc3339) | urlencode }}?project={{ env.GCP_PROJECT_ID }}"
+    docs_url: https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_logging_logs
+    title: Log names
+    description: >-
+      Logs that have entries in the project (projects.logs.list): use to discover the log ids to filter
+      gcp_logging_entries.log by (stdout, stderr, run.googleapis.com/requests, cloudaudit.googleapis.com/activity,
+      application logs ...).
+    kind: entities
+    request:
+      method: GET
+      path: "/v2/projects/{{ filters.project or env.GCP_PROJECT_ID }}/logs"
+      query:
+        pageSize: 1000
+    filters:
+      - {column: project, description: "Project id instead of GCP_PROJECT_ID"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 5}
+    response:
+      rows_path: "$.logNames[*]"
+    columns:
+      - {name: log_name, path: ".", description: "projects/P/logs/<URL-encoded id>"}
+      - {name: log, expr: "(_.split('/logs/') | last | replace('%2F', '/')) if _ else none", description: "Decoded log id for gcp_logging_entries.log"}
+      - {name: project, filter_only: true}
+    pitfalls:
+      - "Only logs that currently have entries in some bucket are listed (no time range)."
+    examples:
+      - sql: "SELECT log FROM gcp_logging_logs WHERE log LIKE '%checkout%' OR log LIKE 'run.googleapis.com/%' ORDER BY log"
+        description: Find the application and Cloud Run log ids.
+    fixtures:
+      - file: logs_list.json
+        expect_rows: 3
+        expect_columns: {log_name: projects/my-project/logs/syslog, log: syslog}
+        note: "ListLogsResponse built from the schema; the first value is the documented example 'projects/my-project/logs/syslog', the others follow the documented URL-encoded form (organizations/123/logs/cloudresourcemanager.googleapis.com%2Factivity)."
+    docs_url: https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/projects.logs/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_logging_buckets
+    title: Log buckets (retention)
+    description: >-
+      Log buckets in every location of the project (projects.locations.buckets.list with locations/-):
+      retention_days per bucket (_Default 30 d unless changed, _Required 400 d), lock state, Log Analytics,
+      restricted fields and indexed fields. Check before concluding that old logs are absent.
+    kind: entities
+    request:
+      method: GET
+      path: "/v2/projects/{{ filters.project or env.GCP_PROJECT_ID }}/locations/-/buckets"
+      query:
+        pageSize: 100
+    filters:
+      - {column: project, description: "Project id instead of GCP_PROJECT_ID"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.buckets[*]"
+    columns:
+      - {name: id, path: name, description: "projects/P/locations/L/buckets/B"}
+      - {name: bucket, expr: "(_.name.split('/') | last) if _.name else none"}
+      - {name: location, expr: "_.name.split('/')[3] if _.name else none"}
+      - {name: retention_days, type: BIGINT, path: retentionDays}
+      - {name: locked, type: BOOLEAN, path: locked}
+      - {name: state, path: lifecycleState}
+      - {name: analytics_enabled, type: BOOLEAN, path: analyticsEnabled}
+      - {name: description, path: description}
+      - {name: restricted_fields, type: JSON, path: restrictedFields}
+      - {name: index_configs, type: JSON, path: indexConfigs}
+      - {name: created_at, type: TIMESTAMP, path: createTime, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updateTime, transform: auto_time}
+      - {name: project, filter_only: true}
+    examples:
+      - sql: "SELECT bucket, location, retention_days, locked, analytics_enabled FROM gcp_logging_buckets ORDER BY bucket"
+        description: How far back logs can be searched.
+    fixtures:
+      - file: buckets_list.json
+        expect_rows: 2
+        expect_columns: {bucket: _Default, location: global, retention_days: 30, state: ACTIVE}
+        note: "Built strictly from the documented LogBucket schema (name projects/P/locations/L/buckets/B, retentionDays, locked, lifecycleState, analyticsEnabled, restrictedFields, indexConfigs) inside the {buckets, nextPageToken} list envelope; default buckets have no createTime per the docs. Values illustrative."
+    docs_url: https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/projects.locations.buckets/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_logging_log_metrics
+    title: Log-based metric definitions
+    description: >-
+      User-defined log-based metrics (projects.metrics.list): the Logging filter each metric counts, its
+      value/label extractors and kind. When an alert fires on logging.googleapis.com/user/<name>, take
+      log_filter from here and run it as gcp_logging_entries.query to see the matching entries.
+    kind: entities
+    request:
+      method: GET
+      path: "/v2/projects/{{ filters.project or env.GCP_PROJECT_ID }}/metrics"
+      query:
+        pageSize: 1000
+    filters:
+      - {column: project, description: "Project id instead of GCP_PROJECT_ID"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.metrics[*]"
+    columns:
+      - {name: name, path: name, description: "Metric id"}
+      - {name: metric, expr: "_.metricDescriptor.type or ('logging.googleapis.com/user/' ~ _.name)", description: "Metric type to query in gcp_monitoring_time_series"}
+      - {name: log_filter, path: filter, description: "Logging query the metric counts - reuse as gcp_logging_entries.query"}
+      - {name: description, path: description}
+      - {name: disabled, type: BOOLEAN, path: disabled}
+      - {name: metric_kind, path: "metricDescriptor.metricKind"}
+      - {name: value_type, path: "metricDescriptor.valueType"}
+      - {name: value_extractor, path: valueExtractor}
+      - {name: label_extractors, type: JSON, path: labelExtractors}
+      - {name: bucket_name, path: bucketName}
+      - {name: created_at, type: TIMESTAMP, path: createTime, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updateTime, transform: auto_time}
+      - {name: project, filter_only: true}
+    pitfalls:
+      - "Log-based metric data keeps only 6 weeks in Cloud Monitoring and counts only entries matching the filter at ingestion time (no backfill after a filter change)."
+    examples:
+      - sql: "SELECT name, metric, log_filter, updated_at FROM gcp_logging_log_metrics WHERE name = 'payment_errors'"
+        description: What a log-based alert metric counts (then search those entries).
+    fixtures:
+      - file: log_metrics.json
+        expect_rows: 2
+        expect_columns: {name: payment_errors, metric: logging.googleapis.com/user/payment_errors, metric_kind: DELTA, value_type: INT64, log_filter: 'resource.type="cloud_run_revision" AND severity>=ERROR AND jsonPayload.component="payments"'}
+        note: "Built strictly from the documented LogMetric schema (name, description, filter, disabled, metricDescriptor DELTA INT64 default, valueExtractor, labelExtractors, bucketOptions, createTime, updateTime) in the {metrics, nextPageToken} list envelope. Values illustrative."
+    docs_url: https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/projects.metrics/list
+
+roles:
+  logs:
+    table: gcp_logging_entries
+    filters:
+      service: "{{ service or '' }}"
+      min_severity: "{{ 'ERROR' if error_only else '' }}"
+      query: "{{ query or '' }}"
+    columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id}
+    query_language: gcp_logging_query
+  k8s_logs:
+    table: gcp_logging_entries
+    filters:
+      resource_type: k8s_container
+      min_severity: "{{ 'WARNING' if error_only else '' }}"
+    columns: {ts: ts, namespace: namespace, pod: pod, container: container, message: message, level: level}
+    query_language: gcp_logging_query
+  change_events:
+    table: gcp_logging_entries
+    filters:
+      log: cloudaudit.googleapis.com/activity
+    columns: {ts: ts, service: service, title: title, author: author, resource: resource_name}
+    notes: "Admin Activity audit logs: deploys (Cloud Run UpdateService/ReplaceService, GKE deployments.patch), IAM and config changes."

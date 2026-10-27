@@ -1,0 +1,790 @@
+# Grafana Tempo HTTP API. Reusable template: self-hosted Tempo (monolithic or microservices,
+# single- or multi-tenant), Grafana Enterprise Traces, Grafana Cloud Traces, and Tempo reached
+# through Grafana's datasource proxy all expose these paths and payloads unchanged.
+# Docs: https://grafana.com/docs/tempo/latest/api_docs/
+# Verified against the docs source (grafana/tempo docs/sources/tempo/api_docs/_index.md, main,
+# October 2026 / Tempo 3.x) and, where the docs give only a schema, against
+# pkg/tempopb/tempo.proto plus the query-frontend JSON writer (gogo jsonpb: int64 as strings,
+# enum names, bytes as base64, zero values omitted).
+source: tempo
+display_name: Grafana Tempo
+vendor: Grafana Labs
+description: Tempo tracing API - TraceQL trace/span search, trace by id (all spans), TraceQL metrics (range, instant, exemplars), attribute names and values.
+docs_url: https://grafana.com/docs/tempo/latest/api_docs/
+categories: [traces]
+base_url: "{{ env.TEMPO_URL }}"
+env:
+  - {name: TEMPO_URL, description: "Tempo query-frontend base URL (monolithic: http://tempo:3200), no trailing /api"}
+required_env: [TEMPO_URL]
+rate_limit:
+  concurrency: 4
+  notes: >-
+    Tempo has no request-rate limit on reads by default; limits are per query
+    (query_frontend.search.max_duration 168h, query_frontend.metrics.max_duration 24h,
+    max_spans_per_span_set 100, default_result_limit 20, max_bytes_per_tag_values_query 1MB).
+    Grafana Cloud Traces applies per-tenant query limits on top.
+errors:
+  - {path: "$.error", non_empty: true, message: "$.error", hint: "Tempo reported an error in a 2xx body"}
+query_languages:
+  traceql: >-
+    TraceQL. A query selects spans: { <conditions> } with scoped attributes resource.<attr>
+    (resource.service.name, resource.deployment.environment), span.<attr> (span.http.route,
+    span.http.status_code, span.db.system) and intrinsics name, status (error|ok|unset), kind
+    (server|client|producer|consumer|internal), duration (span), statusMessage, and trace-level
+    trace:duration / traceDuration, trace:rootService, trace:rootName, trace:id. Combine inside
+    one span with && / ||; across spans of a trace with {A} && {B}; structure with {A} > {B}
+    (child), {A} >> {B} (descendant), {A} < {B} (parent), {A} ~ {B} (sibling) - structural
+    operators return the right-hand spans. Pipelines: | select(span.http.route, name) adds
+    fields, | by(resource.service.name) | count() > 2 aggregates per trace. Durations are
+    literals: duration > 500ms. Regex: name =~ "GET /api/.*". Metrics queries append a
+    function: { status = error } | rate() by (resource.service.name);
+    { span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name);
+    count_over_time(), avg_over_time(duration), max_over_time(duration), histogram_over_time(duration);
+    then | topk(5). Ratios: ({ status = error } | rate()) / ({ } | rate()).
+    Hints go last: with (most_recent=true). Never put times in TraceQL - the engine sends them.
+pitfalls:
+  - "Search returns the FIRST N matching traces Tempo finds (limit, default 100 here), not the newest and not all of them: aggregates over tempo_search/tempo_search_spans are samples. Use tempo_metrics_instant / tempo_metrics_range (TraceQL metrics) for exact counts, rates and percentiles, and set most_recent = true for newest-first examples."
+  - "Unknown attributes or values match nothing and return 0 rows, not an error. Check names with tempo_tag_names and values with tempo_tag_values before concluding that traces are absent. Attribute scope matters: resource.service.name, not span.service.name."
+  - "OpenTelemetry semantic conventions changed: older SDKs emit span.http.method / span.http.status_code / span.http.url, newer ones span.http.request.method / span.http.response.status_code / span.url.full. The http_* columns accept both; inside TraceQL you must use the attribute your services actually emit (check tempo_tag_names)."
+  - "TraceQL metrics duration values (quantile_over_time(duration, .99), avg_over_time(duration) ...) are in SECONDS; span/trace search durations in these tables are milliseconds (duration_ms)."
+  - "Trace IDs in search results have leading zeros trimmed (Tempo prints 'abc123' for 00000000000abc123); tempo_trace accepts both forms. Compare with ltrim(trace_id, '0') when joining across tables."
+  - "Edge spans (webapp, api-gateway) wrap the backend call and repeat its error/latency: attribute blame to the deepest failing span or the span with the most own (self) time, not to the root."
+  - "Without a time window Tempo only searches recent data in the live store; the engine always sends start/end (epoch seconds) so the backend blocks are searched too. Tempo keeps 14 days by default (compactor block_retention 336h; Grafana Cloud 30 days) - older windows are simply gone."
+  - "HTTP 400 'invalid TraceQL query' means a syntax error: fix the query instead of retrying. HTTP 400 'range specified ... exceeds the maximum' means the window is longer than the query frontend allows (search 168h, metrics 24h by default)."
+tables:
+  - name: tempo_search
+    title: TraceQL trace search (one row per trace)
+    description: >-
+      Traces matching a TraceQL query, from GET /api/search. One row per trace with its root
+      service, root span name, start, end-to-end duration, how many spans matched, and per-trace
+      service statistics (which services took part and which had error spans). Filter with
+      query (full TraceQL) and/or the pushdown columns service, name, status, kind, duration_ms,
+      root_service, root_name, trace_id - they are compiled into TraceQL conditions that the
+      matched spans must satisfy (appended as a pipeline stage when query is given). Use it to
+      find candidate traces (slow, failing, for a route) and pick trace ids for tempo_trace.
+    kind: traces
+    request:
+      method: GET
+      path: /api/search
+      query:
+        q: |-
+          {%- set dur = filters.duration_ms -%}
+          {%- set dop = filters.duration_ms__op or '>=' -%}
+          {%- set c = [
+              ('resource.service.name = "' ~ (filters.service | label_escape) ~ '"') if filters.service else None,
+              ('name = "' ~ (filters.name | label_escape) ~ '"') if filters.name else None,
+              ('status = ' ~ (filters.status | lower)) if filters.status else None,
+              ('kind = ' ~ (filters.kind | lower)) if filters.kind else None,
+              ('trace:rootService = "' ~ (filters.root_service | label_escape) ~ '"') if filters.root_service else None,
+              ('trace:rootName = "' ~ (filters.root_name | label_escape) ~ '"') if filters.root_name else None,
+              ('trace:id = "' ~ (filters.trace_id | lower | label_escape) ~ '"') if filters.trace_id else None,
+              (('traceDuration >= ' ~ (((dur[0] | float) * 1000) | round | int) ~ 'us && traceDuration <= ' ~ (((dur[1] | float) * 1000) | round | int) ~ 'us') if dop == 'between'
+                else ('traceDuration ' ~ dop ~ ' ' ~ (((dur | float) * 1000) | round | int) ~ 'us')) if (dur is defined and dur is not none and (dur is number or (dur is sequence and dur is not string))) else None,
+            ] | compact -%}
+          {%- set q = (filters.query or '') | trim -%}
+          {%- set k = q.rfind('with') -%}
+          {%- set hint = q[k:] if (k > 0 and q.endswith(')') and q[k+4:].lstrip().startswith('(') and '{' not in q[k:] and '"' not in q[k:]) else '' -%}
+          {%- set body = (q[:k] | trim) if hint else q -%}
+          {%- set cond = c | join(' && ') -%}
+          {%- if not body -%}{%- set body = ('{ ' ~ cond ~ ' }') if cond else '{ }' -%}{%- elif cond -%}{%- set body = body ~ ' | { ' ~ cond ~ ' }' -%}{%- endif -%}
+          {{ body ~ ((' ' ~ hint) if hint else (' with (most_recent=true)' if filters.most_recent else '')) }}
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        limit: "{{ filters.trace_limit or limit or 100 }}"
+        spss: "{{ filters.spss }}"
+    filters:
+      - column: query
+        description: >-
+          TraceQL search query (spanset filter / pipeline, not a metrics query). Default { } (any
+          span). The other pushdown filters are AND-ed onto the matched spans.
+        examples: ['{ resource.service.name = "order-service" && status = error }']
+      - {column: service, ops: ["=", "in"], description: "resource.service.name of a matched span (pushed into TraceQL)", examples: [order-service]}
+      - {column: name, ops: ["=", "in"], description: "Span name of a matched span (exact; use query with name =~ for regex)", examples: ["handle POST /api/orders"]}
+      - {column: status, description: "Status of a matched span: error | ok | unset", examples: [error]}
+      - {column: kind, description: "Kind of a matched span: server | client | producer | consumer | internal", examples: [server]}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<=", "between"], description: "End-to-end trace duration in ms (pushed as traceDuration)", examples: ["1000"]}
+      - {column: root_service, ops: ["=", "in"], description: "Service of the root span (trace:rootService)"}
+      - {column: root_name, ops: ["=", "in"], description: "Name of the root span (trace:rootName)"}
+      - {column: trace_id, ops: ["=", "in"], description: "Restrict to one trace id (trace:id) - e.g. to check whether a trace matches a query"}
+      - {column: trace_limit, type: BIGINT, description: "Max traces to return (Tempo limit; default 100, or the SQL LIMIT)", examples: ["200"]}
+      - {column: spss, type: BIGINT, description: "Matched spans returned per trace (spans per span set; Tempo default 3, max 100)"}
+      - {column: most_recent, type: BOOLEAN, description: "true = newest traces first (TraceQL hint most_recent=true; deeper, slower search)"}
+    time: {column: ts, default_lookback: 1h, max_window: 168h}
+    response:
+      rows_path: "$.traces[*]"
+    columns:
+      - {name: trace_id, path: traceID, description: "Trace id, lowercase hex with leading zeros trimmed"}
+      - {name: ts, type: TIMESTAMP, path: startTimeUnixNano, transform: epoch_ns, description: "Trace start (UTC)"}
+      - {name: duration_ms, type: DOUBLE, expr: "_.durationMs or 0", description: "End-to-end trace duration in ms (whole ms; Tempo omits 0)"}
+      - {name: root_service, path: rootServiceName, description: "Service of the root span ('<root span not yet received>' while incomplete)"}
+      - {name: root_name, path: rootTraceName, description: "Name of the root span (often the HTTP route at the edge)"}
+      - {name: matched, type: BIGINT, expr: "(_.spanSets or []) | map(attribute='matched', default=0) | sum", description: "Spans in this trace that matched the query"}
+      - {name: span_count, type: BIGINT, expr: "((_.serviceStats or {}).values() | map(attribute='spanCount', default=0) | sum) if _.serviceStats else None", description: "Total spans in the trace (from serviceStats; Tempo 2.6+)"}
+      - {name: error_count, type: BIGINT, expr: "((_.serviceStats or {}).values() | map(attribute='errorCount', default=0) | sum) if _.serviceStats else None", description: "Spans with error status in the trace (from serviceStats)"}
+      - {name: services, expr: "(_.serviceStats or {}) | dictsort | map(attribute='0') | join(',')", description: "Comma-separated services that have spans in the trace"}
+      - {name: error_services, expr: "(_.serviceStats or {}) | dictsort | selectattr('1.errorCount') | map(attribute='0') | join(',')", description: "Services that own at least one error span in the trace"}
+      - {name: service_stats, type: JSON, path: serviceStats, description: "{service: {spanCount, errorCount}} per service (errorCount omitted when 0)"}
+      - {name: matched_spans, type: JSON, path: spanSets, description: "Raw matched span sets (spanID, name, startTimeUnixNano, durationNanos, attributes); use tempo_search_spans for rows"}
+      - {name: query, filter_only: true, description: "TraceQL query"}
+      - {name: service, filter_only: true}
+      - {name: name, filter_only: true}
+      - {name: status, filter_only: true}
+      - {name: kind, filter_only: true}
+      - {name: trace_limit, type: BIGINT, filter_only: true}
+      - {name: spss, type: BIGINT, filter_only: true}
+      - {name: most_recent, type: BOOLEAN, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Unordered (first traces found) unless most_recent = true, then newest first."
+    pitfalls:
+      - "duration_ms here is the END-TO-END trace duration; a span-level latency filter (duration > 300ms on one service) belongs in query or in tempo_search_spans.duration_ms."
+      - "service / name / status / kind constrain the MATCHED spans (same span must satisfy all of them). To require two different spans in one trace write the query yourself: { resource.service.name = \"a\" } && { status = error }."
+      - "error_services is per-trace span ownership: an edge service shows up only if its own span has error status."
+    examples:
+      - sql: >-
+          SELECT trace_id, root_name, duration_ms, error_services, services
+          FROM tempo_search
+          WHERE query = '{ span.http.route = "/api/orders" && status = error }'
+            AND ts >= now() - INTERVAL 24 HOUR
+          ORDER BY duration_ms DESC LIMIT 20
+        description: Failing POST /api/orders traces over the last day, with which services owned error spans.
+        verified: false
+      - sql: >-
+          SELECT trace_id, ts, duration_ms, root_service, root_name
+          FROM tempo_search
+          WHERE root_name = 'POST /api/orders' AND duration_ms > 1000
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY duration_ms DESC
+        description: Checkout requests slower than one second end-to-end (both predicates pushed into TraceQL).
+        verified: false
+      - sql: >-
+          SELECT unnest(string_split(error_services, ',')) AS service, count(*) AS failing_traces, any_value(trace_id) AS example
+          FROM tempo_search WHERE status = 'error' AND ts >= now() - INTERVAL 6 HOUR
+          GROUP BY 1 ORDER BY failing_traces DESC
+        description: Which services own error spans across a sample of failing traces.
+        verified: false
+    fixtures:
+      - file: search_traceql.json
+        filters: {query: "{ status=error }"}
+        note: "Example response of the TraceQL search curl example in the Tempo HTTP API docs (GET /api/search?q={ status=error }); the docs snippet is missing the closing brace of the trace object, added here."
+        expect_rows: 1
+        expect_columns: {trace_id: 2f3e0cee77ae5dc9c17ade3689eb2e54, ts: "2023-05-22T17:58:47Z", duration_ms: 557.0, root_service: shop-backend, root_name: update-billing, matched: 1}
+      - file: search_tags.json
+        filters: {query: "{ }"}
+        note: "Example response of the tags-based search curl example in the Tempo HTTP API docs (traces without spanSets)."
+        expect_rows: 2
+        expect_columns: {trace_id: d6e9329d67b6146a, root_service: frontend, root_name: /cart, duration_ms: 611.0, matched: 0}
+      - file: search_selected_spans.json
+        filters: {query: '{ span.http.route = "/api/orders" && status = error }'}
+        note: "Built strictly from the tempo.proto SearchResponse schema (TraceSearchMetadata with spanSets and serviceStats, Span with name/attributes) as the query frontend serialises it with jsonpb (uint64 as strings, zero errorCount omitted); same shape as the /api/search payload in o11y-bench grading tests."
+        expect_rows: 2
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, root_service: webapp, root_name: POST /api/orders, duration_ms: 1800.0, matched: 2, span_count: 9, error_count: 2, services: "api-gateway,order-service,payment-service,webapp", error_services: "order-service,payment-service"}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#search
+
+  - name: tempo_search_spans
+    title: TraceQL span search (one row per matched span)
+    description: >-
+      The spans that matched a TraceQL query, from GET /api/search: one row per matched span
+      with its trace id, span id, service, name, kind, status, duration and HTTP route/method/
+      status code (the engine appends | select(resource.service.name, name, kind, status,
+      statusMessage, http attributes) so those fields are always returned). Same pushdown
+      filters as tempo_search; duration_ms here is the SPAN duration (pushed as duration).
+      Best table for "which services/operations are slow or failing" and for finding the
+      backend span behind an edge request. At most spss spans per trace are returned
+      (default 10 here, max 100) - matched tells how many there were.
+    kind: spans
+    request:
+      method: GET
+      path: /api/search
+      query:
+        q: |-
+          {%- set dur = filters.duration_ms -%}
+          {%- set dop = filters.duration_ms__op or '>=' -%}
+          {%- set c = [
+              ('resource.service.name = "' ~ (filters.service | label_escape) ~ '"') if filters.service else None,
+              ('name = "' ~ (filters.name | label_escape) ~ '"') if filters.name else None,
+              ('status = ' ~ (filters.status | lower)) if filters.status else None,
+              ('kind = ' ~ (filters.kind | lower)) if filters.kind else None,
+              ('span.http.route = "' ~ (filters.http_route | label_escape) ~ '"') if filters.http_route else None,
+              ('trace:rootService = "' ~ (filters.root_service | label_escape) ~ '"') if filters.root_service else None,
+              ('trace:rootName = "' ~ (filters.root_name | label_escape) ~ '"') if filters.root_name else None,
+              ('trace:id = "' ~ (filters.trace_id | lower | label_escape) ~ '"') if filters.trace_id else None,
+              (('duration >= ' ~ (((dur[0] | float) * 1000) | round | int) ~ 'us && duration <= ' ~ (((dur[1] | float) * 1000) | round | int) ~ 'us') if dop == 'between'
+                else ('duration ' ~ dop ~ ' ' ~ (((dur | float) * 1000) | round | int) ~ 'us')) if (dur is defined and dur is not none and (dur is number or (dur is sequence and dur is not string))) else None,
+            ] | compact -%}
+          {%- set q = (filters.query or '') | trim -%}
+          {%- set k = q.rfind('with') -%}
+          {%- set hint = q[k:] if (k > 0 and q.endswith(')') and q[k+4:].lstrip().startswith('(') and '{' not in q[k:] and '"' not in q[k:]) else '' -%}
+          {%- set body = (q[:k] | trim) if hint else q -%}
+          {%- set cond = c | join(' && ') -%}
+          {%- if not body -%}{%- set body = ('{ ' ~ cond ~ ' }') if cond else '{ }' -%}{%- elif cond -%}{%- set body = body ~ ' | { ' ~ cond ~ ' }' -%}{%- endif -%}
+          {{ body ~ ' | select(resource.service.name, name, kind, status, statusMessage, span.http.route, span.http.method, span.http.request.method, span.http.status_code, span.http.response.status_code)' ~ ((' ' ~ hint) if hint else (' with (most_recent=true)' if filters.most_recent else '')) }}
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        limit: "{{ filters.trace_limit or limit or 100 }}"
+        spss: "{{ filters.spss or 10 }}"
+    filters:
+      - column: query
+        description: >-
+          TraceQL search query; the matched (right-hand) spans become rows. Default { }. Use
+          structural operators to get downstream spans: { name = "handle POST /api/orders" } > { }.
+        examples: ['{ name =~ "handle POST /api/(orders|payments)" && duration > 300ms }']
+      - {column: service, ops: ["=", "in"], description: "resource.service.name of the span (pushed into TraceQL)", examples: [payment-service]}
+      - {column: name, ops: ["=", "in"], description: "Exact span name (pushed into TraceQL)", examples: ["handle POST /api/payments"]}
+      - {column: status, description: "error | ok | unset (pushed into TraceQL)", examples: [error]}
+      - {column: kind, description: "server | client | producer | consumer | internal (pushed into TraceQL)", examples: [server]}
+      - {column: http_route, ops: ["=", "in"], description: "span.http.route (pushed into TraceQL)", examples: [/api/orders]}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<=", "between"], description: "Span duration in ms (pushed into TraceQL as duration)", examples: ["300"]}
+      - {column: root_service, ops: ["=", "in"], description: "Service of the trace's root span (trace:rootService)"}
+      - {column: root_name, ops: ["=", "in"], description: "Name of the trace's root span (trace:rootName)"}
+      - {column: trace_id, ops: ["=", "in"], description: "Restrict to one trace (trace:id)"}
+      - {column: trace_limit, type: BIGINT, description: "Max traces (default 100, or the SQL LIMIT)"}
+      - {column: spss, type: BIGINT, description: "Max matched spans per trace (default 10 here; Tempo max 100)"}
+      - {column: most_recent, type: BOOLEAN, description: "true = newest traces first (TraceQL hint most_recent=true)"}
+    time: {column: ts, default_lookback: 1h, max_window: 168h}
+    response:
+      rows_path: "$.traces[*]"
+      expand:
+        - {explode: spanSets, as: ss}
+        - {explode: "@ss.spans", as: sp}
+    columns:
+      - {name: trace_id, path: traceID, description: "Trace id (hex, leading zeros trimmed)"}
+      - {name: span_id, path: "@sp.spanID", description: "Span id (16 hex chars)"}
+      - {name: ts, type: TIMESTAMP, path: "@sp.startTimeUnixNano", transform: epoch_ns, description: "Span start (UTC)"}
+      - {name: duration_ms, type: DOUBLE, expr: "((sp.durationNanos or 0) | int) / 1000000", description: "Span duration in ms"}
+      - {name: service, expr: "(sp.attributes or []) | selectattr('key', 'equalto', 'service.name') | map(attribute='value.stringValue') | first", description: "resource.service.name of the span"}
+      - {name: name, path: "@sp.name", description: "Span name (operation)"}
+      - {name: kind, expr: "(sp.attributes or []) | selectattr('key', 'equalto', 'kind') | map(attribute='value') | map('dictsort') | map('first') | map('last') | first", description: "server | client | producer | consumer | internal | unspecified"}
+      - {name: status, expr: "(sp.attributes or []) | selectattr('key', 'equalto', 'status') | map(attribute='value') | map('dictsort') | map('first') | map('last') | first", description: "error | ok | unset"}
+      - {name: status_message, expr: "(sp.attributes or []) | selectattr('key', 'equalto', 'statusMessage') | map(attribute='value.stringValue') | first"}
+      - {name: http_route, expr: "(sp.attributes or []) | selectattr('key', 'equalto', 'http.route') | map(attribute='value.stringValue') | first"}
+      - {name: http_method, expr: "(sp.attributes or []) | selectattr('key', 'in', ['http.request.method', 'http.method']) | map(attribute='value.stringValue') | first"}
+      - {name: http_status_code, type: BIGINT, expr: "(sp.attributes or []) | selectattr('key', 'in', ['http.response.status_code', 'http.status_code']) | map(attribute='value') | map('dictsort') | map('first') | map('last') | first"}
+      - {name: attributes, type: JSON, expr: "dict((sp.attributes or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Returned attributes as {key: {stringValue|intValue|doubleValue|boolValue: v}}; read with attributes->'db.system'->>'stringValue' (intValue is a string)"}
+      - {name: matched, type: BIGINT, path: "@ss.matched", description: "How many spans of this trace matched (rows are capped at spss per trace)"}
+      - {name: root_service, path: rootServiceName, description: "Service of the trace's root span"}
+      - {name: root_name, path: rootTraceName, description: "Name of the trace's root span"}
+      - {name: trace_duration_ms, type: DOUBLE, expr: "_.durationMs or 0", description: "End-to-end trace duration (ms)"}
+      - {name: query, filter_only: true}
+      - {name: trace_limit, type: BIGINT, filter_only: true}
+      - {name: spss, type: BIGINT, filter_only: true}
+      - {name: most_recent, type: BOOLEAN, filter_only: true}
+    max_rows: 10000
+    sort_hint: "Grouped by trace, traces unordered unless most_recent = true."
+    pitfalls:
+      - "Rows are a SAMPLE: at most trace_limit traces and spss spans per trace. Use tempo_metrics_instant for exact error rates/percentiles per service, and this table for examples and which operations are involved."
+      - "With a structural query ({ A } > { B }) the rows are the B spans; filters on service/name/... apply to those B spans."
+      - "status is the span's own OpenTelemetry status. HTTP 5xx on client spans or edge spans is often just the relayed downstream failure."
+    examples:
+      - sql: >-
+          SELECT service, name, count(*) AS slow_spans, round(median(duration_ms)) AS p50_ms, max(duration_ms) AS max_ms,
+                 arg_max(trace_id, duration_ms) AS slowest_trace
+          FROM tempo_search_spans
+          WHERE query = '{ name =~ "handle POST /api/(orders|payments)" && duration > 300ms }'
+            AND ts >= now() - INTERVAL 24 HOUR
+          GROUP BY service, name ORDER BY slow_spans DESC
+        description: Which backend operations keep showing up in slow checkout/payment requests, with the slowest example trace.
+        verified: false
+      - sql: >-
+          SELECT service, name, http_status_code, status_message, count(*) AS error_spans, any_value(trace_id) AS example_trace
+          FROM tempo_search_spans
+          WHERE status = 'error' AND ts >= now() - INTERVAL 24 HOUR
+          GROUP BY service, name, http_status_code, status_message ORDER BY error_spans DESC
+        description: Where error spans are, by service and operation, with an example trace id.
+        verified: false
+      - sql: >-
+          SELECT name, service, count(*) AS calls, round(median(duration_ms), 1) AS p50_ms, round(quantile_cont(duration_ms, 0.95), 1) AS p95_ms
+          FROM tempo_search_spans
+          WHERE query = '{ resource.service.name = "order-service" && name = "handle POST /api/orders" } > { }'
+            AND ts >= now() - INTERVAL 6 HOUR
+          GROUP BY name, service ORDER BY p95_ms DESC
+        description: What order-service calls underneath checkout (direct children) and how long each call takes.
+        verified: false
+    fixtures:
+      - file: search_traceql.json
+        filters: {query: "{ status=error }"}
+        note: "Tempo HTTP API docs TraceQL search example (one matched span carrying the status attribute)."
+        expect_rows: 1
+        expect_columns: {trace_id: 2f3e0cee77ae5dc9c17ade3689eb2e54, span_id: 563d623c76514f8e, ts: "2023-05-22T17:58:47Z", status: error, root_service: shop-backend, matched: 1}
+      - file: search_selected_spans.json
+        filters: {query: '{ span.http.route = "/api/orders" && status = error }'}
+        note: "Built from the tempo.proto SearchResponse/Span schema with the attributes a select(...) returns (service.name, kind, status, http.*)."
+        expect_rows: 3
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: order-service, name: handle POST /api/orders, kind: server, status: error, http_route: /api/orders, http_method: POST, http_status_code: 500, duration_ms: 1296.0, matched: 2, trace_duration_ms: 1800.0}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#search
+
+  - name: tempo_trace
+    title: Trace by id (one row per span)
+    description: >-
+      Every span of one trace from GET /api/v2/traces/<trace_id> (OpenTelemetry trace JSON):
+      span and parent ids (hex), service, name, kind, start, duration, status and status
+      message, HTTP/DB/RPC attributes, exception message, host/pod/namespace/env/version from
+      the resource, plus all attributes as JSON. trace_id is required (IN fans out, one request
+      per trace). Use it to walk the call chain (parent_span_id -> span_id), find where an
+      error originated (deepest error span) and which span has the most self time.
+    kind: traces
+    request:
+      method: GET
+      path: "/api/v2/traces/{{ filters.trace_id | trim | lower }}"
+      query:
+        q: "{{ filters.span_filter }}"
+        keep_hierarchy: "{{ ('true' if filters.keep_hierarchy else 'false') if (filters.span_filter and filters.keep_hierarchy is defined and filters.keep_hierarchy is not none) else None }}"
+        match_depth: "{{ filters.match_depth if (filters.span_filter and filters.match_depth is defined and filters.match_depth is not none) else None }}"
+      accept_status: [404]
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Trace id (16 or 32 hex chars; leading zeros optional)", examples: [4bf92f3577b34da6a3ce929d0e0e4736]}
+      - {column: span_filter, description: "Optional single TraceQL spanset filter (e.g. { status = error }) to return only matching spans (response_status becomes PARTIAL). No pipelines, structural operators or trace-level intrinsics (HTTP 400)."}
+      - {column: keep_hierarchy, type: BOOLEAN, description: "With span_filter: true also returns every ancestor from the root down to each matching span (the call path to the error)"}
+      - {column: match_depth, type: BIGINT, description: "With span_filter: descendant levels kept below each match (0 default, -1 = whole subtree)"}
+    response:
+      rows_path: "$.trace.resourceSpans[*]"
+      expand:
+        - {explode: scopeSpans, as: ss}
+        - {explode: "@ss.spans", as: s}
+    columns:
+      - {name: trace_id, filter_only: true, description: "Trace id as requested"}
+      - {name: span_id, expr: "none if not s.spanId else (s.spanId | lower if (s.spanId | length) == 16 else '%016x' | format(('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[0]) * 1152921504606846976 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[1]) * 18014398509481984 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[2]) * 281474976710656 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[3]) * 4398046511104 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[4]) * 68719476736 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[5]) * 1073741824 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[6]) * 16777216 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[7]) * 262144 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[8]) * 4096 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[9]) * 64 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[10]) * 1) // 4))", description: "Span id (16 lowercase hex chars, decoded from the base64 in Tempo's JSON)"}
+      - {name: parent_span_id, expr: "none if not s.parentSpanId else (s.parentSpanId | lower if (s.parentSpanId | length) == 16 else '%016x' | format(('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[0]) * 1152921504606846976 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[1]) * 18014398509481984 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[2]) * 281474976710656 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[3]) * 4398046511104 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[4]) * 68719476736 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[5]) * 1073741824 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[6]) * 16777216 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[7]) * 262144 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[8]) * 4096 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[9]) * 64 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.parentSpanId[10]) * 1) // 4))", description: "Parent span id (hex); NULL for the root span"}
+      - {name: service, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'service.name') | map(attribute='value.stringValue') | first", description: "resource service.name"}
+      - {name: name, path: "@s.name", description: "Span name (operation)"}
+      - {name: kind, expr: "(s.kind | replace('SPAN_KIND_', '') | lower) if s.kind is string else (['unspecified', 'internal', 'server', 'client', 'producer', 'consumer'][s.kind] if s.kind is number else 'unspecified')", description: "server | client | internal | producer | consumer | unspecified"}
+      - {name: ts, type: TIMESTAMP, path: "@s.startTimeUnixNano", transform: epoch_ns, description: "Span start (UTC)"}
+      - {name: end_ts, type: TIMESTAMP, path: "@s.endTimeUnixNano", transform: epoch_ns, description: "Span end (UTC)"}
+      - {name: duration_ms, type: DOUBLE, expr: "((s.endTimeUnixNano or 0) | int - (s.startTimeUnixNano or 0) | int) / 1000000", description: "Span duration in ms (includes time waiting on children)"}
+      - {name: status, expr: "(s.status.code | replace('STATUS_CODE_', '') | lower) if s.status.code is string else (['unset', 'ok', 'error'][s.status.code] if s.status.code is number else 'unset')", description: "error | ok | unset (OpenTelemetry span status)"}
+      - {name: status_message, path: "@s.status.message", description: "Status description set by the instrumentation (often the error text)"}
+      - {name: is_root, type: BOOLEAN, expr: "not s.parentSpanId", description: "True for the root span of the trace"}
+      - {name: http_route, expr: "(s.attributes or []) | selectattr('key', 'equalto', 'http.route') | map(attribute='value.stringValue') | first"}
+      - {name: http_method, expr: "(s.attributes or []) | selectattr('key', 'in', ['http.request.method', 'http.method']) | map(attribute='value.stringValue') | first"}
+      - {name: http_status_code, type: BIGINT, expr: "(s.attributes or []) | selectattr('key', 'in', ['http.response.status_code', 'http.status_code']) | map(attribute='value') | map('dictsort') | map('first') | map('last') | first"}
+      - {name: http_url, expr: "(s.attributes or []) | selectattr('key', 'in', ['url.full', 'http.url', 'http.target', 'url.path']) | map(attribute='value.stringValue') | first", description: "url.full / http.url / http.target / url.path"}
+      - {name: peer_service, expr: "(s.attributes or []) | selectattr('key', 'in', ['peer.service', 'server.address', 'net.peer.name', 'db.system', 'messaging.system']) | map(attribute='value.stringValue') | first", description: "Called peer for client spans (peer.service, server.address, net.peer.name, db.system or messaging.system)"}
+      - {name: db_system, expr: "(s.attributes or []) | selectattr('key', 'in', ['db.system', 'db.system.name']) | map(attribute='value.stringValue') | first"}
+      - {name: db_statement, expr: "(s.attributes or []) | selectattr('key', 'in', ['db.query.text', 'db.statement']) | map(attribute='value.stringValue') | first"}
+      - {name: rpc_method, expr: "(s.attributes or []) | selectattr('key', 'in', ['rpc.method', 'rpc.service']) | map(attribute='value.stringValue') | first"}
+      - {name: error_type, expr: "(s.attributes or []) | selectattr('key', 'in', ['error.type', 'exception.type']) | map(attribute='value') | map('dictsort') | map('first') | map('last') | first", description: "error.type attribute (newer semantic conventions)"}
+      - {name: exception_message, expr: "((s.events or []) | selectattr('name', 'equalto', 'exception') | map(attribute='attributes') | first or []) | selectattr('key', 'equalto', 'exception.message') | map(attribute='value.stringValue') | first", description: "exception.message of the first exception event"}
+      - {name: host, expr: "(_.resource.attributes or []) | selectattr('key', 'in', ['host.name', 'k8s.node.name']) | map(attribute='value.stringValue') | first"}
+      - {name: pod, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'k8s.pod.name') | map(attribute='value.stringValue') | first"}
+      - {name: namespace, expr: "(_.resource.attributes or []) | selectattr('key', 'in', ['k8s.namespace.name', 'service.namespace']) | map(attribute='value.stringValue') | first"}
+      - {name: env, expr: "(_.resource.attributes or []) | selectattr('key', 'in', ['deployment.environment.name', 'deployment.environment']) | map(attribute='value.stringValue') | first"}
+      - {name: version, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'service.version') | map(attribute='value.stringValue') | first"}
+      - {name: scope_name, path: "@ss.scope.name", description: "Instrumentation library that produced the span"}
+      - {name: attributes, type: JSON, expr: "dict((s.attributes or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Span attributes as {key: {stringValue|intValue|doubleValue|boolValue|arrayValue: v}}; e.g. attributes->'db.system'->>'stringValue'. tempo_trace_attributes has them as plain rows."}
+      - {name: resource_attributes, type: JSON, expr: "dict((_.resource.attributes or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Resource attributes, same encoding as attributes"}
+      - {name: events, type: JSON, path: "@s.events", description: "Span events (exceptions, logs) as OTLP JSON"}
+      - {name: links, type: JSON, path: "@s.links", description: "Span links as OTLP JSON"}
+      - {name: response_status, expr: "root.status or 'COMPLETE'", description: "COMPLETE, or PARTIAL when Tempo returned a subset (span_filter, trace too large)"}
+      - {name: span_filter, filter_only: true}
+      - {name: keep_hierarchy, type: BOOLEAN, filter_only: true}
+      - {name: match_depth, type: BIGINT, filter_only: true}
+    max_rows: 20000
+    sort_hint: "Spans grouped by resource (service), not by time: ORDER BY ts for a waterfall."
+    pitfalls:
+      - "A trace that is not found returns 0 rows (HTTP 404): check the id (hex) and that the trace is within retention. Do not conclude anything else from it."
+      - "duration_ms includes children: self time = duration_ms - sum(children's duration_ms) (see examples). The span with the largest self time is the hotspot, not the longest span."
+      - "Huge traces can be truncated by max_bytes_per_trace (response_status = PARTIAL)."
+      - "Span ids are decoded from Tempo's base64 encoding to hex so they match tempo_search_spans.span_id and Pyroscope span selectors."
+    examples:
+      - sql: >-
+          SELECT ts, service, name, kind, duration_ms, status, http_status_code, status_message, span_id, parent_span_id
+          FROM tempo_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736' ORDER BY ts
+        description: Waterfall of one trace.
+        verified: false
+      - sql: >-
+          WITH s AS (SELECT * FROM tempo_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736')
+          SELECT p.service, p.name, p.duration_ms,
+                 p.duration_ms - coalesce(sum(c.duration_ms), 0) AS self_ms, p.status
+          FROM s p LEFT JOIN s c ON c.parent_span_id = p.span_id
+          GROUP BY p.service, p.name, p.duration_ms, p.status, p.span_id
+          ORDER BY self_ms DESC LIMIT 10
+        description: Which span has the most own (self) time - the real hotspot of a slow trace.
+        verified: false
+      - sql: >-
+          WITH s AS (SELECT * FROM tempo_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736')
+          SELECT e.service, e.name, e.http_status_code, e.status_message, e.exception_message, e.ts
+          FROM s e
+          WHERE e.status = 'error'
+            AND NOT EXISTS (SELECT 1 FROM s c WHERE c.parent_span_id = e.span_id AND c.status = 'error')
+          ORDER BY e.ts
+        description: Where the error originated - error spans with no erroring child (edge spans only relay it).
+        verified: false
+      - sql: >-
+          WITH RECURSIVE s AS (SELECT * FROM tempo_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736'),
+          tree AS (
+            SELECT span_id, service, name, duration_ms, status, 0 AS depth FROM s WHERE is_root
+            UNION ALL
+            SELECT c.span_id, c.service, c.name, c.duration_ms, c.status, t.depth + 1
+            FROM s c JOIN tree t ON c.parent_span_id = t.span_id)
+          SELECT depth, service, name, duration_ms, status FROM tree ORDER BY depth
+        description: Call chain (parent -> child order) through the services.
+        verified: false
+      - sql: >-
+          SELECT ts, service, name, status, status_message, http_status_code, span_id, parent_span_id, response_status
+          FROM tempo_trace
+          WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736' AND span_filter = '{ status = error }' AND keep_hierarchy = true
+          ORDER BY ts
+        description: Only the error spans of a (possibly huge) trace plus their ancestor path from the root.
+        verified: false
+    fixtures:
+      - file: trace_v2.json
+        filters: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736}
+        note: "The docs give no example body for /api/v2/traces; built strictly from the tempo.proto TraceByIDResponse schema (trace.resourceSpans per the OpenTelemetry trace.proto) as Tempo's query frontend writes it with gogo jsonpb: base64 span ids, SPAN_KIND_*/STATUS_CODE_* enum names, nanosecond strings. Trace layout mirrors the o11y-bench grading-test checkout trace (webapp -> api-gateway -> order-service -> payment-service)."
+        expect_rows: 5
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, parent_span_id: null, service: webapp, name: POST /api/orders, kind: server, ts: "2026-10-20T06:36:18Z", duration_ms: 1000.0, status: unset, is_root: true, http_route: /api/orders, http_method: POST, http_status_code: 500, env: prod, version: "1.4.2", response_status: COMPLETE}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#query-v2
+
+  - name: tempo_trace_attributes
+    title: Trace attributes, one row per span attribute
+    description: >-
+      The same GET /api/v2/traces/<trace_id> response as tempo_trace, unpivoted: one row per
+      (span, attribute) with the attribute key, its value as text and its OTLP type. Use it to
+      see every field a failing span carries (what in the trace tells you it failed) or to
+      filter spans by an attribute not exposed as a tempo_trace column.
+    kind: traces
+    request:
+      method: GET
+      path: "/api/v2/traces/{{ filters.trace_id | trim | lower }}"
+      accept_status: [404]
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Trace id (hex)", examples: [4bf92f3577b34da6a3ce929d0e0e4736]}
+    response:
+      rows_path: "$.trace.resourceSpans[*]"
+      expand:
+        - {explode: scopeSpans, as: ss}
+        - {explode: "@ss.spans", as: s}
+        - {explode: "@s.attributes", as: a}
+    columns:
+      - {name: trace_id, filter_only: true}
+      - {name: span_id, expr: "none if not s.spanId else (s.spanId | lower if (s.spanId | length) == 16 else '%016x' | format(('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[0]) * 1152921504606846976 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[1]) * 18014398509481984 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[2]) * 281474976710656 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[3]) * 4398046511104 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[4]) * 68719476736 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[5]) * 1073741824 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[6]) * 16777216 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[7]) * 262144 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[8]) * 4096 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[9]) * 64 + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.find(s.spanId[10]) * 1) // 4))", description: "Span id (hex)"}
+      - {name: service, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'service.name') | map(attribute='value.stringValue') | first"}
+      - {name: name, path: "@s.name", description: "Span name"}
+      - {name: status, expr: "(s.status.code | replace('STATUS_CODE_', '') | lower) if s.status.code is string else (['unset', 'ok', 'error'][s.status.code] if s.status.code is number else 'unset')"}
+      - {name: key, path: "@a.key", description: "Attribute key, e.g. http.status_code"}
+      - {name: value, expr: "a.value | dictsort | map('last') | first", description: "Attribute value as text (arrays/maps as JSON)"}
+      - {name: value_type, expr: "(a.value | dictsort | map('first') | first or '') | replace('Value', '')", description: "string | int | double | bool | array | kvlist | bytes"}
+    max_rows: 50000
+    pitfalls:
+      - "Only span attributes are unpivoted; resource attributes (service, host, pod, env, version) are columns of tempo_trace."
+    examples:
+      - sql: >-
+          SELECT service, name, key, value FROM tempo_trace_attributes
+          WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736' AND status = 'error'
+          ORDER BY service, name, key
+        description: Every attribute on the failing spans of a trace.
+        verified: false
+    fixtures:
+      - file: trace_v2.json
+        filters: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736}
+        note: "Same schema-built /api/v2/traces body as tempo_trace (see that fixture note)."
+        expect_rows: 16
+        expect_columns: {span_id: aaaaaaaaaaaaaaaa, service: webapp, name: POST /api/orders, key: http.route, value: /api/orders, value_type: string}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#query-v2
+
+  - name: tempo_metrics_range
+    title: TraceQL metrics range query
+    description: >-
+      Time series computed from spans with a TraceQL metrics query, from GET
+      /api/metrics/query_range: one row per (series, timestamp). Rates are spans per second,
+      counts are spans per step, duration quantiles/averages are in SECONDS. Filter on query
+      (required) and ts; optional step (seconds). The group-by labels are in labels (typed
+      JSON) and series (their values joined); service and p are extracted for the common
+      by (resource.service.name) and quantile cases.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/metrics/query_range
+      query:
+        q: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ (filters.step if filters.step else time.step_s) ~ 's' }}"
+    filters:
+      - column: query
+        required: true
+        description: "TraceQL metrics query: a span selector followed by | rate() / count_over_time() / quantile_over_time(duration, .99) / avg_over_time(duration) ... by (attrs)."
+        examples: ['{ status = error } | rate() by (resource.service.name)']
+      - {column: step, type: BIGINT, description: "Step in seconds (default: ~300 points over the window)"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h, min_step: 15s}
+    response:
+      rows_path: "$.series[*]"
+      expand:
+        - {explode: samples, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.timestampMs", transform: epoch_ms, description: "Sample time (UTC)"}
+      - {name: value, type: DOUBLE, expr: "p.value if p.value is defined else 0", description: "Sample value (Tempo omits zero values; NaN when a step had no spans for a ratio)"}
+      - {name: service, expr: "(_.labels or []) | selectattr('key', 'in', ['resource.service.name', 'service.name']) | map(attribute='value.stringValue') | first", description: "Value of the resource.service.name group-by label, if any"}
+      - {name: p, type: DOUBLE, expr: "(_.labels or []) | selectattr('key', 'equalto', 'p') | map(attribute='value') | map('dictsort') | map('first') | map('last') | first", description: "Quantile of a quantile_over_time series (0.99 ...)"}
+      - {name: series, expr: "(_.labels or []) | map(attribute='value') | map('dictsort') | map('first') | map('last') | join(', ')", description: "Group-by label values joined with ', ' (series identity)"}
+      - {name: labels, type: JSON, expr: "dict((_.labels or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Group-by labels as {name: {stringValue|intValue|doubleValue: v}}; e.g. labels->'span.http.route'->>'stringValue'"}
+      - {name: response_status, expr: "root.status or 'COMPLETE'", description: "COMPLETE, or PARTIAL when Tempo cut the result (e.g. max_response_series reached; see message)"}
+      - {name: message, expr: "root.message", description: "Why the response is PARTIAL, if it is"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Durations (quantile_over_time(duration, ...), avg_over_time(duration) ...) are SECONDS: multiply by 1000 for ms."
+      - "count_over_time() counts spans per step, rate() is spans per second; for one total over the window use tempo_metrics_instant."
+      - "Range is capped by query_frontend.metrics.max_duration (24h by default) - longer windows are clamped to the most recent 24h here."
+      - "Spans with errors only on the edge (webapp/api-gateway) are relays; group by resource.service.name and compare with kind = server."
+    examples:
+      - sql: >-
+          SELECT service, max(value) AS peak_errors_per_s, arg_max(ts, value) AS peak_at
+          FROM tempo_metrics_range
+          WHERE query = '{ status = error } | rate() by (resource.service.name)'
+            AND ts >= now() - INTERVAL 6 HOUR
+          GROUP BY service ORDER BY peak_errors_per_s DESC
+        description: Error span rate per service - which service fails most and when it peaked.
+        verified: false
+      - sql: >-
+          SELECT ts, service, value * 1000 AS p99_ms
+          FROM tempo_metrics_range
+          WHERE query = '{ span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 06:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: p99 server-span latency of POST /api/orders per service over time (converted to ms).
+        verified: false
+    fixtures:
+      - file: metrics_query_range.json
+        filters: {query: '{ span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)'}
+        note: "The docs give no example body for /api/metrics/query_range; built strictly from tempo.proto QueryRangeResponse (series[].labels KeyValue, samples[].timestampMs as int64 string, value double, metrics) in jsonpb encoding; the second sample of the first series has value 0, which jsonpb omits."
+        expect_rows: 5
+        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 1.296, service: order-service, p: 0.99, series: "order-service, 0.99"}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#traceql-metrics
+
+  - name: tempo_metrics_instant
+    title: TraceQL metrics instant query (one value per series)
+    description: >-
+      One value per series for the WHOLE window from GET /api/metrics/query (TraceQL metrics
+      instant query): exact totals, rates and percentiles per group, e.g. p99 per service for
+      a route, error counts per service, span counts per service. Filter on query (required)
+      and ts (window). Rates are spans/second, durations SECONDS.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/metrics/query
+      query:
+        q: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - column: query
+        required: true
+        description: "TraceQL metrics query, e.g. { span.http.route = \"/api/orders\" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)"
+        examples: ['{ status = error } | count_over_time() by (resource.service.name)']
+    time: {column: ts, default_lookback: 1h, max_window: 24h}
+    response:
+      rows_path: "$.series[*]"
+    columns:
+      - {name: value, type: DOUBLE, expr: "_.value if _.value is defined else 0", description: "Value over the whole window (Tempo omits zero)"}
+      - {name: service, expr: "(_.labels or []) | selectattr('key', 'in', ['resource.service.name', 'service.name']) | map(attribute='value.stringValue') | first", description: "resource.service.name group-by value, if any"}
+      - {name: p, type: DOUBLE, expr: "(_.labels or []) | selectattr('key', 'equalto', 'p') | map(attribute='value') | map('dictsort') | map('first') | map('last') | first", description: "Quantile for quantile_over_time series"}
+      - {name: series, expr: "(_.labels or []) | map(attribute='value') | map('dictsort') | map('first') | map('last') | join(', ')", description: "Group-by label values joined with ', '"}
+      - {name: labels, type: JSON, expr: "dict((_.labels or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Group-by labels as {name: {stringValue|intValue|doubleValue: v}}"}
+      - {name: response_status, expr: "root.status or 'COMPLETE'", description: "COMPLETE or PARTIAL"}
+      - {name: message, expr: "root.message", description: "Why the response is PARTIAL, if it is"}
+      - {name: query, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window bounds (predicate only)"}
+    pitfalls:
+      - "Durations are in SECONDS (value * 1000 = ms)."
+      - "rate() is averaged over the window; count_over_time() gives the total span count over the window."
+      - "Window capped at 24h by default (query_frontend.metrics.max_duration)."
+    examples:
+      - sql: >-
+          SELECT service, round(value * 1000) AS p99_ms
+          FROM tempo_metrics_instant
+          WHERE query = '{ span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)'
+            AND ts >= now() - INTERVAL 6 HOUR
+          ORDER BY p99_ms DESC
+        description: Which service has the worst p99 for its server span on POST /api/orders over 6 hours.
+        verified: false
+      - sql: >-
+          SELECT service, value AS error_spans
+          FROM tempo_metrics_instant
+          WHERE query = '{ span.http.route = "/api/payments" && status = error } | count_over_time() by (resource.service.name)'
+            AND ts >= now() - INTERVAL 24 HOUR
+          ORDER BY error_spans DESC
+        description: Error span counts per service on POST /api/payments over the last day.
+        verified: false
+      - sql: >-
+          SELECT service, value AS spans FROM tempo_metrics_instant
+          WHERE query = '{ } | count_over_time() by (resource.service.name)' AND ts >= now() - INTERVAL 24 HOUR
+          ORDER BY spans DESC
+        description: Every traced service and its span volume (tracing coverage).
+        verified: false
+    fixtures:
+      - file: metrics_query_instant.json
+        filters: {query: '{ span.http.route = "/api/orders" } | quantile_over_time(duration, .99) by (resource.service.name)'}
+        note: "The docs give no example body for /api/metrics/query; built from tempo.proto QueryInstantResponse (series[].labels, value, metrics) - identical in shape to the payload used in the o11y-bench grading tests."
+        expect_rows: 2
+        expect_columns: {value: 7.32, service: order-service, p: 0.99, series: "order-service, 0.99", response_status: COMPLETE}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#instant
+
+  - name: tempo_metrics_exemplars
+    title: TraceQL metrics exemplars (example traces behind a series)
+    description: >-
+      Exemplars of a TraceQL metrics range query (GET /api/metrics/query_range with
+      exemplars): one row per exemplar with the series it belongs to, its value, time and the
+      trace id / span id of a real span behind that point. Use it to get concrete trace ids
+      for a latency spike or an error-rate bump, then open them with tempo_trace.
+    kind: traces
+    request:
+      method: GET
+      path: /api/metrics/query_range
+      query:
+        q: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ (filters.step if filters.step else time.step_s) ~ 's' }}"
+        exemplars: "{{ filters.exemplars or 100 }}"
+    filters:
+      - {column: query, required: true, description: "TraceQL metrics query (same as tempo_metrics_range)", examples: ['{ span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)']}
+      - {column: step, type: BIGINT, description: "Step in seconds"}
+      - {column: exemplars, type: BIGINT, description: "Max exemplars (default 100; capped by query_frontend.metrics.max_exemplars)"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h, min_step: 15s}
+    response:
+      rows_path: "$.series[*]"
+      expand:
+        - {explode: exemplars, as: e}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@e.timestampMs", transform: epoch_ms, description: "Exemplar time"}
+      - {name: value, type: DOUBLE, expr: "e.value if e.value is defined else 0", description: "Exemplar value (seconds for duration functions)"}
+      - {name: trace_id, expr: "(e.labels or []) | selectattr('key', 'in', ['trace:id', 'traceID', 'trace_id']) | map(attribute='value.stringValue') | first", description: "Trace id of the exemplar span"}
+      - {name: span_id, expr: "(e.labels or []) | selectattr('key', 'in', ['span:id', 'spanID', 'span_id']) | map(attribute='value.stringValue') | first"}
+      - {name: service, expr: "(_.labels or []) | selectattr('key', 'in', ['resource.service.name', 'service.name']) | map(attribute='value.stringValue') | first", description: "Series' resource.service.name label"}
+      - {name: series, expr: "(_.labels or []) | map(attribute='value') | map('dictsort') | map('first') | map('last') | join(', ')", description: "Series group-by values"}
+      - {name: exemplar_labels, type: JSON, expr: "dict((e.labels or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "All exemplar labels (typed)"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+      - {name: exemplars, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Exemplars exist only for range queries and only when the query frontend allows them (max_exemplars > 0, default 100)."
+    examples:
+      - sql: >-
+          SELECT service, ts, round(value * 1000) AS duration_ms, trace_id
+          FROM tempo_metrics_exemplars
+          WHERE query = '{ span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)'
+            AND ts >= now() - INTERVAL 6 HOUR
+          ORDER BY value DESC LIMIT 5
+        description: The slowest concrete POST /api/orders spans behind the p99 series, with trace ids.
+        verified: false
+    fixtures:
+      - file: metrics_query_range.json
+        filters: {query: '{ span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)'}
+        note: "Schema-built QueryRangeResponse (tempo.proto Exemplar: labels, value, timestampMs) - see tempo_metrics_range."
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:01:00Z", value: 1.41, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: order-service}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#traceql-metrics
+
+  - name: tempo_tag_names
+    title: Attribute names (search tags v2)
+    description: >-
+      Attribute names seen in the window, per scope (resource, span, intrinsic, event, link,
+      instrumentation), from GET /api/v2/search/tags. traceql is the name ready to use in a
+      query (resource.service.name, span.http.route, name). Optionally narrow with scope and
+      query (a single { } spanset filter: only names seen on matching spans). Use before
+      writing TraceQL against unfamiliar data.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/search/tags
+      query:
+        scope: "{{ filters.scope }}"
+        q: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        limit: "{{ filters.tag_limit }}"
+    filters:
+      - {column: scope, description: "resource | span | intrinsic | event | link | instrumentation (default all)", examples: [span]}
+      - {column: query, description: "Single spanset filter, e.g. { resource.service.name = \"order-service\" }"}
+      - {column: tag_limit, type: BIGINT, description: "Max names per scope"}
+    time: {column: ts, default_lookback: 24h, max_window: 168h}
+    response:
+      rows_path: "$.scopes[*]"
+      expand:
+        - {explode: tags, as: t}
+    columns:
+      - {name: scope, path: name, description: "Attribute scope"}
+      - {name: tag, path: "@t", description: "Attribute name without scope"}
+      - {name: traceql, expr: "t if _.name == 'intrinsic' else (_.name ~ '.' ~ t)", description: "Name as written in TraceQL (resource.service.name, span.http.route, duration)"}
+      - {name: query, filter_only: true}
+      - {name: tag_limit, type: BIGINT, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Tag discovery is bounded (max_bytes_per_tag_values_query) and can miss rare names; absence here is not proof."
+    examples:
+      - sql: "SELECT traceql FROM tempo_tag_names WHERE scope = 'span' AND traceql LIKE 'span.http%' ORDER BY 1"
+        description: Which HTTP attributes (old or new semantic conventions) the spans carry.
+        verified: false
+    fixtures:
+      - file: search_tags_v2.json
+        note: "Example response of GET /api/v2/search/tags in the Tempo HTTP API docs (trailing comma after exception.type removed so it parses)."
+        expect_rows: 48
+        expect_columns: {scope: link, tag: link-type, traceql: link.link-type}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#search-tags-v2
+
+  - name: tempo_tag_values
+    title: Attribute values (search tag values v2)
+    description: >-
+      Values seen in the window for one TraceQL attribute, from GET
+      /api/v2/search/tag/<tag>/values, with their type. tag is a TraceQL identifier:
+      resource.service.name (all traced services), span.http.route, name, status,
+      span.http.status_code. Optionally only values seen on spans matching query (a single
+      { } filter). Use to confirm a value exists before filtering, or to list services.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v2/search/tag/{{ filters.tag | trim }}/values"
+      query:
+        q: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        limit: "{{ filters.value_limit }}"
+    filters:
+      - {column: tag, required: true, ops: ["=", "in"], description: "TraceQL attribute, e.g. resource.service.name, span.http.route, name", examples: [resource.service.name]}
+      - {column: query, description: "Single spanset filter, e.g. { span.http.route = \"/api/orders\" }"}
+      - {column: value_limit, type: BIGINT, description: "Max values"}
+    time: {column: ts, default_lookback: 24h, max_window: 168h}
+    response:
+      rows_path: "$.tagValues[*]"
+    columns:
+      - {name: value, path: value, description: "Attribute value"}
+      - {name: type, path: type, description: "string | int | float | bool | duration | status | kind ..."}
+      - {name: tag, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: value_limit, type: BIGINT, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "An invalid query filter is silently ignored by Tempo (it returns the unfiltered list)."
+      - "Unscoped .service.name matches both span and resource scopes; prefer resource.service.name."
+    examples:
+      - sql: "SELECT value AS service FROM tempo_tag_values WHERE tag = 'resource.service.name' AND ts >= now() - INTERVAL 24 HOUR ORDER BY 1"
+        description: Every service that has traces in the last day.
+        verified: false
+      - sql: >-
+          SELECT value AS route FROM tempo_tag_values
+          WHERE tag = 'span.http.route' AND query = '{ resource.service.name = "order-service" }'
+        description: Routes served by one service.
+        verified: false
+    fixtures:
+      - file: search_tag_values_v2.json
+        filters: {tag: .service.name}
+        note: "Example response of GET /api/v2/search/tag/.service.name/values in the Tempo HTTP API docs."
+        expect_rows: 6
+        expect_columns: {value: article-service, type: string, tag: .service.name}
+    docs_url: https://grafana.com/docs/tempo/latest/api_docs/#search-tag-values-v2
+
+roles:
+  traces:
+    table: tempo_search_spans
+    filters:
+      service: "{{ service }}"
+      status: "{{ 'error' if error_only else '' }}"
+      query: "{{ query }}"
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, resource: name, duration_ms: duration_ms, status: status, status_code: http_status_code}
+    query_language: traceql
+  trace_detail:
+    table: tempo_trace
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, parent_span_id: parent_span_id, resource: name, duration_ms: duration_ms, status: status, message: status_message}
+  services:
+    table: tempo_tag_values
+    filters: {tag: resource.service.name}
+    columns: {service: value}

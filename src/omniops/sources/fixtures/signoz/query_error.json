@@ -1,0 +1,11 @@
+{
+  "status": "error",
+  "error": {
+    "type": "invalid_input",
+    "code": "invalid_input",
+    "message": "found 1 syntax errors while parsing the filter expression",
+    "url": "",
+    "errors": [{"message": "line 1:22 expecting one of {(, AND, NOT, OR, ...} but got EOF", "suggestions": []}],
+    "suggestions": []
+  }
+}

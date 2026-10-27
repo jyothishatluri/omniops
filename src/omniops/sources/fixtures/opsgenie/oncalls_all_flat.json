@@ -1,0 +1,27 @@
+{
+ "data": [
+  {
+   "_parent": {
+    "id": "d875alp4-9b4e-4219-alp3-0c26936d18de",
+    "name": "ScheduleName",
+    "enabled": true
+   },
+   "onCallRecipients": [
+    "user4@opsgenie.com",
+    "user5@opsgenie.com"
+   ]
+  },
+  {
+   "_parent": {
+    "id": "e55700e1-ff76-4cd0-a6e8-e1a982423alp",
+    "name": "TeamName_schedule",
+    "enabled": true
+   },
+   "onCallRecipients": [
+    "user4@opsgenie.com"
+   ]
+  }
+ ],
+ "took": 0.039,
+ "requestId": "8f7345f2-63e4-414b-b06f-eb39396575ef"
+}

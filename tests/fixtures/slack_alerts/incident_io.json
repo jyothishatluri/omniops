@@ -1,0 +1,39 @@
+{
+  "platform": "incident_io",
+  "description": "incident.io incident announcement posted by its Slack app: reference and name linked to the incident, status, severity, lead, affected services and declaration time.",
+  "provenance": "incident.io docs (incident announcement posts in the announcement channel show the incident reference INC-<n> and name, status, severity, incident lead and custom fields such as affected services, with a link to https://app.incident.io/<org>/incidents/<n>). Slack renders the declared time with a <!date^epoch^...|fallback> token. Layout reconstructed.",
+  "event": {
+    "type": "message",
+    "user": "U19INCIDEN",
+    "bot_id": "B19INCIDEN",
+    "app_id": "A19INCIDEN",
+    "bot_profile": {"id": "B19INCIDEN", "app_id": "A19INCIDEN", "name": "incident.io", "deleted": false, "team_id": "T01ACME"},
+    "text": "INC-2481: Checkout payments failing",
+    "blocks": [
+      {"type": "section", "block_id": "i1", "text": {"type": "mrkdwn", "text": ":fire: *<https://app.incident.io/acme/incidents/2481|INC-2481: Checkout payments failing>*"}},
+      {"type": "section", "block_id": "i2", "fields": [
+        {"type": "mrkdwn", "text": "*Status*\nInvestigating"},
+        {"type": "mrkdwn", "text": "*Severity*\nMajor"},
+        {"type": "mrkdwn", "text": "*Incident lead*\n<@U03LEAD001>"},
+        {"type": "mrkdwn", "text": "*Affected services*\ncheckout-api"}
+      ]},
+      {"type": "context", "block_id": "i3", "elements": [{"type": "mrkdwn", "text": "Reported by <@U04REPORT1> · Declared: <!date^1792504920^{date_short_pretty} at {time}|Oct 20, 2026 2:02 PM UTC>"}]}
+    ],
+    "ts": "1792504933.000200",
+    "channel": "C08INCIDENTS",
+    "event_ts": "1792504933.000200",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "incident_io",
+    "title": "INC-2481: Checkout payments failing",
+    "rule_name": "Checkout payments failing",
+    "status": "firing",
+    "raw_status": "Investigating",
+    "severity": "Major",
+    "service": "checkout-api",
+    "incident_id": "INC-2481",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "url": "https://app.incident.io/acme/incidents/2481"
+  }
+}

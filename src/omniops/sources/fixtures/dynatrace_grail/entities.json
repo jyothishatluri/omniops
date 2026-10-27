@@ -1,0 +1,67 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "ttlSeconds": 300,
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "canonicalQuery": "smartscapeNodes SERVICE | limit 1000 | fields id, type, name, tags",
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 37,
+    "locale": "en_US",
+    "query": "smartscapeNodes SERVICE | limit 1000 | fields id, type, name, tags",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 1840,
+    "scannedBytes": 1048576,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "id": "SERVICE-5D53A2A6A1F2C3B4",
+    "type": "SERVICE",
+    "name": "checkout-service",
+    "tags": [
+     "env:prod",
+     "team:payments"
+    ]
+   },
+   {
+    "id": "SERVICE-9A1B2C3D4E5F6071",
+    "type": "SERVICE",
+    "name": "payment-service",
+    "tags": [
+     "env:prod"
+    ]
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     1
+    ],
+    "mappings": {
+     "id": {
+      "type": "smartscape_id"
+     },
+     "type": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "tags": {
+      "type": "array"
+     }
+    }
+   }
+  ]
+ }
+}

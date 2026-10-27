@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 400,
+    "message": "Request had invalid filter: unknown term 'status:'",
+    "status": "INVALID_ARGUMENT"
+  }
+}

@@ -1,0 +1,16 @@
+{
+ "values": [
+  {
+   "value": "{host=\"host-123\",app=\"foo\"}",
+   "hits": 34980
+  },
+  {
+   "value": "{host=\"host-124\",app=\"bar\"}",
+   "hits": 32892
+  },
+  {
+   "value": "{host=\"host-125\",app=\"baz\"}",
+   "hits": 32877
+  }
+ ]
+}

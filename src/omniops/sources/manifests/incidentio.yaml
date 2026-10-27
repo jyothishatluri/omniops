@@ -1,0 +1,1238 @@
+# incident.io public API as SQL tables. Direct REST, no MCP.
+#
+# Every path, parameter name, time format and response path below was checked against the official
+# API reference on docs.incident.io/api-reference (pages generated from incident.io's OpenAPI
+# specification; per-tag specs at docs.incident.io/openapi/tags/<tag>.json, full spec at
+# https://api.incident.io/v1/openapiV3.json). The offline fixtures in
+# src/omniops/sources/fixtures/incidentio/ are the 200-response examples of those specs (the
+# "Response" blocks rendered on each reference page), verbatim. Research notes:
+# docs/sources/incidentio.md.
+#
+# Conventions:
+#   - Auth `Authorization: Bearer <API key>`; one host for every account: https://api.incident.io.
+#   - Filters use deep-object query parameters: status_category[one_of]=live, created_at[gte]=...,
+#     repeated for several values (status_category[one_of]=live&status_category[one_of]=triage).
+#   - Cursor pagination: page_size + after (= pagination_meta.after). Keep paging until no `after`
+#     comes back; short or empty pages do NOT mean the end (documented).
+#   - Current endpoint versions: incidents/updates/alerts/escalations/schedules/users v2,
+#     follow-ups v3 (GET /v2/follow_ups is deprecated), catalog v3, severities/statuses v1.
+source: incidentio
+display_name: incident.io
+vendor: incident.io Ltd
+description: >-
+  incident.io API: incidents (list with status-category / severity / type / mode filters, and
+  detail), incident updates, timeline items, activity log, participants, follow-ups, attached
+  external resources, related incidents, post-mortem documents and their text, alerts
+  (incident.io Alerts / On-call) and their links to incidents, escalations, maintenance windows,
+  on-call schedules (current shifts, rendered entries, overrides), severities, incident
+  statuses, incident types, custom fields, users and the catalog.
+docs_url: https://docs.incident.io/api-reference/introduction
+categories: [incidents, alerts, oncall, catalog]
+base_url: "{{ (env.INCIDENTIO_API_URL or 'https://api.incident.io') | trim('/') }}"
+ui_base_url: "https://app.incident.io"
+env:
+  - {name: INCIDENTIO_API_KEY, description: "API key from Settings > API keys (choose read/'View data' permissions; account-level or team-scoped). Sent as 'Authorization: Bearer <key>'.", secret: true}
+  - {name: INCIDENTIO_API_URL, description: "API base URL (default https://api.incident.io; there is no regional host)", default: "https://api.incident.io"}
+required_env: [INCIDENTIO_API_KEY]
+auth:
+  type: bearer
+  token: "{{ env.INCIDENTIO_API_KEY }}"
+errors:
+  - {path: "$.errors", non_empty: true, message: "$.errors", hint: "incident.io rejected the request (validation_error / not_found ...): fix the field named in errors[].source.field"}
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 1000
+  max_retries: 3
+  notes: >-
+    Default 1,200 requests/minute per API key (token bucket refilling at 20/s). Lower per-endpoint
+    limits: List incidents (v1 and v2) 60 burst / 60 per minute; Show post-mortem document content
+    60/min; Preview schedule entries 6/min. Some limits are shared by all keys of the account.
+    Over the limit: HTTP 429 with Retry-After (seconds) and X-RateLimit-Limit / -Remaining /
+    -Used / -Reset headers; body {"type": "too_many_requests", "rate_limit": {...}}.
+retention: {}
+pitfalls:
+  - "List incidents is limited to 60 requests/minute per key (burst 60): page with the maximum page_size (250, used here) and narrow by status_category / severity / time instead of re-querying."
+  - "Test and tutorial incidents are excluded by default (mode defaults to standard + retrospective). Filter mode = 'test' explicitly to see test incidents."
+  - "Status categories in the API differ from the UI names: live = 'Active', learning = 'Post-incident'; also triage, paused, closed, declined, canceled, merged. Severity, status, incident type, custom field and role filters take IDs (look them up in incidentio_severities / incidentio_incident_statuses), so the SQL columns severity / status carry NAMES that are filtered in SQL."
+  - "Incident and alert IDs are ULIDs (01FDAG4SAP5TYPT98WGR2N7W91); incident references look like INC-123 and GET /v2/incidents/{id} also accepts the numeric part (123)."
+  - "Team-scoped API keys only see their teams' private data; other incidents are silently absent."
+query_languages: {}
+
+tables:
+  # ----------------------------------------------------------------------------------------------
+  # Incidents
+  # ----------------------------------------------------------------------------------------------
+  - name: incidentio_incidents
+    title: Incidents (created in a time window)
+    description: >-
+      One row per incident created in the ts window, newest first (GET /v2/incidents,
+      sort_by=created_at_newest_first, page_size 250). The window is pushed down at DAY granularity
+      as created_at[gte]=<start date> and created_at[lte]=<end date + 1 day> (the documented date
+      format) and re-applied exactly in SQL. Optional pushdown: status_category (triage | live |
+      learning | paused | closed | declined | canceled | merged; IN allowed), severity_id,
+      status_id, incident_type_id (IDs; IN allowed), mode (standard | retrospective | test |
+      tutorial | stream). Columns include status, severity, type, lead, Slack channel, custom
+      fields and timestamps.
+    kind: incidents
+    request:
+      method: GET
+      path: /v2/incidents
+      query:
+        "created_at[gte]": "{{ time.start | strftime('%Y-%m-%d') }}"
+        "created_at[lte]": "{{ ((time.end | epoch_s) + 86400) | strftime('%Y-%m-%d') }}"
+        "status_category[one_of]": "{{ filters.status_category | as_list }}"
+        "severity[one_of]": "{{ filters.severity_id | as_list }}"
+        "status[one_of]": "{{ filters.status_id | as_list }}"
+        "incident_type[one_of]": "{{ filters.incident_type_id | as_list }}"
+        "mode[one_of]": "{{ filters.mode | as_list }}"
+        sort_by: created_at_newest_first
+        page_size: 250
+    filters:
+      - {column: status_category, ops: ["=", "in"], fan_out: false, description: "triage | live (UI 'Active') | learning (UI 'Post-incident') | paused | closed | declined | canceled | merged", examples: [live]}
+      - {column: severity_id, ops: ["=", "in"], fan_out: false, description: "Severity ID(s) (incidentio_severities.id)", examples: [01FCNDV6P870EA6S7TK1DSYDG0]}
+      - {column: status_id, ops: ["=", "in"], fan_out: false, description: "Incident status ID(s) (incidentio_incident_statuses.id)", examples: [01FCNDV6P870EA6S7TK1DSYD5H]}
+      - {column: incident_type_id, ops: ["=", "in"], fan_out: false, description: "Incident type ID(s)", examples: [01FCNDV6P870EA6S7TK1DSYDG0]}
+      - {column: mode, ops: ["=", "in"], fan_out: false, description: "standard | retrospective | test | tutorial | stream (default standard + retrospective)", examples: [standard]}
+    time: {column: ts, default_lookback: 7d, max_window: 365d}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.incidents[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: reference, path: reference, description: "INC-123"}
+      - {name: title, path: name}
+      - {name: summary, path: summary}
+      - {name: status, path: incident_status.name, description: "Status name (account-defined)"}
+      - {name: status_category, path: incident_status.category}
+      - {name: status_id, path: incident_status.id}
+      - {name: severity, path: severity.name, description: "Severity name (account-defined, e.g. Minor / Major / Critical)"}
+      - {name: severity_rank, type: BIGINT, path: severity.rank, description: "Higher rank = more severe"}
+      - {name: severity_id, path: severity.id}
+      - {name: incident_type, path: incident_type.name}
+      - {name: incident_type_id, path: incident_type.id}
+      - {name: mode, path: mode}
+      - {name: visibility, path: visibility, description: "public | private"}
+      - {name: lead, expr: "((_.incident_role_assignments or []) | selectattr('role.role_type', 'equalto', 'lead') | map(attribute='assignee.name') | first)", description: "Incident lead's name"}
+      - {name: roles, type: JSON, path: incident_role_assignments, description: "[{role, assignee}]"}
+      - {name: creator, expr: "(_.creator.user.name if _.creator and _.creator.user else (_.creator.alert.title if _.creator and _.creator.alert else (_.creator.workflow.name if _.creator and _.creator.workflow else (_.creator.api_key.name if _.creator and _.creator.api_key else None))))", description: "User, alert, workflow or API key that declared the incident"}
+      - {name: custom_fields, type: JSON, path: custom_field_entries, description: "[{custom_field:{name,...}, values:[...]}]"}
+      - {name: timestamps, type: JSON, path: incident_timestamp_values, description: "[{incident_timestamp:{name}, value:{value}}] e.g. Impact started, Resolved"}
+      - {name: duration_metrics, type: JSON, path: duration_metrics}
+      - {name: team_ids, type: JSON, path: team_ids}
+      - {name: slack_channel, path: slack_channel_name}
+      - {name: slack_channel_id, path: slack_channel_id}
+      - {name: call_url, path: call_url}
+      - {name: external_issue_url, path: external_issue_reference.issue_permalink}
+      - {name: postmortem_document_url, path: postmortem_document_url}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: last_activity_at, type: TIMESTAMP, path: last_activity_at}
+      - {name: workload_minutes_total, type: DOUBLE, path: workload_minutes_total}
+      - {name: url, path: permalink}
+    sort_hint: "newest first (created_at_newest_first)"
+    pitfalls:
+      - "created_at filters are documented with DATES (created_at[lte]=2021-01-02, date_range=2024-12-02~2024-12-08); the pushdown is therefore a whole-day superset and the exact ts bounds are re-applied in SQL."
+      - "An incident declared before the window and still live is not in a ts window: use status_category = 'live' with a wide ts range (e.g. 90 days) for currently active incidents."
+    examples:
+      - sql: >-
+          SELECT ts, reference, title, status, severity, lead, slack_channel, url FROM incidentio_incidents
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 00:00:00'
+          ORDER BY ts DESC
+        description: Incidents declared on the day of an outage.
+      - sql: >-
+          SELECT ts, reference, title, severity, lead, url FROM incidentio_incidents
+          WHERE status_category IN ('live', 'triage') AND ts >= now() - INTERVAL 90 DAY ORDER BY severity_rank DESC, ts
+        description: Everything currently active or in triage.
+      - sql: >-
+          SELECT severity, count(*) AS incidents FROM incidentio_incidents
+          WHERE ts >= now() - INTERVAL 30 DAY AND title ILIKE '%payment%' GROUP BY severity ORDER BY incidents DESC
+        description: Prior incidents mentioning payments in the last 30 days.
+    fixtures:
+      - file: incidents.json
+        expect_rows: 1
+        expect_columns: {ts: "2021-08-17T13:28:57.801578Z", id: 01FDAG4SAP5TYPT98WGR2N7W91, reference: INC-123, title: "Our database is sad", status: Closed, status_category: triage, severity: Minor, severity_rank: 1, incident_type: "Production Outage", mode: standard, lead: "Lisa Karlin Curtis", creator: "Lisa Karlin Curtis", slack_channel: inc-165-green-parrot, url: "https://app.incident.io/incidents/123"}
+        note: "Official 200 response example of GET /v2/incidents (Incidents V2 List; docs.incident.io/openapi/tags/incidents-v2.json), verbatim."
+      - file: error_body.json
+        expect_error: "A severity is required"
+        note: "Error body documented on https://docs.incident.io/api-reference/introduction#errors (normally sent with HTTP 422); proves the source-wide errors rule fires if such a body ever arrives with a 2xx status."
+    ui_link: "{{ ui_base_url }}/incidents"
+    docs_url: https://docs.incident.io/api-reference/incidents-v2/list
+
+  - name: incidentio_incident
+    title: One incident by ID or number
+    description: "Full incident (GET /v2/incidents/{id}). Filter on incident = the ULID or the numeric part of the reference (123 for INC-123); IN up to 20. The id column always holds the ULID."
+    kind: incidents
+    request:
+      method: GET
+      path: "/v2/incidents/{{ filters.incident }}"
+    filters:
+      - {column: incident, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID or reference number (123 for INC-123)", examples: [01FDAG4SAP5TYPT98WGR2N7W91]}
+    response:
+      rows_path: "$.incident"
+    columns:
+      - {name: incident, filter_only: true, description: "The ID or number you asked for"}
+      - {name: id, path: id}
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: reference, path: reference}
+      - {name: title, path: name}
+      - {name: summary, path: summary}
+      - {name: status, path: incident_status.name}
+      - {name: status_category, path: incident_status.category}
+      - {name: severity, path: severity.name}
+      - {name: severity_rank, type: BIGINT, path: severity.rank}
+      - {name: incident_type, path: incident_type.name}
+      - {name: mode, path: mode}
+      - {name: lead, expr: "((_.incident_role_assignments or []) | selectattr('role.role_type', 'equalto', 'lead') | map(attribute='assignee.name') | first)"}
+      - {name: roles, type: JSON, path: incident_role_assignments}
+      - {name: custom_fields, type: JSON, path: custom_field_entries}
+      - {name: timestamps, type: JSON, path: incident_timestamp_values}
+      - {name: duration_metrics, type: JSON, path: duration_metrics}
+      - {name: debriefs, type: JSON, path: debriefs}
+      - {name: slack_channel, path: slack_channel_name}
+      - {name: call_url, path: call_url}
+      - {name: external_issue_url, path: external_issue_reference.issue_permalink}
+      - {name: postmortem_document_url, path: postmortem_document_url}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: url, path: permalink}
+    examples:
+      - sql: "SELECT reference, title, summary, status, severity, lead, timestamps, custom_fields FROM incidentio_incident WHERE incident = '123'"
+        description: Everything about INC-123 (impact timestamps, custom fields such as affected service).
+    fixtures:
+      - file: incident.json
+        filters: {incident: "123"}
+        expect_rows: 1
+        expect_columns: {id: 01FDAG4SAP5TYPT98WGR2N7W91, reference: INC-123, severity: Minor, lead: "Lisa Karlin Curtis", summary: "Our database is really really sad, and we don't know why yet."}
+        note: "Official 200 response example of GET /v2/incidents/{id} (Incidents V2 Show; incidents-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incidents-v2/show
+
+  - name: incidentio_incident_updates
+    title: Incident updates (status / severity changes with messages)
+    description: >-
+      One row per incident update: the message responders posted, the new status and severity,
+      and who posted it. Filter incident_id (IN up to 20) for one incident; without it, the
+      account's updates are listed (up to 1,250). No server-side time filter: filter ts in SQL.
+    kind: events
+    request:
+      method: GET
+      path: /v2/incident_updates
+      query:
+        incident_id: "{{ filters.incident_id }}"
+        page_size: 250
+    filters:
+      - {column: incident_id, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID", examples: [01FCNDV6P870EA6S7TK1DSYDG0]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.incident_updates[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: incident_id, path: incident_id}
+      - {name: message, path: message}
+      - {name: new_status, path: new_incident_status.name}
+      - {name: new_status_category, path: new_incident_status.category}
+      - {name: new_severity, path: new_severity.name}
+      - {name: author, expr: "(_.updater.user.name if _.updater and _.updater.user else (_.updater.workflow.name if _.updater and _.updater.workflow else (_.updater.api_key.name if _.updater and _.updater.api_key else None)))"}
+      - {name: merged_into_incident_id, path: merged_into_incident_id}
+    examples:
+      - sql: "SELECT ts, author, new_status, new_severity, message FROM incidentio_incident_updates WHERE incident_id = '01FCNDV6P870EA6S7TK1DSYDG0' ORDER BY ts"
+        description: The incident's narrative as posted by responders.
+    fixtures:
+      - file: incident_updates.json
+        filters: {incident_id: 01FCNDV6P870EA6S7TK1DSYDG0}
+        expect_rows: 1
+        expect_columns: {ts: "2021-08-17T13:28:57.801578Z", message: "We're working on a fix, hoping to ship in the next 30 minutes", new_status: Closed, new_severity: Minor, author: "Lisa Karlin Curtis"}
+        note: "Official 200 response example of GET /v2/incident_updates (Incident Updates V2 List; incident-updates-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-updates-v2/list
+
+  - name: incidentio_timeline_items
+    title: Incident timeline items
+    description: >-
+      One row per timeline item of an incident (and its streams), oldest first, in their current
+      (edited) state: title, description, timestamp, author. incident_id required (IN up to 10).
+    kind: events
+    request:
+      method: GET
+      path: /v2/incident_timeline_items
+      query:
+        incident_id: "{{ filters.incident_id }}"
+        page_size: 250
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Incident ID", examples: [01G0J1EXE7AXZ2C93K61WBPYEH]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.incident_timeline_items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, description: "When the event happened"}
+      - {name: id, path: id}
+      - {name: title, path: title}
+      - {name: message, path: description, description: "Markdown description"}
+      - {name: author, expr: "(_.creator.user.name if _.creator and _.creator.user else (_.creator.workflow.name if _.creator and _.creator.workflow else (_.creator.api_key.name if _.creator and _.creator.api_key else None)))"}
+      - {name: incident_id, path: incident_id, description: "Incident (or stream) the item belongs to"}
+      - {name: activity_log_id, path: activity_log_id}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+    sort_hint: "oldest first (timestamp, then id)"
+    examples:
+      - sql: "SELECT ts, author, title, message FROM incidentio_timeline_items WHERE incident_id = '01G0J1EXE7AXZ2C93K61WBPYEH' ORDER BY ts"
+        description: The curated incident timeline (rollbacks, mitigations, findings).
+    fixtures:
+      - file: timeline_items.json
+        filters: {incident_id: 01G0J1EXE7AXZ2C93K61WBPYEH}
+        expect_rows: 1
+        expect_columns: {ts: "2026-09-01T15:30:00Z", title: "Rolled back payments-api", message: "Rolled back **payments-api** to v411 after error rate hit 12%.", author: "Lisa Karlin Curtis", incident_id: 01G0J1EXE7AXZ2C93K61WBPYEH}
+        note: "Official 200 response example of GET /v2/incident_timeline_items (Incident Timeline Items V2 List; incident-timeline-items-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-timeline-items-v2/list
+
+  - name: incidentio_activity_log
+    title: Incident activity log
+    description: >-
+      One row per activity log entry of an incident (and its streams), oldest first: status
+      changes, role updates, alerts attached, escalations, follow-ups, custom field changes,
+      workflow runs, renames, merges. incident_id required (IN up to 10). The type-specific
+      payload is in content (JSON keyed by the entry type).
+    kind: events
+    request:
+      method: GET
+      path: /v2/incident_activity_log_entries
+      query:
+        incident_id: "{{ filters.incident_id }}"
+        page_size: 250
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Incident ID", examples: [01G0J1EXE7AXZ2C93K61WBPYEH]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.incident_activity_log_entries[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: occurred_at}
+      - {name: id, path: id}
+      - {name: type, path: type, description: "e.g. incident_update, status_change, role_update, alert_attached_to_incident, escalation_created, workflow_ran"}
+      - {name: title, path: title}
+      - {name: content, type: JSON, path: content, description: "Type-specific payload"}
+      - {name: incident_id, path: incident_id}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+    pitfalls:
+      - "Chat messages, channel joins/leaves and call transcript fragments are never returned here."
+    examples:
+      - sql: "SELECT ts, type, title FROM incidentio_activity_log WHERE incident_id = '01G0J1EXE7AXZ2C93K61WBPYEH' ORDER BY ts"
+        description: Every recorded change on the incident, in order.
+    fixtures:
+      - file: activity_log.json
+        filters: {incident_id: 01G0J1EXE7AXZ2C93K61WBPYEH}
+        expect_rows: 1
+        expect_columns: {ts: "2026-09-01T15:30:00Z", id: 01FCNDV6P870EA6S7TK1DSYDG0, type: incident_update, title: "Status changed from Investigating to Monitoring", incident_id: 01G0J1EXE7AXZ2C93K61WBPYEH}
+        note: "Official 200 response example of GET /v2/incident_activity_log_entries (Incident Activity Log Entries V2 List; incident-activity-log-entries-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-activity-log-entries-v2/list
+
+  - name: incidentio_incident_participants
+    title: Incident participants
+    description: One row per participant of an incident, split into active (helping) and passive (observing) with their participant type. incident_id required.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/incident_participants
+      query:
+        incident_id: "{{ filters.incident_id }}"
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Incident ID", examples: [01FCNDV6P870EA6S7TK1DSYD5H]}
+    response:
+      rows_path: "$.incident_participants"
+      expand:
+        - {entries: ".", as: g}
+        - {explode: "@g.value", as: p}
+    columns:
+      - {name: participation, path: "@g.key", description: "active | passive"}
+      - {name: participant_type, path: "@p.participant_type"}
+      - {name: user, path: "@p.user.name"}
+      - {name: email, path: "@p.user.email"}
+      - {name: user_id, path: "@p.user.id"}
+      - {name: incident_id, filter_only: true}
+    examples:
+      - sql: "SELECT participation, participant_type, user FROM incidentio_incident_participants WHERE incident_id = '01FCNDV6P870EA6S7TK1DSYD5H'"
+        description: Who worked the incident.
+    fixtures:
+      - file: incident_participants.json
+        filters: {incident_id: 01FCNDV6P870EA6S7TK1DSYD5H}
+        expect_rows: 2
+        expect_columns: {participation: active, participant_type: observer, user: "Lisa Karlin Curtis"}
+        note: "Official 200 response example of GET /v2/incident_participants (IncidentParticipants V2 List; incident-participants-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-participants-v2/list
+
+  - name: incidentio_follow_ups
+    title: Follow-ups (post-incident action items)
+    description: >-
+      One row per follow-up. With incident_id: every follow-up of that incident (no time
+      filter). Without it: follow-ups created in the ts window (created_at[gte] / [lte], RFC3339).
+      Optional assignee_team_id and incident_mode. Ordered by follow-up ID (oldest first). Use it
+      to check whether a previous incident's fix was ever completed.
+    kind: generic
+    request:
+      method: GET
+      path: /v3/follow_ups
+      query:
+        incident_id: "{{ filters.incident_id }}"
+        assignee_team_id: "{{ filters.assignee_team_id }}"
+        incident_mode: "{{ filters.incident_mode }}"
+        "created_at[gte]": "{{ None if filters.incident_id else (time.start | rfc3339) }}"
+        "created_at[lte]": "{{ None if filters.incident_id else (time.end | rfc3339) }}"
+        page_size: 250
+    filters:
+      - {column: incident_id, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID", examples: [01FCNDV6P870EA6S7TK1DSYDG0]}
+      - {column: assignee_team_id, description: "Team ID the follow-ups are assigned to", examples: [01FCNDV6P870EA6S7TK1DSYDG0]}
+      - {column: incident_mode, description: "standard | retrospective | test | tutorial | stream (default standard + retrospective)", examples: [standard]}
+    time: {column: ts, default_lookback: 90d, max_window: 365d}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.follow_ups[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: incident_id, path: incident_id}
+      - {name: title, path: title}
+      - {name: description, path: description}
+      - {name: status, path: status, description: "outstanding | completed | deleted | not_doing"}
+      - {name: priority, path: priority.name}
+      - {name: category, path: category.name}
+      - {name: labels, type: JSON, path: labels}
+      - {name: assignee, path: assignee.name}
+      - {name: assignee_team, path: assignee_team.name}
+      - {name: assignee_team_id, path: assignee_team.id}
+      - {name: completed_at, type: TIMESTAMP, path: completed_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: external_issue, path: external_issue_reference.issue_name}
+      - {name: url, path: external_issue_reference.issue_permalink, description: "Linked issue (Jira, Linear ...)"}
+      - {name: incident_mode, filter_only: true}
+    pitfalls:
+      - "A ts predicate is ignored server-side when incident_id is given (all of the incident's follow-ups are fetched), but still applied in SQL."
+    examples:
+      - sql: "SELECT title, status, assignee, priority, url FROM incidentio_follow_ups WHERE incident_id = '01FCNDV6P870EA6S7TK1DSYDG0'"
+        description: Action items from a previous incident (were they done?).
+      - sql: "SELECT ts, title, assignee_team, priority FROM incidentio_follow_ups WHERE status = 'outstanding' AND ts >= now() - INTERVAL 180 DAY ORDER BY ts"
+        description: Outstanding follow-ups of the last six months.
+    fixtures:
+      - file: follow_ups.json
+        expect_rows: 1
+        expect_columns: {ts: "2021-08-17T13:28:57.801578Z", title: "Cat is stuck in the tree", status: outstanding, priority: Urgent, category: Infrastructure, assignee: "Lisa Karlin Curtis", external_issue: INC-123, labels: '["bug","urgent"]'}
+        note: "Official 200 response example of GET /v3/follow_ups (Follow-ups V3 List; follow-ups-v3.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/follow-ups-v3/list
+
+  - name: incidentio_incident_attachments
+    title: External resources attached to incidents (PagerDuty, Sentry, GitHub, Jira ...)
+    description: >-
+      One row per external resource attached to an incident (GET /v1/incident_attachments): a
+      PagerDuty incident, Opsgenie / JSM alert, Datadog monitor alert, GitHub pull request, GitLab
+      merge request, Sentry issue, Jira issue, Statuspage incident, Zendesk ticket ... with its
+      title and link. Filter incident_id for one incident's attachments, OR resource_type +
+      external_id to find which incident.io incident references an external object (e.g. the
+      incident linked to PagerDuty incident Q1ABCD). One of incident_id / external_id is required.
+    kind: entities
+    request:
+      method: GET
+      path: /v1/incident_attachments
+      query:
+        incident_id: "{{ filters.incident_id }}"
+        external_id: "{{ filters.external_id }}"
+        resource_type: "{{ filters.resource_type }}"
+    filters:
+      - {column: incident_id, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID (ULID)", examples: [01FCNDV6P870EA6S7TK1DSYD5H]}
+      - {column: external_id, ops: ["=", "in"], max_fan_out: 20, description: "ID of the resource in the external system (needs resource_type)", examples: ["123"]}
+      - {column: resource_type, description: "pager_duty_incident | opsgenie_alert | datadog_monitor_alert | github_pull_request | gitlab_merge_request | sentry_issue | jira_issue | jsm_alert | atlassian_statuspage_incident | statuspage_incident | zendesk_ticket | salesforce_case | pylon_issue | google_calendar_event | outlook_calendar_event | slack_file | arbitrary_url | scrubbed", examples: [pager_duty_incident]}
+    require_one_of: [[incident_id, external_id]]
+    response:
+      rows_path: "$.incident_attachments[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: incident_id, path: incident_id}
+      - {name: resource_type, path: resource.resource_type}
+      - {name: external_id, path: resource.external_id}
+      - {name: title, path: resource.title}
+      - {name: url, path: resource.permalink}
+    pitfalls:
+      - "external_id must be sent together with resource_type (documented: either an incident ID, or an external resource type AND external ID)."
+      - "Attachments only exist when someone (or a workflow) attached the resource; absence does not mean the incidents are unrelated."
+    examples:
+      - sql: "SELECT resource_type, title, url FROM incidentio_incident_attachments WHERE incident_id = '01FCNDV6P870EA6S7TK1DSYD5H'"
+        description: Pull requests, Sentry issues and pages linked to the incident (follow the links into the other sources).
+      - sql: "SELECT incident_id, title FROM incidentio_incident_attachments WHERE resource_type = 'pager_duty_incident' AND external_id = '123'"
+        description: Which incident.io incident tracks this PagerDuty incident?
+    fixtures:
+      - file: incident_attachments.json
+        filters: {incident_id: 01FCNDV6P870EA6S7TK1DSYD5H}
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYD5H, incident_id: 01FCNDV6P870EA6S7TK1DSYD5H, resource_type: pager_duty_incident, external_id: "123", title: "The database has gone down", url: "https://my.pagerduty.com/incidents/ABC"}
+        note: "Official 200 response example of GET /v1/incident_attachments (Incident Attachments V1 List; incident.io OpenAPI spec https://api.incident.io/v1/openapiV3.json, rendered on the reference page), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-attachments-v1/list
+
+  - name: incidentio_incident_relationships
+    title: Related incidents
+    description: >-
+      One row per incident related to the given one (GET /v1/incident_relationships):
+      responders link incidents that share a cause or impact. incident_id required (IN up to 10).
+    kind: incidents
+    request:
+      method: GET
+      path: /v1/incident_relationships
+      query:
+        incident_id: "{{ filters.incident_id }}"
+        page_size: 250
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Incident ID", examples: [01FCNDV6P870EA6S7TK1DSYD5H]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.incident_relationships[*]"
+    columns:
+      - {name: id, path: id, description: "Relationship ID"}
+      - {name: related_incident_id, path: incident.id}
+      - {name: related_reference, expr: "('INC-' ~ _.incident.external_id) if _.incident and _.incident.external_id else None", description: "INC-<number> of the related incident"}
+      - {name: title, path: incident.name}
+      - {name: incident_id, filter_only: true}
+    examples:
+      - sql: "SELECT related_reference, title, related_incident_id FROM incidentio_incident_relationships WHERE incident_id = '01FCNDV6P870EA6S7TK1DSYD5H'"
+        description: Incidents responders linked to this one (shared root cause, duplicate impact).
+    fixtures:
+      - file: incident_relationships.json
+        filters: {incident_id: 01FCNDV6P870EA6S7TK1DSYD5H}
+        expect_rows: 1
+        expect_columns: {related_incident_id: 01FCNDV6P870EA6S7TK1DSYD5H, related_reference: INC-123, title: "The database is down", incident_id: 01FCNDV6P870EA6S7TK1DSYD5H}
+        note: "Official 200 response example of GET /v1/incident_relationships (Incident Relationships V1 List; incident.io OpenAPI spec), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-relationships-v1/list
+
+  - name: incidentio_postmortem_documents
+    title: Post-mortem documents (metadata)
+    description: >-
+      One row per post-mortem document (GET /v1/postmortem_documents, newest first): title,
+      status, type (in_app / external), link and exported copies (Notion, Google Docs ...).
+      Optional incident_id. Read a document's text with incidentio_postmortem_content. Use it to
+      learn how a similar past incident was explained and fixed.
+    kind: entities
+    request:
+      method: GET
+      path: /v1/postmortem_documents
+      query:
+        incident_id: "{{ filters.incident_id }}"
+        sort_by: created_at_newest_first
+        page_size: 250
+    filters:
+      - {column: incident_id, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID", examples: [01GBA8J19SMXQWPJMX3P2ESCVG]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 4}
+    response:
+      rows_path: "$.postmortem_documents[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id, description: "Document ID (the document_id of incidentio_postmortem_content)"}
+      - {name: incident_id, path: incident_id}
+      - {name: title, path: title}
+      - {name: status, path: status, description: "in_progress | in_review | completed"}
+      - {name: type, path: type, description: "in_app | external"}
+      - {name: editors, type: JSON, path: "editors[*].name"}
+      - {name: exported_urls, type: JSON, path: exported_urls}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: url, path: document_url}
+    sort_hint: "newest first (created_at_newest_first)"
+    examples:
+      - sql: "SELECT ts, title, status, url FROM incidentio_postmortem_documents WHERE ts >= now() - INTERVAL 180 DAY AND title ILIKE '%database%' ORDER BY ts DESC"
+        description: Post-mortems of earlier database incidents (then read the content of the relevant one).
+      - sql: "SELECT id, title, status, url FROM incidentio_postmortem_documents WHERE incident_id = '01GBA8J19SMXQWPJMX3P2ESCVG'"
+        description: The post-mortem of a given incident.
+    fixtures:
+      - file: postmortem_documents.json
+        expect_rows: 1
+        expect_columns: {ts: "2021-08-17T13:28:57.801578Z", id: 01GDZEW57FDA1K4S63MGMQ5DS9, incident_id: 01GBA8J19SMXQWPJMX3P2ESCVG, title: "INC-123: Database is sad", status: in_progress, type: in_app, editors: '["Lisa Karlin Curtis"]', updated_at: null, url: "https://app.incident.io/my-org/incidents/123/post-mortems/01GDZEW57FDA1K4S63MGMQ5DS9"}
+        note: "Official 200 response example of GET /v1/postmortem_documents (PostmortemDocuments V1 List; incident.io OpenAPI spec), verbatim (its updated_at placeholder 'abc123' is not a timestamp, so the column is NULL)."
+    docs_url: https://docs.incident.io/api-reference/postmortemdocuments-v1/list
+
+  - name: incidentio_postmortem_content
+    title: Post-mortem document text (markdown)
+    description: >-
+      The full text of one post-mortem rendered as markdown (GET
+      /v1/postmortem_documents/{id}/content): summary, timeline, root cause, follow-ups. One row
+      per document; document_id required (IN up to 5; IDs from incidentio_postmortem_documents).
+    kind: text
+    request:
+      method: GET
+      path: "/v1/postmortem_documents/{{ filters.document_id }}/content"
+    filters:
+      - {column: document_id, required: true, ops: ["=", "in"], max_fan_out: 5, description: "Post-mortem document ID", examples: [01GDZEW57FDA1K4S63MGMQ5DS9]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: document_id, filter_only: true}
+      - {name: message, path: markdown, description: "Document content as markdown"}
+    pitfalls:
+      - "Limited to 60 requests/minute (burst 60); the API key needs the in_app_postmortems.copy_as_markdown scope. Only in-app post-mortems have content here."
+    examples:
+      - sql: "SELECT message FROM incidentio_postmortem_content WHERE document_id = '01GDZEW57FDA1K4S63MGMQ5DS9'"
+        description: Read how a previous incident was diagnosed and fixed.
+    fixtures:
+      - file: postmortem_content.json
+        filters: {document_id: 01GDZEW57FDA1K4S63MGMQ5DS9}
+        expect_rows: 1
+        expect_columns: {document_id: 01GDZEW57FDA1K4S63MGMQ5DS9, message: "# Incident Postmortem\n\n## Summary\n\nThis incident was investigated by Alice Smith and affected the API Gateway service.\n\n## Timeline\n\n### 2024-06-15 (UTC)\n\n* [10:30] **Alert fired**\n\n* [10:35] **Incident declared**\n\n## Follow-ups\n\n* **Add monitoring** - Assignee: Alice Smith\n"}
+        note: "Official 200 response example of GET /v1/postmortem_documents/{id}/content (PostmortemDocuments V1 ShowContent; incident.io OpenAPI spec), verbatim."
+    docs_url: https://docs.incident.io/api-reference/postmortemdocuments-v1/show-content
+
+  # ----------------------------------------------------------------------------------------------
+  # Alerts and escalations
+  # ----------------------------------------------------------------------------------------------
+  - name: incidentio_alerts
+    title: Alerts created in a time window
+    description: >-
+      One row per incident.io alert created in the ts window (created_at[gte] / [lte], RFC3339):
+      title, status (firing | resolved), dedup key, source, attributes (service ...), tags.
+      Optional status, deduplication_key, alert_source_id (IN), tag (IN, case-insensitive name).
+      page_size max 50.
+    kind: alerts
+    request:
+      method: GET
+      path: /v2/alerts
+      query:
+        "created_at[gte]": "{{ time.start | rfc3339 }}"
+        "created_at[lte]": "{{ time.end | rfc3339 }}"
+        "status[one_of]": "{{ filters.status | as_list }}"
+        "deduplication_key[is]": "{{ filters.deduplication_key }}"
+        "alert_source[one_of]": "{{ filters.alert_source_id | as_list }}"
+        "tags[one_of]": "{{ filters.tag | as_list }}"
+        "include_maintenance_window[is]": "{{ None if filters.include_maintenance_window is none else (filters.include_maintenance_window | string | lower) }}"
+        page_size: 50
+    filters:
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "firing | resolved", examples: [firing]}
+      - {column: include_maintenance_window, type: BOOLEAN, description: "true = also return alerts caught by a maintenance window (sent as include_maintenance_window[is]; the documented default is not stated)", examples: ["true"]}
+      - {column: deduplication_key, description: "Alert deduplication key", examples: ["4293868629"]}
+      - {column: alert_source_id, ops: ["=", "in"], fan_out: false, description: "Alert source ID(s)", examples: [01GW2G3V0S59R238FAHPDS1R66]}
+      - {column: tag, ops: ["=", "in"], fan_out: false, description: "Tag name(s) (any of)", examples: [noisy]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 20}
+    response:
+      rows_path: "$.alerts[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: title, path: title}
+      - {name: description, path: description}
+      - {name: status, path: status, description: "firing | resolved"}
+      - {name: service, expr: "((_.attributes or []) | selectattr('attribute.name', 'equalto', 'service') | map(attribute='value.label') | first)", description: "Label of the alert attribute named 'service', if configured"}
+      - {name: deduplication_key, path: deduplication_key}
+      - {name: alert_source_id, path: alert_source_id}
+      - {name: alert_group_ids, type: JSON, path: alert_group_ids}
+      - {name: tags, type: JSON, path: "tags[*].name"}
+      - {name: tag, filter_only: true}
+      - {name: include_maintenance_window, type: BOOLEAN, filter_only: true}
+      - {name: attributes, type: JSON, path: attributes, description: "[{attribute:{name,type}, value:{label, literal, catalog_entry}}]"}
+      - {name: resolved_at, type: TIMESTAMP, path: resolved_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: url, path: source_url, description: "Link back to the alert in the source tool"}
+    pitfalls:
+      - "Only alerts ingested by incident.io Alerts (alert sources) appear; incidents declared without alerts have none."
+      - "The docs show created_at with dates (created_at[gte]=2025-01-01) and updated_at with full timestamps; this table sends RFC3339 timestamps for created_at as well."
+      - "Alerts held by a maintenance window may not be listed unless include_maintenance_window = true (the API documents the filter but not its default); check incidentio_maintenance_windows when an alert seems missing."
+    examples:
+      - sql: >-
+          SELECT ts, title, status, service, deduplication_key FROM incidentio_alerts
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00' ORDER BY ts
+        description: Alerts that fired around the incident.
+      - sql: "SELECT title, count(*) AS n, min(ts) AS first_seen FROM incidentio_alerts WHERE ts >= now() - INTERVAL 7 DAY GROUP BY title ORDER BY n DESC LIMIT 20"
+        description: Noisiest alerts of the week (has this fired before?).
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {ts: "2021-08-17T13:28:57.801578Z", id: 01GW2G3V0S59R238FAHPDS1R66, title: "*errors.withMessage: PG::Error failed to connect", status: firing, service: "Payments Team", deduplication_key: "4293868629", tags: '["noisy"]', resolved_at: "2021-08-17T14:28:57.801578Z", url: "https://www.my-alerting-platform.com/alerts/my-alert-123"}
+        note: "Official 200 response example of GET /v2/alerts (Alerts V2 List; alerts-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/alerts-v2/list
+
+  - name: incidentio_firing_alerts
+    title: Alerts firing right now
+    description: Every alert currently in the firing state (status[one_of]=firing), whatever its age. Optional alert_source_id / tag filters. No time window.
+    kind: alerts
+    request:
+      method: GET
+      path: /v2/alerts
+      query:
+        "status[one_of]": firing
+        "alert_source[one_of]": "{{ filters.alert_source_id | as_list }}"
+        "tags[one_of]": "{{ filters.tag | as_list }}"
+        page_size: 50
+    filters:
+      - {column: alert_source_id, ops: ["=", "in"], fan_out: false, description: "Alert source ID(s)", examples: [01GW2G3V0S59R238FAHPDS1R66]}
+      - {column: tag, ops: ["=", "in"], fan_out: false, description: "Tag name(s)", examples: [noisy]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 20}
+    response:
+      rows_path: "$.alerts[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: title, path: title}
+      - {name: description, path: description}
+      - {name: status, path: status}
+      - {name: service, expr: "((_.attributes or []) | selectattr('attribute.name', 'equalto', 'service') | map(attribute='value.label') | first)"}
+      - {name: deduplication_key, path: deduplication_key}
+      - {name: alert_source_id, path: alert_source_id}
+      - {name: tags, type: JSON, path: "tags[*].name"}
+      - {name: tag, filter_only: true}
+      - {name: attributes, type: JSON, path: attributes}
+      - {name: url, path: source_url}
+    examples:
+      - sql: "SELECT ts, title, service, url FROM incidentio_firing_alerts ORDER BY ts DESC"
+        description: What is firing right now.
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {status: firing, service: "Payments Team"}
+        note: "Official 200 response example of GET /v2/alerts (Alerts V2 List; alerts-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/alerts-v2/list
+
+  - name: incidentio_incident_alerts
+    title: Alert <-> incident links
+    description: >-
+      One row per connection between an alert and an incident (GET /v2/incident_alerts): which
+      alerts were attached to an incident, or which incident an alert created/joined. Filter
+      incident_id or alert_id (one of them required).
+    kind: alerts
+    request:
+      method: GET
+      path: /v2/incident_alerts
+      query:
+        incident_id: "{{ filters.incident_id }}"
+        alert_id: "{{ filters.alert_id }}"
+        page_size: 50
+    filters:
+      - {column: incident_id, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID", examples: [01FDAG4SAP5TYPT98WGR2N7W91]}
+      - {column: alert_id, ops: ["=", "in"], max_fan_out: 20, description: "Alert ID", examples: [01GW2G3V0S59R238FAHPDS1R66]}
+    require_one_of: [[incident_id, alert_id]]
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.incident_alerts[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: incident_id, path: incident.id}
+      - {name: incident_reference, path: incident.reference}
+      - {name: incident_title, path: incident.name}
+      - {name: incident_status_category, path: incident.status_category}
+      - {name: alert_id, path: alert.id}
+      - {name: ts, type: TIMESTAMP, path: alert.created_at, description: "Alert creation time"}
+      - {name: title, path: alert.title, description: "Alert title"}
+      - {name: alert_status, path: alert.status}
+      - {name: deduplication_key, path: alert.deduplication_key}
+      - {name: alert_route_id, path: alert_route_id}
+      - {name: url, path: alert.source_url}
+    examples:
+      - sql: "SELECT ts, title, alert_status, url FROM incidentio_incident_alerts WHERE incident_id = '01FDAG4SAP5TYPT98WGR2N7W91' ORDER BY ts"
+        description: Alerts attached to the incident.
+    fixtures:
+      - file: incident_alerts.json
+        filters: {incident_id: 01FDAG4SAP5TYPT98WGR2N7W91}
+        expect_rows: 1
+        expect_columns: {incident_reference: INC-123, incident_title: "Our database is sad", alert_id: 01GW2G3V0S59R238FAHPDS1R66, title: "*errors.withMessage: PG::Error failed to connect", alert_status: firing}
+        note: "Official 200 response example of GET /v2/incident_alerts (Alerts V2 ListIncidentAlerts; incident-alerts-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-alerts-v2/list
+
+  - name: incidentio_escalations
+    title: Escalations (pages to on-call)
+    description: >-
+      One row per escalation (a page sent through an escalation path). Without incident / alert
+      filters: escalations created in the ts window (created_at[gte] / [lte]). Optional status
+      (pending | triggered | acked | resolved | expired | cancelled; IN), incident_id, alert_id,
+      escalation_path_id. events holds the notification / ack history.
+    kind: events
+    request:
+      method: GET
+      path: /v2/escalations
+      query:
+        "created_at[gte]": "{{ None if (filters.incident_id or filters.alert_id) else (time.start | rfc3339) }}"
+        "created_at[lte]": "{{ None if (filters.incident_id or filters.alert_id) else (time.end | rfc3339) }}"
+        "status[one_of]": "{{ filters.status | as_list }}"
+        "incident[one_of]": "{{ filters.incident_id | as_list }}"
+        "alert[one_of]": "{{ filters.alert_id | as_list }}"
+        "escalation_path[one_of]": "{{ filters.escalation_path_id | as_list }}"
+        page_size: 50
+    filters:
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "pending | triggered | acked | resolved | expired | cancelled", examples: [triggered]}
+      - {column: incident_id, ops: ["=", "in"], fan_out: false, description: "Incident ID(s) the escalation relates to", examples: [01FDAG4SAP5TYPT98WGR2N7W91]}
+      - {column: alert_id, ops: ["=", "in"], fan_out: false, description: "Alert ID(s) that created the escalation", examples: [01GW2G3V0S59R238FAHPDS1R66]}
+      - {column: escalation_path_id, ops: ["=", "in"], fan_out: false, description: "Escalation path ID(s)", examples: [01G0J1EXE7AXZ2C93K61WBPYEH]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 10}
+    response:
+      rows_path: "$.escalations[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: title, path: title}
+      - {name: description, path: description}
+      - {name: status, path: status}
+      - {name: priority, path: priority.name}
+      - {name: escalation_path_id, path: escalation_path_id}
+      - {name: incident_refs, type: JSON, path: "related_incidents[*].reference"}
+      - {name: incident_id, expr: "((_.related_incidents or []) | map(attribute='id') | first)", description: "First related incident ID"}
+      - {name: alert_id, expr: "((_.related_alerts or []) | map(attribute='id') | first)", description: "First related alert ID"}
+      - {name: notified_users, type: JSON, path: "events[*].users[*].name", description: "Users named in escalation events"}
+      - {name: events, type: JSON, path: events, description: "[{event, occurred_at, urgency, users, channels}]"}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+    pitfalls:
+      - "An escalation relates to an incident if linked directly, attached to one of its alerts, or if it triggered one of them."
+      - "Needs an API key with 'View data' or 'Create and manage on-call resources'."
+    examples:
+      - sql: >-
+          SELECT ts, title, status, priority, notified_users FROM incidentio_escalations
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 02:00:00' AND TIMESTAMP '2026-10-01 04:00:00' ORDER BY ts
+        description: Who was paged during the night, and whether they acknowledged.
+      - sql: "SELECT ts, status, events FROM incidentio_escalations WHERE incident_id = '01FDAG4SAP5TYPT98WGR2N7W91'"
+        description: Paging history of one incident.
+    fixtures:
+      - file: escalations.json
+        expect_rows: 1
+        expect_columns: {ts: "2021-08-17T13:28:57.801578Z", id: 01G0J1EXE7AXZ2C93K61WBPYEH, title: "Database CPU is high", status: pending, priority: P1, incident_refs: '["INC-123"]', incident_id: 01FDAG4SAP5TYPT98WGR2N7W91, alert_id: 01GW2G3V0S59R238FAHPDS1R66, notified_users: '["Lisa Karlin Curtis"]'}
+        note: "Official 200 response example of GET /v2/escalations (Escalations V2 List; escalations-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/escalations-v2/list
+
+  - name: incidentio_maintenance_windows
+    title: Maintenance windows (alerts that will not page)
+    description: >-
+      One row per maintenance window (GET /v1/maintenance_windows): name, start/end, the alert
+      conditions it matches, lead, linked incident and owning teams. While a window is active it
+      overrides alert routing for matching alerts: they are held (no escalation, no incident),
+      attached to incident_id, or escalated only to the window's escalation targets - so check it
+      when an expected page or incident is missing. Optional state = active | upcoming | past
+      (pushed down as status). No time pushdown: compare start_at / end_at with the alert time in
+      SQL.
+    kind: events
+    request:
+      method: GET
+      path: /v1/maintenance_windows
+      query:
+        status: "{{ filters.state }}"
+        page_size: 50
+    filters:
+      - {column: state, description: "active | upcoming | past (omit for all)", examples: [active]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 10}
+    response:
+      rows_path: "$.maintenance_windows[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: start_at, description: "Window start (same as start_at)"}
+      - {name: id, path: id}
+      - {name: title, path: name}
+      - {name: start_at, type: TIMESTAMP, path: start_at}
+      - {name: end_at, type: TIMESTAMP, path: end_at}
+      - {name: incident_id, path: incident_id, description: "If set, matching alerts are attached to this incident"}
+      - {name: escalation_targets, type: JSON, path: escalation_targets, description: "If set, matching alerts are escalated only to these paths / users"}
+      - {name: lead, expr: "(_.lead.user.name if _.lead and _.lead.user else (_.lead.workflow.name if _.lead and _.lead.workflow else (_.lead.api_key.name if _.lead and _.lead.api_key else None)))"}
+      - {name: message, path: notification_message}
+      - {name: alert_conditions, type: JSON, path: alert_condition_groups, description: "Which alerts the window applies to"}
+      - {name: owning_team_ids, type: JSON, path: owning_team_ids}
+      - {name: resolve_on_end, type: BOOLEAN, path: resolve_on_end, description: "Held alerts are resolved when the window ends"}
+      - {name: reroute_on_end, type: BOOLEAN, path: reroute_on_end, description: "Still-firing alerts are re-routed (and may page) when the window ends"}
+      - {name: archived_at, type: TIMESTAMP, path: archived_at}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: state, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT title, start_at, end_at, lead, alert_conditions FROM incidentio_maintenance_windows
+          WHERE start_at <= TIMESTAMP '2026-10-01 11:00:00' AND end_at >= TIMESTAMP '2026-10-01 11:00:00'
+        description: Was a maintenance window covering the alert time (explains a missing page)?
+      - sql: "SELECT title, start_at, end_at, message FROM incidentio_maintenance_windows WHERE state = 'active'"
+        description: Maintenance in progress right now.
+    fixtures:
+      - file: maintenance_windows.json
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYDG0, title: "Planned database migration", start_at: "2021-08-17T13:28:57.801578Z", end_at: "2021-08-17T14:28:57.801578Z", incident_id: 01FCNDV6P870EA6S7TK1DSYDG0, lead: "Lisa Karlin Curtis", message: "Scheduled downtime for database migration", owning_team_ids: '["01G0J1EXE7AXZ2C93K61WBPYEH"]', resolve_on_end: false}
+        note: "Official 200 response example of GET /v1/maintenance_windows (MaintenanceWindows V1 List; incident.io OpenAPI spec), verbatim."
+    docs_url: https://docs.incident.io/api-reference/maintenancewindows-v1/list
+
+  # ----------------------------------------------------------------------------------------------
+  # On-call
+  # ----------------------------------------------------------------------------------------------
+  - name: incidentio_oncall_now
+    title: Who is on call now (current shifts of every schedule)
+    description: >-
+      One row per current shift of every on-call schedule (GET /v2/schedules, current_shifts):
+      schedule, user, shift start/end, rotation. Current state at query time (no time window);
+      for a past moment use incidentio_schedule_entries.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/schedules
+      query:
+        page_size: 25
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 10}
+    response:
+      rows_path: "$.schedules[*]"
+      expand:
+        - {explode: current_shifts, as: s}
+    columns:
+      - {name: schedule, path: name}
+      - {name: schedule_id, path: id}
+      - {name: user, path: "@s.user.name"}
+      - {name: email, path: "@s.user.email"}
+      - {name: user_id, path: "@s.user.id"}
+      - {name: start_at, type: TIMESTAMP, path: "@s.start_at"}
+      - {name: end_at, type: TIMESTAMP, path: "@s.end_at"}
+      - {name: rotation_id, path: "@s.rotation_id"}
+      - {name: timezone, path: timezone}
+      - {name: team_ids, type: JSON, path: team_ids}
+      - {name: url, path: permalink}
+    examples:
+      - sql: "SELECT schedule, user, email, end_at FROM incidentio_oncall_now ORDER BY schedule"
+        description: Who to page right now, per schedule.
+    fixtures:
+      - file: schedules.json
+        expect_rows: 1
+        expect_columns: {schedule: "Primary On-Call Schedule", schedule_id: 01G0J1EXE7AXZ2C93K61WBPYEH, user: "Lisa Karlin Curtis", email: "lisa@incident.io", start_at: "2021-08-17T13:28:57.801578Z", timezone: Europe/London}
+        note: "Official 200 response example of GET /v2/schedules (Schedules V2 List; schedules-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/schedules-v2/list
+
+  - name: incidentio_schedules
+    title: On-call schedules
+    description: One row per schedule with its rotations config, current and next on-call users (next_shifts are only returned with page_size <= 25, which is used here).
+    kind: entities
+    request:
+      method: GET
+      path: /v2/schedules
+      query:
+        page_size: 25
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 10}
+    response:
+      rows_path: "$.schedules[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: timezone, path: timezone}
+      - {name: current_on_call, type: JSON, path: "current_shifts[*].user.name"}
+      - {name: next_on_call, type: JSON, path: "next_shifts[*].user.name"}
+      - {name: rotations, type: JSON, path: config.rotations}
+      - {name: team_ids, type: JSON, path: team_ids}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: url, path: permalink}
+    examples:
+      - sql: "SELECT id, name, current_on_call, next_on_call FROM incidentio_schedules ORDER BY name"
+        description: Schedule IDs (for incidentio_schedule_entries) and who is on now / next.
+    fixtures:
+      - file: schedules.json
+        expect_rows: 1
+        expect_columns: {id: 01G0J1EXE7AXZ2C93K61WBPYEH, name: "Primary On-Call Schedule", current_on_call: '["Lisa Karlin Curtis"]', url: "https://app.incident.io/acme/on-call/schedules/01G0J1EXE7AXZ2C93K61WBPYEH"}
+        note: "Official 200 response example of GET /v2/schedules (Schedules V2 List; schedules-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/schedules-v2/list
+
+  - name: incidentio_schedule_entries
+    title: Rendered on-call entries of a schedule (who was on call when)
+    description: >-
+      The schedule's FINAL entries (after overrides) overlapping the ts window (GET
+      /v2/schedule_entries, entry_window_start / entry_window_end RFC3339): one row per (user,
+      start, end, rotation). schedule_id required (IN up to 10). Use it to find who was on call
+      when an incident fired. The ts predicate selects the window and is not re-applied.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/schedule_entries
+      query:
+        schedule_id: "{{ filters.schedule_id }}"
+        entry_window_start: "{{ time.start | rfc3339 }}"
+        entry_window_end: "{{ time.end | rfc3339 }}"
+    filters:
+      - {column: schedule_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Schedule ID (incidentio_schedules.id)", examples: [01FDAG4SAP5TYPT98WGR2N7W91]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d, reapply: false}
+    pagination: {type: next_url, next_url_path: "$.pagination_meta.after_url", max_pages: 10}
+    response:
+      rows_path: "$.schedule_entries.final[*]"
+    columns:
+      - {name: user, path: user.name}
+      - {name: email, path: user.email}
+      - {name: user_id, path: user.id}
+      - {name: start_at, type: TIMESTAMP, path: start_at}
+      - {name: end_at, type: TIMESTAMP, path: end_at}
+      - {name: rotation_id, path: rotation_id}
+      - {name: entry_id, path: entry_id}
+      - {name: schedule_id, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Only the `final` list is returned (rotation entries with overrides applied); entries of every rotation and layer appear, so several users can be on call at once (primary / secondary)."
+    examples:
+      - sql: >-
+          SELECT user, rotation_id, start_at, end_at FROM incidentio_schedule_entries
+          WHERE schedule_id = '01FDAG4SAP5TYPT98WGR2N7W91' AND ts BETWEEN TIMESTAMP '2026-10-01 03:00:00' AND TIMESTAMP '2026-10-01 03:05:00'
+        description: Who was on call at 03:00 UTC.
+    fixtures:
+      - file: schedule_entries.json
+        filters: {schedule_id: 01FDAG4SAP5TYPT98WGR2N7W91}
+        expect_rows: 1
+        expect_columns: {user: "Lisa Karlin Curtis", email: "lisa@incident.io", start_at: "2021-08-17T13:28:57.801578Z", rotation_id: 01G0J1EXE7AXZ2C93K61WBPYEH, schedule_id: 01FDAG4SAP5TYPT98WGR2N7W91}
+        note: "Official 200 response example of GET /v2/schedule_entries (Schedules V2 ListScheduleEntries; schedule-entries-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/schedule-entries-v2/list
+
+  - name: incidentio_schedule_overrides
+    title: Schedule overrides (shift swaps / cover)
+    description: >-
+      One row per override on a schedule (GET /v2/schedule_overrides): who covered which
+      rotation layer, from when to when. schedule_id required (IN up to 10); optional
+      rotation_id / layer_id. Archived overrides are not returned. No time pushdown: filter
+      start_at / end_at in SQL. Explains why the usual person was not the one paged; the merged
+      result is incidentio_schedule_entries.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/schedule_overrides
+      query:
+        schedule_id: "{{ filters.schedule_id }}"
+        rotation_id: "{{ filters.rotation_id }}"
+        layer_id: "{{ filters.layer_id }}"
+        page_size: 250
+    filters:
+      - {column: schedule_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Schedule ID (incidentio_schedules.id)", examples: [01G0J1EXE7AXZ2C93K61WBPYEH]}
+      - {column: rotation_id, description: "Only overrides on this rotation", examples: [01G0J1EXE7AXZ2C93K61WBPYEH]}
+      - {column: layer_id, description: "Only overrides on this layer", examples: [01G0J1EXE7AXZ2C93K61WBPYEH]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.overrides[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: schedule_id, path: schedule_id}
+      - {name: rotation_id, path: rotation_id}
+      - {name: layer_id, path: layer_id}
+      - {name: user, path: user.name, description: "Who covers the shift"}
+      - {name: email, path: user.email}
+      - {name: user_id, path: user.id}
+      - {name: start_at, type: TIMESTAMP, path: start_at}
+      - {name: end_at, type: TIMESTAMP, path: end_at}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+    examples:
+      - sql: >-
+          SELECT user, start_at, end_at, rotation_id FROM incidentio_schedule_overrides
+          WHERE schedule_id = '01G0J1EXE7AXZ2C93K61WBPYEH' AND end_at >= TIMESTAMP '2026-10-01 00:00:00' ORDER BY start_at
+        description: Overrides in force on or after the incident day.
+    fixtures:
+      - file: schedule_overrides.json
+        filters: {schedule_id: 01G0J1EXE7AXZ2C93K61WBPYEH}
+        expect_rows: 1
+        expect_columns: {id: 01G0J1EXE7AXZ2C93K61WBPYEH, schedule_id: 01G0J1EXE7AXZ2C93K61WBPYEH, user: "Lisa Karlin Curtis", email: "lisa@incident.io", start_at: "2021-08-17T13:28:57.801578Z", end_at: "2021-08-17T13:28:57.801578Z"}
+        note: "Official 200 response example of GET /v2/schedule_overrides (Schedules V2 ListOverrides; incident.io OpenAPI spec), verbatim."
+    docs_url: https://docs.incident.io/api-reference/schedule-overrides-v2/list
+
+  # ----------------------------------------------------------------------------------------------
+  # Configuration and directory
+  # ----------------------------------------------------------------------------------------------
+  - name: incidentio_severities
+    title: Severities
+    description: The account's incident severities (higher rank = more severe). IDs feed incidentio_incidents.severity_id.
+    kind: entities
+    request:
+      method: GET
+      path: /v1/severities
+    response:
+      rows_path: "$.severities[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: rank, type: BIGINT, path: rank}
+      - {name: description, path: description}
+    examples:
+      - sql: "SELECT id, name, rank FROM incidentio_severities ORDER BY rank DESC"
+    fixtures:
+      - file: severities.json
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYDG0, name: Minor, rank: 1}
+        note: "Official 200 response example of GET /v1/severities (Severities V1 List; severities-v1.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/severities-v1/list
+
+  - name: incidentio_incident_statuses
+    title: Incident statuses
+    description: The account's incident statuses with their category (triage | live | learning | closed ...). IDs feed incidentio_incidents.status_id.
+    kind: entities
+    request:
+      method: GET
+      path: /v1/incident_statuses
+    response:
+      rows_path: "$.incident_statuses[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: category, path: category}
+      - {name: rank, type: BIGINT, path: rank}
+      - {name: description, path: description}
+    examples:
+      - sql: "SELECT id, name, category FROM incidentio_incident_statuses ORDER BY rank"
+    fixtures:
+      - file: incident_statuses.json
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYD5H, name: Closed, category: triage, rank: 4}
+        note: "Official 200 response example of GET /v1/incident_statuses (Incident Statuses V1 List; incident-statuses-v1.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-statuses-v1/list
+
+  - name: incidentio_incident_types
+    title: Incident types
+    description: The account's incident types (e.g. Production Outage, Security). IDs feed incidentio_incidents.incident_type_id.
+    kind: entities
+    request:
+      method: GET
+      path: /v1/incident_types
+    response:
+      rows_path: "$.incident_types[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: is_default, type: BOOLEAN, path: is_default}
+      - {name: private_incidents_only, type: BOOLEAN, path: private_incidents_only}
+      - {name: create_in_triage, path: create_in_triage}
+      - {name: owning_team_ids, type: JSON, path: owning_team_ids}
+    examples:
+      - sql: "SELECT id, name, description FROM incidentio_incident_types ORDER BY name"
+    fixtures:
+      - file: incident_types.json
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYDG0, name: "Production Outage", description: "Customer facing production outages", is_default: false, create_in_triage: always}
+        note: "Official 200 response example of GET /v1/incident_types (Incident Types V1 List; incident.io OpenAPI spec), verbatim."
+    docs_url: https://docs.incident.io/api-reference/incident-types-v1/list
+
+  - name: incidentio_custom_fields
+    title: Custom fields
+    description: >-
+      The account's incident custom field definitions (e.g. Affected Service, Affected Team):
+      name, type and the catalog type that backs catalog-powered fields. Use it to interpret
+      incidentio_incidents.custom_fields (whose entries carry the field ID and name).
+    kind: entities
+    request:
+      method: GET
+      path: /v2/custom_fields
+    response:
+      rows_path: "$.custom_fields[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: field_type, path: field_type, description: "single_select | multi_select | text | link | numeric"}
+      - {name: catalog_type_id, path: catalog_type_id, description: "Catalog type behind the options (incidentio_catalog_types.id)"}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+    examples:
+      - sql: "SELECT id, name, field_type, catalog_type_id FROM incidentio_custom_fields ORDER BY name"
+        description: Which custom field holds the affected service / team.
+    fixtures:
+      - file: custom_fields.json
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYDG0, name: "Affected Team", field_type: single_select, catalog_type_id: 01FCNDV6P870EA6S7TK1DSYDG0}
+        note: "Official 200 response example of GET /v2/custom_fields (Custom Fields V2 List; incident.io OpenAPI spec), verbatim."
+    docs_url: https://docs.incident.io/api-reference/custom-fields-v2/list
+
+  - name: incidentio_users
+    title: Users
+    description: Users of the account (email / slack_user_id exact filters; include_inactive = true for offboarded users).
+    kind: entities
+    request:
+      method: GET
+      path: /v2/users
+      query:
+        email: "{{ filters.email }}"
+        slack_user_id: "{{ filters.slack_user_id }}"
+        include_inactive: "{{ filters.include_inactive }}"
+        page_size: 250
+    filters:
+      - {column: email, description: "Exact email", examples: [lisa@incident.io]}
+      - {column: slack_user_id, description: "Slack user ID", examples: [U02AYNF2XJM]}
+      - {column: include_inactive, type: BOOLEAN, description: "Include deactivated users", examples: ["true"]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.users[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: email, path: email}
+      - {name: role, path: role}
+      - {name: slack_user_id, path: slack_user_id}
+      - {name: is_active, type: BOOLEAN, path: is_active}
+      - {name: base_role, path: base_role.name}
+      - {name: include_inactive, type: BOOLEAN, filter_only: true}
+    examples:
+      - sql: "SELECT id, name, email, slack_user_id FROM incidentio_users WHERE slack_user_id = 'U02AYNF2XJM'"
+        description: Map a Slack user to their incident.io identity.
+    fixtures:
+      - file: users.json
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYDG0, name: "Lisa Karlin Curtis", email: "lisa@incident.io", is_active: true, base_role: "Customer Success"}
+        note: "Official 200 response example of GET /v2/users (Users V2 List; users-v2.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/users-v2/list
+
+  - name: incidentio_catalog_types
+    title: Catalog types
+    description: Every catalog type (Service, Team, Customer, Kubernetes cluster, synced PagerDuty/Backstage types ...). Their IDs feed incidentio_catalog_entries.catalog_type_id.
+    kind: entities
+    request:
+      method: GET
+      path: /v3/catalog_types
+    response:
+      rows_path: "$.catalog_types[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: type_name, path: type_name}
+      - {name: description, path: description}
+      - {name: registry_type, path: registry_type}
+      - {name: estimated_count, type: BIGINT, path: estimated_count}
+      - {name: categories, type: JSON, path: categories}
+      - {name: attributes, type: JSON, path: "schema.attributes[*].name"}
+      - {name: last_synced_at, type: TIMESTAMP, path: last_synced_at}
+    examples:
+      - sql: "SELECT id, name, type_name, estimated_count FROM incidentio_catalog_types ORDER BY name"
+        description: Find the catalog type that models services.
+    fixtures:
+      - file: catalog_types.json
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYDG0, name: "Kubernetes Cluster", type_name: "Custom[\"BackstageGroup\"]", estimated_count: 7, attributes: '["tier"]'}
+        note: "Official 200 response example of GET /v3/catalog_types (Catalog V3 ListTypes; catalog-types-v3.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/catalog-types-v3/list-types
+
+  - name: incidentio_catalog_entries
+    title: Catalog entries of a type (services, teams ...)
+    description: >-
+      Entries of one catalog type (catalog_type_id required; optional identifier = id, external
+      id, alias, or name when the type uses names as identifiers). Attribute values (owner team,
+      tier, links ...) are in attribute_values keyed by attribute ID.
+    kind: entities
+    request:
+      method: GET
+      path: /v3/catalog_entries
+      query:
+        catalog_type_id: "{{ filters.catalog_type_id }}"
+        identifier: "{{ filters.identifier }}"
+        page_size: 250
+    filters:
+      - {column: catalog_type_id, required: true, description: "Catalog type ID (incidentio_catalog_types.id)", examples: [01FCNDV6P870EA6S7TK1DSYDG0]}
+      - {column: identifier, description: "Match by ID, external ID, alias (or name)", examples: [checkout]}
+    pagination: {type: cursor, cursor_path: "$.pagination_meta.after", cursor_param: query.after, max_pages: 5}
+    response:
+      rows_path: "$.catalog_entries[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: external_id, path: external_id}
+      - {name: aliases, type: JSON, path: aliases}
+      - {name: rank, type: BIGINT, path: rank}
+      - {name: attribute_values, type: JSON, path: attribute_values}
+      - {name: catalog_type, path: "$.catalog_type.name"}
+      - {name: catalog_type_id, path: catalog_type_id}
+      - {name: archived_at, type: TIMESTAMP, path: archived_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: identifier, filter_only: true}
+    examples:
+      - sql: "SELECT name, aliases, attribute_values FROM incidentio_catalog_entries WHERE catalog_type_id = '01FCNDV6P870EA6S7TK1DSYDG0' AND identifier = 'checkout'"
+        description: Catalog record (owner, tier, links) of a service.
+    fixtures:
+      - file: catalog_entries.json
+        filters: {catalog_type_id: 01FCNDV6P870EA6S7TK1DSYDG0}
+        expect_rows: 1
+        expect_columns: {id: 01FCNDV6P870EA6S7TK1DSYDG0, name: "Primary On-call", external_id: 761722cd-d1d7-477b-ac7e-90f9e079dc33, aliases: '["lawrence@incident.io","lawrence"]', catalog_type: "Kubernetes Cluster", rank: 3}
+        note: "Official 200 response example of GET /v3/catalog_entries (Catalog V3 ListEntries; catalog-entries-v3.json), verbatim."
+    docs_url: https://docs.incident.io/api-reference/catalog-entries-v3/list-entries
+
+roles:
+  incidents:
+    table: incidentio_incidents
+    columns: {ts: ts, id: id, title: title, state: status, status: status, severity: severity, url: url, lead: lead}
+    notes: "incident.io incidents created in the window (test/tutorial excluded)."
+  active_alerts:
+    table: incidentio_firing_alerts
+    columns: {ts: ts, name: title, title: title, state: status, service: service, url: url, id: id}
+    notes: "incident.io Alerts currently firing."
+  alert_history:
+    table: incidentio_alerts
+    columns: {ts: ts, name: title, title: title, state: status, service: service, url: url, id: id}
+  oncall:
+    table: incidentio_oncall_now
+    columns: {name: user, user: user, email: email, schedule: schedule, start: start_at, end: end_at}
+    notes: "Current shifts of every schedule (now, not at the alert time; use incidentio_schedule_entries for the past)."

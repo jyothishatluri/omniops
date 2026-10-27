@@ -1,0 +1,12 @@
+[
+  {
+    "timeStamp": 1559066415823,
+    "auditDateTime": "2019-05-28T18:00:15.823+0000",
+    "accountName": "customer1",
+    "securityProviderType": "INTERNAL",
+    "userName": "user1",
+    "action": "LOGIN",
+    "objectId": 0,
+    "applicationName": "ACME"
+  }
+]

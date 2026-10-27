@@ -1,0 +1,1418 @@
+# PagerDuty REST API v2 as SQL tables. Direct REST, no MCP.
+#
+# Every path, parameter name, time format and response path below was checked against the official
+# REST API reference (docs.pagerduty.com/developer/api/reference/rest/...) and PagerDuty's own
+# OpenAPI description (github.com/PagerDuty/api-schema, reference/REST/openapiv3.json), whose
+# response `examples` are the "Example response" blocks rendered in the reference. The offline
+# fixtures in src/omniops/sources/fixtures/pagerduty/ are those examples verbatim.
+# Research notes, limits and pitfalls: docs/sources/pagerduty.md.
+#
+# Conventions used by every table:
+#   - Auth header `Authorization: Token token=<key>` and `Accept: application/vnd.pagerduty+json;version=2`.
+#   - Array query parameters are sent as repeated `name[]=` keys (statuses[]=triggered&statuses[]=acknowledged).
+#   - Every request sends time_zone=UTC so rendered timestamps are UTC, and since/until are sent as
+#     explicit UTC ISO 8601 ('YYYY-MM-DDThh:mm:ssZ'); without an offset PagerDuty interprets since/until
+#     in the ACCOUNT time zone, and /change_events rejects non-UTC values with HTTP 400.
+#   - Classic pagination: limit<=100 + offset, `more` says whether another page exists, and
+#     offset+limit may never exceed 10,000 (HTTP 400).
+source: pagerduty
+display_name: PagerDuty
+vendor: PagerDuty, Inc.
+description: >-
+  PagerDuty REST API v2: incidents (list and detail), incident log entries (the full incident
+  timeline, including the original trigger payload), alerts grouped into an incident, incident
+  notes, related / past / outlier incidents and correlated change events, change events (deploys,
+  builds, config changes), the audit trail of PagerDuty configuration changes, services, business
+  services, service dependencies and maintenance windows, on-calls, schedules (rendered final
+  schedule) and overrides, escalation policies, users, teams, priorities, and the Insights
+  analytics API (per-incident MTTA/MTTR metrics and per-service aggregates).
+docs_url: https://docs.pagerduty.com/developer/api/reference/rest
+categories: [incidents, alerts, oncall, changes, services]
+base_url: "{{ (env.PAGERDUTY_API_URL or 'https://api.pagerduty.com') | trim('/') }}"
+ui_base_url: "{{ (env.PAGERDUTY_UI_URL or 'https://app.pagerduty.com') | trim('/') }}"
+env:
+  - {name: PAGERDUTY_API_TOKEN, description: "REST API key: an account-level key (read-only is enough) or a user-level key (acts with that user's permissions). Sent as 'Authorization: Token token=<key>'.", secret: true}
+  - {name: PAGERDUTY_API_URL, description: "REST API base URL. US service region: https://api.pagerduty.com (default); EU service region: https://api.eu.pagerduty.com", default: "https://api.pagerduty.com"}
+  - {name: PAGERDUTY_UI_URL, description: "Web UI base for deep links, e.g. https://acme.pagerduty.com or https://acme.eu.pagerduty.com (default https://app.pagerduty.com, which redirects to your subdomain after login)", default: "https://app.pagerduty.com"}
+required_env: [PAGERDUTY_API_TOKEN]
+auth:
+  type: headers
+  headers:
+    Authorization: "Token token={{ env.PAGERDUTY_API_TOKEN }}"
+headers:
+  Accept: "application/vnd.pagerduty+json;version=2"
+  Content-Type: application/json
+rate_limit:
+  concurrency: 3
+  requests_per_minute: 900
+  max_retries: 3
+  retry_body_patterns: ["Rate Limit Exceeded"]
+  notes: >-
+    960 requests/minute per account API key, per user (across all of that user's keys), and per
+    PagerDuty App per account/user. A few operations (on-calls among them) have additional
+    operation-specific limits. Exceeding a limit returns HTTP 429 with body
+    {"error": {"message": "Rate Limit Exceeded", "code": 2020}} and headers ratelimit-limit /
+    ratelimit-remaining / ratelimit-reset (seconds until reset). PagerDuty recommends making
+    requests serially per token, so this source caps itself at 900/min and 3 concurrent requests.
+retention:
+  changes: 90d
+errors:
+  - {path: "$.error.message", non_empty: true, message: "$.error", hint: "PagerDuty reported an error object: fix the parameter it names (2004/2005 = bad since/until or range > 6 months)"}
+pitfalls:
+  - "PagerDuty filters by IDs, not names: service_id / team_id / user_id / escalation_policy_id / schedule_id take IDs like 'PIJ90N7'. Look the ID up first (pagerduty_services WHERE query = 'checkout', pagerduty_teams, pagerduty_users, pagerduty_schedules); a service NAME passed as service_id silently matches nothing."
+  - "Incidents are listed by CREATION time: since/until select incidents created in the window, not incidents updated or still open in it. An incident opened two days ago and still acknowledged is invisible to a 1-hour window; use pagerduty_incidents WHERE status IN ('triggered','acknowledged') AND date_range = 'all' for everything currently open."
+  - "Always give an explicit ts range when looking for prior incidents or changes: without one, time-bound tables use the alert's analysis window (often ~20 minutes)."
+  - "The incident list covers at most 6 months per request (since/until); longer windows are clamped to the most recent 180 days. Classic pagination stops at offset+limit = 10,000 (HTTP 400): narrow by service_id or time instead of paging deeper."
+  - "One PagerDuty incident groups many alerts: the incident title is usually the FIRST alert's summary. Read pagerduty_incident_alerts for every grouped alert (and its custom details), and pagerduty_incident_log_entries for the timeline including the original trigger payload (channel.details)."
+  - "Most IDs are unique per endpoint only (a schedule and a service may share an id). Do not join different object types on id."
+  - "User-level API keys only see what that user can see (Advanced Permissions); objects outside the user's teams are silently omitted. Analytics endpoints REQUIRE a service_id or team_id filter for user-level keys."
+  - "Insights analytics (pagerduty_analytics_*) lag real time by up to ~24 hours: never use them to decide whether something happened in the last hour - use pagerduty_incidents and the log entries instead."
+query_languages: {}
+
+tables:
+  # ----------------------------------------------------------------------------------------------
+  # Incidents
+  # ----------------------------------------------------------------------------------------------
+  - name: pagerduty_incidents
+    title: Incidents (created in a time window)
+    description: >-
+      One row per incident CREATED in the ts window (since/until), newest first. Optional
+      pushdown filters: status (triggered | acknowledged | resolved; IN lists allowed), service_id
+      and team_id (IDs, IN lists allowed), user_id (currently assigned user - returns only open
+      incidents), urgency (high | low), incident_key (de-duplication key; matches the alert_key of
+      grouped alerts). Set date_range = 'all' to ignore the time window entirely (use it with a
+      status filter to list everything currently open). Use it to find the pages around an alert,
+      who was assigned, and how long incidents took to acknowledge / resolve.
+    kind: incidents
+    request:
+      method: GET
+      path: /incidents
+      query:
+        since: "{{ None if filters.date_range == 'all' else (time.start | rfc3339) }}"
+        until: "{{ None if filters.date_range == 'all' else (time.end | rfc3339) }}"
+        date_range: "{{ 'all' if filters.date_range == 'all' else None }}"
+        "statuses[]": "{{ filters.status | as_list }}"
+        "service_ids[]": "{{ filters.service_id | as_list }}"
+        "team_ids[]": "{{ filters.team_id | as_list }}"
+        "user_ids[]": "{{ filters.user_id | as_list }}"
+        "urgencies[]": "{{ filters.urgency | as_list }}"
+        incident_key: "{{ filters.incident_key }}"
+        sort_by: "created_at:desc"
+        time_zone: UTC
+    filters:
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "triggered | acknowledged | resolved (sent as statuses[])", examples: [triggered]}
+      - {column: service_id, ops: ["=", "in"], fan_out: false, description: "PagerDuty service ID(s) (sent as service_ids[]); look IDs up in pagerduty_services", examples: [PIJ90N7]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s) (team_ids[]; needs the account 'teams' ability)", examples: [PQ9K7I8]}
+      - {column: user_id, ops: ["=", "in"], fan_out: false, description: "Currently assigned user ID(s) (user_ids[]); only triggered/acknowledged incidents are returned", examples: [PXPGF42]}
+      - {column: urgency, ops: ["=", "in"], fan_out: false, description: "high | low (urgencies[])", examples: [high]}
+      - {column: incident_key, description: "Incident de-duplication key (matches grouped alerts' alert_key)", examples: [baf7cf21b1da41b4b0221008339ff357]}
+      - {column: date_range, description: "'all' = ignore since/until (and the 6-month default window)", examples: [all]}
+    time: {column: ts, default_lookback: 24h, max_window: 180d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 10}
+    response:
+      rows_path: "$.incidents[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at, description: "Incident creation time (what since/until filter on)"}
+      - {name: id, path: id, description: "Incident ID (use as incident_id in the per-incident tables)"}
+      - {name: incident_number, type: BIGINT, path: incident_number, description: "Account-wide incident number (#1234)"}
+      - {name: title, path: title, description: "Incident title (usually the first alert's summary)"}
+      - {name: summary, path: summary, description: "'[#1234] title'"}
+      - {name: status, path: status, description: "triggered | acknowledged | resolved"}
+      - {name: urgency, path: urgency, description: "high | low"}
+      - {name: severity, path: priority.summary, description: "Priority name (P1..P5 or the account's own names); NULL when priorities are not used"}
+      - {name: priority_id, path: priority.id}
+      - {name: service, path: service.summary, description: "Service name"}
+      - {name: service_id, path: service.id}
+      - {name: escalation_policy, path: escalation_policy.summary}
+      - {name: escalation_policy_id, path: escalation_policy.id}
+      - {name: teams, type: JSON, path: "teams[*].summary", description: "Team names (JSON array)"}
+      - {name: team_id, filter_only: true}
+      - {name: assignees, type: JSON, path: "assignments[*].assignee.summary", description: "Currently assigned users (JSON array; empty once resolved)"}
+      - {name: user_id, filter_only: true}
+      - {name: acknowledged_by, type: JSON, path: "acknowledgements[*].acknowledger.summary", description: "Users who acknowledged (JSON array)"}
+      - {name: last_status_change_by, path: last_status_change_by.summary}
+      - {name: last_status_change_at, type: TIMESTAMP, path: last_status_change_at}
+      - {name: resolved_at, type: TIMESTAMP, path: resolved_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: incident_key, path: incident_key}
+      - {name: alert_count, type: BIGINT, path: alert_counts.all, description: "Alerts grouped into the incident"}
+      - {name: alert_counts, type: JSON, path: alert_counts, description: "{all, triggered, resolved}"}
+      - {name: incident_type, path: incident_type.name}
+      - {name: conference_url, path: conference_bridge.conference_url}
+      - {name: first_trigger_log_entry_id, path: first_trigger_log_entry.id}
+      - {name: url, path: html_url, description: "Incident web URL"}
+      - {name: date_range, filter_only: true}
+    sort_hint: "newest first (sort_by=created_at:desc)"
+    pitfalls:
+      - "since/until select by CREATION time (see source pitfalls); open incidents created before the window need date_range = 'all'."
+      - "user_id only returns triggered/acknowledged incidents (resolved incidents have no assignee)."
+      - "severity is the incident PRIORITY (P1..P5); urgency (high/low) is what drives paging. Filter on urgency for 'high-urgency pages'."
+      - "Time to resolve = resolved_at - ts. For acknowledgement times use pagerduty_analytics_incidents (seconds_to_first_ack) or the log entries."
+    examples:
+      - sql: >-
+          SELECT ts, incident_number, title, service, status, urgency, severity, assignees, url
+          FROM pagerduty_incidents
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 13:00:00'
+          ORDER BY ts DESC
+        description: Every page opened in the four hours around an alert.
+      - sql: >-
+          SELECT ts, title, service, status, assignees, url FROM pagerduty_incidents
+          WHERE status IN ('triggered', 'acknowledged') AND date_range = 'all' ORDER BY ts
+        description: Everything currently open, however old.
+      - sql: >-
+          SELECT service, count(*) AS incidents, count(*) FILTER (WHERE urgency = 'high') AS high_urgency,
+                 avg(date_diff('minute', ts, resolved_at)) AS avg_minutes_to_resolve
+          FROM pagerduty_incidents WHERE ts >= now() - INTERVAL 30 DAY
+          GROUP BY service ORDER BY incidents DESC LIMIT 15
+        description: Noisiest services over the last 30 days, with mean time to resolve.
+      - sql: >-
+          SELECT ts, title, status, url FROM pagerduty_incidents
+          WHERE service_id = 'PIJ90N7' AND ts >= now() - INTERVAL 14 DAY ORDER BY ts DESC
+        description: Has this service paged before (recurrence check)?
+    fixtures:
+      - file: incidents.json
+        expect_rows: 1
+        expect_columns: {ts: "2015-10-06T21:30:42Z", id: PT4KHLK, incident_number: 1234, title: "The server is on fire.", status: resolved, urgency: high, severity: P2, service: "My Mail Service", service_id: PIJ90N7, escalation_policy: "Another Escalation Policy", teams: '["Engineering"]', alert_count: 2, resolved_at: "2015-10-06T21:38:23Z", url: "https://subdomain.pagerduty.com/incidents/PT4KHLK"}
+        note: "Official example response of GET /incidents (operation listIncidents, PagerDuty OpenAPI api-schema; shown on docs.pagerduty.com)."
+      - file: error_body.json
+        expect_error: "Invalid Input Provided"
+        note: "Error object shape documented on https://docs.pagerduty.com/developer/errors (normally sent with 4xx); proves the source-wide 2xx error rule fires."
+    ui_link: "{{ ui_base_url }}/incidents"
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/incidents/list-incidents
+
+  - name: pagerduty_incident_detail
+    title: One incident by ID or number
+    description: >-
+      Full detail of one incident (GET /incidents/{id}). Filter on incident = the incident ID
+      ('PT4KHLK') or its number ('1234'); the id column always holds the ID. Adds what the list
+      omits: pending actions (scheduled unacknowledge / auto-resolve), responder requests,
+      acknowledgements with times.
+    kind: incidents
+    request:
+      method: GET
+      path: "/incidents/{{ filters.incident }}"
+      query:
+        time_zone: UTC
+    filters:
+      - {column: incident, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID or incident number", examples: [PT4KHLK]}
+    response:
+      rows_path: "$.incident"
+    columns:
+      - {name: incident, filter_only: true, description: "The ID or number you asked for"}
+      - {name: id, path: id}
+      - {name: ts, type: TIMESTAMP, path: created_at, description: "Creation time"}
+      - {name: incident_number, type: BIGINT, path: incident_number}
+      - {name: title, path: title}
+      - {name: status, path: status}
+      - {name: urgency, path: urgency}
+      - {name: severity, path: priority.summary, description: "Priority name"}
+      - {name: service, path: service.summary}
+      - {name: service_id, path: service.id}
+      - {name: escalation_policy, path: escalation_policy.summary}
+      - {name: teams, type: JSON, path: "teams[*].summary"}
+      - {name: assignees, type: JSON, path: "assignments[*].assignee.summary"}
+      - {name: assignments, type: JSON, path: assignments, description: "[{at, assignee}] - when each user was assigned"}
+      - {name: acknowledgements, type: JSON, path: acknowledgements, description: "[{at, acknowledger}]"}
+      - {name: pending_actions, type: JSON, path: pending_actions, description: "Scheduled unacknowledge / escalate / resolve / urgency_change actions with times"}
+      - {name: responder_requests, type: JSON, path: responder_requests}
+      - {name: incidents_responders, type: JSON, path: incidents_responders}
+      - {name: incident_key, path: incident_key}
+      - {name: alert_counts, type: JSON, path: alert_counts}
+      - {name: resolved_at, type: TIMESTAMP, path: resolved_at}
+      - {name: last_status_change_at, type: TIMESTAMP, path: last_status_change_at}
+      - {name: last_status_change_by, path: last_status_change_by.summary}
+      - {name: alert_grouping, type: JSON, path: alert_grouping}
+      - {name: custom_fields, type: JSON, path: custom_fields, description: "Incident custom field values (only when returned)"}
+      - {name: conference_url, path: conference_bridge.conference_url}
+      - {name: first_trigger_log_entry_id, path: first_trigger_log_entry.id}
+      - {name: url, path: html_url}
+    pitfalls:
+      - "404 means the ID does not exist OR the key cannot see it (user-level keys)."
+    examples:
+      - sql: "SELECT id, title, status, severity, service, assignees, pending_actions, url FROM pagerduty_incident_detail WHERE incident = 'PT4KHLK'"
+        description: Who owns the incident and what PagerDuty will do next (auto-resolve, unacknowledge).
+      - sql: "SELECT id, title, status, acknowledgements FROM pagerduty_incident_detail WHERE incident = '1234'"
+        description: Look an incident up by its number (#1234).
+    fixtures:
+      - file: incident.json
+        filters: {incident: "1234"}
+        expect_rows: 1
+        expect_columns: {id: PT4KHLK, status: acknowledged, assignees: '["Earline Greenholt"]', severity: P2, resolved_at: null}
+        note: "Official example response of GET /incidents/{id} (operation getIncident, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/incidents/get-incident
+
+  - name: pagerduty_incident_log_entries
+    title: Incident timeline (log entries of one incident)
+    description: >-
+      One row per log entry of an incident (trigger, notify, acknowledge, assign, escalate,
+      annotate (note), snooze, urgency change, resolve ...), with include[]=channels so trigger
+      entries carry the ORIGINAL event payload in channel (summary, details, client, client_url).
+      Filter on incident_id (required, IN up to 20). The whole incident log is fetched (no time
+      pushdown); filter ts in SQL. Set is_overview = true for only the most important changes.
+    kind: events
+    request:
+      method: GET
+      path: "/incidents/{{ filters.incident_id }}/log_entries"
+      query:
+        "include[]": [channels]
+        is_overview: "{{ filters.is_overview }}"
+        time_zone: UTC
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID", examples: [PT4KHLK]}
+      - {column: is_overview, type: BOOLEAN, description: "true = only the most important changes", examples: ["false"]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 10}
+    response:
+      rows_path: "$.log_entries[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: type, path: type, description: "trigger_log_entry | notify_log_entry | acknowledge_log_entry | assign_log_entry | escalate_log_entry | annotate_log_entry | snooze_log_entry | urgency_change_log_entry | resolve_log_entry | ..."}
+      - {name: message, path: summary, description: "Human-readable summary of the entry"}
+      - {name: note, path: note, description: "Note text when the action carried one"}
+      - {name: agent, path: agent.summary, description: "Who/what acted (user, service, integration)"}
+      - {name: agent_type, path: agent.type, description: "user_reference | service_reference | integration_reference ..."}
+      - {name: channel_type, path: channel.type, description: "api | email | web_trigger | website | mobile | auto ..."}
+      - {name: channel, type: JSON, path: channel, description: "With include[]=channels: for trigger entries the original event (summary, details/custom_details, client, client_url); for email triggers subject/body"}
+      - {name: event_details, type: JSON, path: event_details}
+      - {name: service, path: service.summary}
+      - {name: teams, type: JSON, path: "teams[*].summary"}
+      - {name: incident_id, path: incident.id}
+      - {name: url, path: html_url}
+      - {name: is_overview, type: BOOLEAN, filter_only: true}
+    sort_hint: "newest first by default"
+    pitfalls:
+      - "The channel payload structure varies by integration and is not formally specified; read it as JSON (channel->>'summary', channel->'details')."
+      - "notify_log_entry rows (one per notification sent) can dominate long incidents: filter type in SQL or use is_overview = true."
+    examples:
+      - sql: >-
+          SELECT ts, type, agent, message, channel->>'summary' AS event_summary
+          FROM pagerduty_incident_log_entries WHERE incident_id = 'PT4KHLK' ORDER BY ts
+        description: The incident's timeline, oldest first.
+      - sql: >-
+          SELECT ts, channel->'details' AS original_payload FROM pagerduty_incident_log_entries
+          WHERE incident_id = 'PT4KHLK' AND type = 'trigger_log_entry' ORDER BY ts
+        description: The raw monitoring payloads that triggered (or re-triggered) the incident.
+    fixtures:
+      - file: incident_log_entries.json
+        filters: {incident_id: PT4KHLK}
+        expect_rows: 1
+        expect_columns: {ts: "2015-11-07T00:14:20Z", type: trigger_log_entry, message: "Triggered through the API", agent: "My Mail Service", agent_type: service_reference, channel_type: api, incident_id: PT4KHLK, url: "https://subdomain.pagerduty.com/incidents/PT4KHLK/log_entries/Q02JTSNZWHSEKV"}
+        note: "Official example response of GET /incidents/{id}/log_entries (operation listIncidentLogEntries, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/incidents/list-incident-log-entries
+
+  - name: pagerduty_log_entries
+    title: Account-wide incident log entries in a time window
+    description: >-
+      Log entries of ALL incidents in the ts window (since/until), with channels included. One
+      row per entry; incident_id says which incident. Optional team_id (IN). is_overview defaults
+      to true here (only important changes: triggers, acks, escalations, resolves); set
+      is_overview = false for every notification. Use it to see what was paging, acknowledged or
+      resolved across the account during an outage.
+    kind: events
+    request:
+      method: GET
+      path: /log_entries
+      query:
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+        "include[]": [channels]
+        is_overview: "{{ filters.is_overview }}"
+        "team_ids[]": "{{ filters.team_id | as_list }}"
+        time_zone: UTC
+    filters:
+      - {column: is_overview, type: BOOLEAN, default: true, description: "true (default) = only the most important changes", examples: ["true"]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s)", examples: [PQ9K7I8]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 10}
+    response:
+      rows_path: "$.log_entries[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: type, path: type}
+      - {name: message, path: summary}
+      - {name: note, path: note}
+      - {name: agent, path: agent.summary}
+      - {name: agent_type, path: agent.type}
+      - {name: channel_type, path: channel.type}
+      - {name: channel, type: JSON, path: channel}
+      - {name: incident_id, path: incident.id}
+      - {name: incident, path: incident.summary, description: "'[#1234] title'"}
+      - {name: service, path: service.summary}
+      - {name: teams, type: JSON, path: "teams[*].summary"}
+      - {name: url, path: html_url}
+      - {name: is_overview, type: BOOLEAN, filter_only: true}
+      - {name: team_id, filter_only: true}
+    pitfalls:
+      - "Busy accounts produce thousands of entries per hour; keep windows short and filter type / incident in SQL. Pages stop at 1,000 rows here."
+    examples:
+      - sql: >-
+          SELECT ts, incident, type, agent, message FROM pagerduty_log_entries
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND type IN ('trigger_log_entry', 'acknowledge_log_entry', 'resolve_log_entry', 'escalate_log_entry')
+          ORDER BY ts
+        description: Account-wide paging activity during an outage hour.
+    fixtures:
+      - file: log_entries.json
+        expect_rows: 1
+        expect_columns: {type: trigger_log_entry, incident_id: PT4KHLK, incident: "[#1234] The server is on fire.", teams: '["Engineering"]', is_overview: true}
+        note: "Official example response of GET /log_entries (operation listLogEntries, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/log-entries/list-log-entries
+
+  - name: pagerduty_incident_alerts
+    title: Alerts grouped into an incident
+    description: >-
+      One row per alert grouped into the incident (incident_id required, IN up to 20): the
+      monitoring tool's alert summary, severity, de-duplication key and custom details (body).
+      Optional status (triggered | resolved) and alert_key filters.
+    kind: alerts
+    request:
+      method: GET
+      path: "/incidents/{{ filters.incident_id }}/alerts"
+      query:
+        "statuses[]": "{{ filters.status | as_list }}"
+        alert_key: "{{ filters.alert_key }}"
+        sort_by: "created_at:asc"
+        time_zone: UTC
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID", examples: [PT4KHLK]}
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "triggered | resolved", examples: [triggered]}
+      - {column: alert_key, description: "Alert de-duplication key", examples: [baf7cf21b1da41b4b0221008339ff357]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.alerts[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: title, path: summary, description: "Alert summary from the monitoring tool"}
+      - {name: status, path: status, description: "triggered | resolved"}
+      - {name: severity, path: severity, description: "critical | error | warning | info"}
+      - {name: alert_key, path: alert_key}
+      - {name: service, path: service.summary}
+      - {name: service_id, path: service.id}
+      - {name: details, type: JSON, path: body.details, description: "Custom details sent by the monitoring tool (JSON)"}
+      - {name: body, type: JSON, path: body, description: "Full alert body (details, contexts/links)"}
+      - {name: suppressed, type: BOOLEAN, path: suppressed}
+      - {name: integration, path: integration.summary}
+      - {name: incident_id, path: incident.id}
+      - {name: url, path: html_url}
+    sort_hint: "oldest first (sort_by=created_at:asc)"
+    examples:
+      - sql: >-
+          SELECT ts, status, severity, title, details FROM pagerduty_incident_alerts
+          WHERE incident_id = 'PT4KHLK' ORDER BY ts
+        description: Every alert grouped into the incident and what each one said.
+    fixtures:
+      - file: incident_alerts.json
+        filters: {incident_id: PT4KHLK}
+        expect_rows: 1
+        expect_columns: {ts: "2015-10-06T21:30:42Z", title: "The server is on fire.", status: resolved, severity: critical, alert_key: baf7cf21b1da41b4b0221008339ff357, service: "My Mail Service", details: '{"customKey":"Server is on fire!","customKey2":"Other stuff!"}', suppressed: false, integration: "Email Integration", incident_id: PT4KHLK}
+        note: "Official example response of GET /incidents/{id}/alerts (operation listIncidentAlerts, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/incidents/list-incident-alerts
+
+  - name: pagerduty_incident_notes
+    title: Notes on an incident
+    description: One row per note responders (or event rules) added to the incident. incident_id required (IN up to 20).
+    kind: events
+    request:
+      method: GET
+      path: "/incidents/{{ filters.incident_id }}/notes"
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID", examples: [PT4KHLK]}
+    response:
+      rows_path: "$.notes[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: id, path: id}
+      - {name: message, path: content, description: "Note text"}
+      - {name: author, path: user.summary, description: "User (or event rule) that wrote it"}
+      - {name: author_type, path: user.type}
+      - {name: channel, path: channel.summary}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: incident_id, filter_only: true}
+    examples:
+      - sql: "SELECT ts, author, message FROM pagerduty_incident_notes WHERE incident_id = 'PT4KHLK' ORDER BY ts"
+        description: What responders wrote down during the incident.
+    fixtures:
+      - file: incident_notes.json
+        filters: {incident_id: PT4KHLK}
+        expect_rows: 2
+        expect_columns: {ts: "2013-03-06T20:28:51Z", message: "Firefighters are on the scene.", author: "Earline Greenholt", incident_id: PT4KHLK}
+        note: "Official example response of GET /incidents/{id}/notes (operation listIncidentNotes, PagerDuty OpenAPI api-schema); created_at -05:00 is normalised to UTC."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/incidents/list-incident-notes
+
+  - name: pagerduty_related_change_events
+    title: Change events correlated with an incident
+    description: >-
+      PagerDuty Change Correlation: the change events (deploys, builds, config changes sent as
+      change events) PagerDuty considers relevant to the incident, with the reason (most_recent,
+      related_service, machine_learning). incident_id required (IN up to 20).
+    kind: changes
+    request:
+      method: GET
+      path: "/incidents/{{ filters.incident_id }}/related_change_events"
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident ID", examples: [PT4KHLK]}
+    response:
+      rows_path: "$.change_events[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, description: "When the change happened"}
+      - {name: id, path: id}
+      - {name: title, path: summary}
+      - {name: source, path: source, description: "Unique source (host/tool) that generated the change"}
+      - {name: correlation_reason, path: correlation_reason.reason, description: "most_recent | related_service | machine_learning"}
+      - {name: service_ids, type: JSON, path: "services[*].id"}
+      - {name: integration_id, path: integration.id}
+      - {name: custom_details, type: JSON, path: custom_details}
+      - {name: links, type: JSON, path: links}
+      - {name: url, path: "links[0].href", description: "First link of the change event (CI run, PR ...)"}
+      - {name: incident_id, filter_only: true}
+    pitfalls:
+      - "Only change events sent to PagerDuty (Events API v2 /v2/change/enqueue or change integrations) exist here; deploys PagerDuty never heard of are absent - cross-check code_changes / change_events of the CI/CD sources."
+    examples:
+      - sql: >-
+          SELECT ts, title, correlation_reason, source, url FROM pagerduty_related_change_events
+          WHERE incident_id = 'PT4KHLK' ORDER BY ts DESC
+        description: What changed right before this incident, per PagerDuty's change correlation.
+    fixtures:
+      - file: related_change_events.json
+        filters: {incident_id: PT4KHLK}
+        expect_rows: 2
+        expect_columns: {ts: "2020-07-17T08:42:58Z", title: "Build Success - Increase snapshot create timeout to 30 seconds", correlation_reason: most_recent, service_ids: '["PEYSGRV"]', url: "https://acme.pagerduty.dev/build/2"}
+        note: "Official example response of GET /incidents/{id}/related_change_events (operation listIncidentRelatedChangeEvents, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/change-events/list-incident-related-change-events
+
+  - name: pagerduty_past_incidents
+    title: Similar past incidents (Event Intelligence)
+    description: >-
+      Incidents from the past 6 months on the same service with similar metadata, ranked by a
+      similarity score. incident_id required. Needs the Event Intelligence / AIOps package or
+      Digital Operations plan (HTTP 402 otherwise).
+    kind: incidents
+    request:
+      method: GET
+      path: "/incidents/{{ filters.incident_id }}/past_incidents"
+      query:
+        limit: "{{ [limit or 20, 999] | min }}"
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Incident ID", examples: [PT4KHLK]}
+    response:
+      rows_path: "$.past_incidents[*]"
+    columns:
+      - {name: past_incident_id, path: incident.id}
+      - {name: ts, type: TIMESTAMP, path: incident.created_at}
+      - {name: title, path: incident.title}
+      - {name: score, type: DOUBLE, path: score, description: "Similarity score (higher = more similar)"}
+      - {name: api_url, path: incident.self}
+      - {name: incident_id, filter_only: true}
+    examples:
+      - sql: "SELECT ts, title, score, past_incident_id FROM pagerduty_past_incidents WHERE incident_id = 'PT4KHLK' ORDER BY score DESC"
+        description: Has this happened before? Then read how it was resolved (log entries / notes of past_incident_id).
+    fixtures:
+      - file: past_incidents.json
+        filters: {incident_id: PT4KHLK}
+        expect_rows: 3
+        expect_columns: {past_incident_id: PFBE9I2, ts: "2020-11-04T16:08:15Z", title: "Things are so broken!", score: 46.8249}
+        note: "Official example response of GET /incidents/{id}/past_incidents (operation getPastIncidents, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/incidents/get-past-incidents
+
+  - name: pagerduty_related_incidents
+    title: Related active incidents (Event Intelligence)
+    description: >-
+      Up to 20 recent incidents on other services/responders that PagerDuty relates to this one
+      (machine-learning inferred similarity or service dependency). incident_id required. Needs
+      the Event Intelligence / AIOps package or Digital Operations plan.
+    kind: incidents
+    request:
+      method: GET
+      path: "/incidents/{{ filters.incident_id }}/related_incidents"
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Incident ID", examples: [PT4KHLK]}
+    response:
+      rows_path: "$.related_incidents[*]"
+    columns:
+      - {name: related_incident_id, path: incident.id}
+      - {name: ts, type: TIMESTAMP, path: incident.created_at}
+      - {name: title, path: incident.title}
+      - {name: relationship_types, path: "relationships[*].type", transform: join, description: "machine_learning_inferred, service_dependency (comma-joined)"}
+      - {name: relationships, type: JSON, path: relationships}
+      - {name: incident_id, filter_only: true}
+    examples:
+      - sql: "SELECT ts, title, relationship_types FROM pagerduty_related_incidents WHERE incident_id = 'PT4KHLK'"
+        description: Is this part of a wider outage (other services paging at the same time)?
+    fixtures:
+      - file: related_incidents.json
+        filters: {incident_id: PT4KHLK}
+        expect_rows: 1
+        expect_columns: {related_incident_id: PR2P3RW, title: "The server is on fire.", relationship_types: "machine_learning_inferred,service_dependency"}
+        note: "Official example response of GET /incidents/{id}/related_incidents (operation getRelatedIncidents, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/incidents/get-related-incidents
+
+  - name: pagerduty_outlier_incident
+    title: How unusual is this incident on its service (outlier incident)
+    description: >-
+      PagerDuty's outlier analysis of one incident (GET /incidents/{id}/outlier_incident): how many
+      similar incidents occurred on the same service over the analysed window (occurrence_count,
+      frequency), the category PagerDuty assigns (e.g. 'rare' in the documented example) and the
+      mined incident template - the title pattern with variable parts replaced by placeholders
+      (<*>, <MEASUREMENT>). incident_id required (IN up to 10). An AIOps / Event Intelligence
+      capability: accounts without it get an HTTP error instead of rows.
+    kind: incidents
+    request:
+      method: GET
+      path: "/incidents/{{ filters.incident_id }}/outlier_incident"
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Incident ID", examples: [PR2P3RW]}
+    response:
+      rows_path: "$.outlier_incident"
+    columns:
+      - {name: incident_id, filter_only: true, description: "The incident you asked about"}
+      - {name: id, path: incident.id}
+      - {name: ts, type: TIMESTAMP, path: incident.created_at}
+      - {name: title, path: incident.title}
+      - {name: occurrence_count, type: BIGINT, path: incident.occurrence.count, description: "Similar incidents on the service in [occurrence_since, occurrence_until]"}
+      - {name: frequency, type: DOUBLE, path: incident.occurrence.frequency, description: "Occurrence frequency as returned (not defined further by the docs)"}
+      - {name: category, path: incident.occurrence.category, description: "Outlier category, e.g. rare"}
+      - {name: occurrence_since, type: TIMESTAMP, path: incident.occurrence.since}
+      - {name: occurrence_until, type: TIMESTAMP, path: incident.occurrence.until}
+      - {name: template, path: incident_template.mined_text, description: "Mined title pattern shared by the similar incidents"}
+      - {name: template_id, path: incident_template.id}
+      - {name: cluster_id, path: incident_template.cluster_id}
+    pitfalls:
+      - "A 'rare' category or a low occurrence_count says the incident pattern is new for this service: look for a recent change rather than a known recurring issue."
+      - "occurrence_count covers similar incidents on the SAME service only; use pagerduty_related_incidents for other services."
+    examples:
+      - sql: "SELECT title, category, occurrence_count, occurrence_since, template FROM pagerduty_outlier_incident WHERE incident_id = 'PR2P3RW'"
+        description: Is this a known, recurring page on the service or something new?
+    fixtures:
+      - file: outlier_incident.json
+        filters: {incident_id: PR2P3RW}
+        expect_rows: 1
+        expect_columns: {id: PR2P3RW, ts: "2020-11-18T13:08:14Z", occurrence_count: 10, frequency: 0.04, category: rare, occurrence_since: "2020-09-23T13:08:14Z", template: "[LINUX]Used disk space is more than <MEASUREMENT> on volume <*> : PROBLEM for <*>", cluster_id: P2B3X5, incident_id: PR2P3RW}
+        note: "Official example response of GET /incidents/{id}/outlier_incident (operation getOutlierIncident, PagerDuty OpenAPI api-schema; shown on docs.pagerduty.com)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/incidents/get-outlier-incident
+
+  # ----------------------------------------------------------------------------------------------
+  # Change events
+  # ----------------------------------------------------------------------------------------------
+  - name: pagerduty_change_events
+    title: Change events (deploys, builds, config changes)
+    description: >-
+      Change events received by PagerDuty in the ts window (since/until, UTC). With service_id
+      (IN up to 10) the per-service endpoint GET /services/{id}/change_events is used; otherwise
+      all change events of the account. Optional team_id / integration_id (IN). Retained ~90 days.
+    kind: changes
+    request:
+      method: GET
+      path: "{{ ('/services/' ~ filters.service_id ~ '/change_events') if filters.service_id else '/change_events' }}"
+      query:
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+        "team_ids[]": "{{ filters.team_id | as_list }}"
+        "integration_ids[]": "{{ filters.integration_id | as_list }}"
+    filters:
+      - {column: service_id, ops: ["=", "in"], max_fan_out: 10, description: "Service ID (switches to /services/{id}/change_events)", examples: [PEYSGRV]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s)", examples: [PQ9K7I8]}
+      - {column: integration_id, ops: ["=", "in"], fan_out: false, description: "Change integration ID(s)", examples: [PEYSGVF]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d, retention: 90d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 10}
+    response:
+      rows_path: "$.change_events[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, description: "Time of the change (as sent by the tool)"}
+      - {name: id, path: id}
+      - {name: title, path: summary}
+      - {name: source, path: source, description: "Unique location of the change (host, pipeline, tool instance)"}
+      - {name: service_ids, type: JSON, path: "services[*].id", description: "Services the change was routed to"}
+      - {name: service_id, expr: "(_.services or [{}])[0].id", description: "First service ID (the filter value when service_id was given)"}
+      - {name: integration_id, path: integration.id}
+      - {name: team_id, filter_only: true}
+      - {name: custom_details, type: JSON, path: custom_details, description: "Tool-specific details (build number, version, commit ...)"}
+      - {name: links, type: JSON, path: links}
+      - {name: url, path: "links[0].href", description: "First link (CI run, PR, release page)"}
+    pitfalls:
+      - "since/until must be UTC (Z); other offsets are rejected with HTTP 400 - this source always sends UTC."
+      - "service_ids are IDs, not names: join with pagerduty_services (id, service) to name them."
+      - "Change events older than ~90 days are not shown in PagerDuty; the window is clamped."
+    examples:
+      - sql: >-
+          SELECT ts, title, source, custom_details, url FROM pagerduty_change_events
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 08:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Every deploy / build / config change PagerDuty heard about in the 4h before an incident.
+      - sql: >-
+          SELECT ts, title, url FROM pagerduty_change_events
+          WHERE service_id = 'PEYSGRV' AND ts >= now() - INTERVAL 2 DAY ORDER BY ts DESC
+        description: Recent changes to one service.
+    fixtures:
+      - file: change_events.json
+        expect_rows: 2
+        expect_columns: {ts: "2020-07-17T08:42:58Z", id: 01BBYA6PEVW6A852BUO6QYUE7O, title: "Build Success - Increase snapshot create timeout to 30 seconds", source: acme-build-pipeline-tool-default-i-9999, service_ids: '["PEYSGRV"]', service_id: PEYSGRV, integration_id: PEYSGVF, url: "https://acme.pagerduty.dev/build/2"}
+        note: "Official example response of GET /change_events (operation listChangeEvents; identical to listServiceChangeEvents), PagerDuty OpenAPI api-schema."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/change-events/list-change-events
+
+  - name: pagerduty_audit_records
+    title: Audit trail (who changed PagerDuty configuration)
+    description: >-
+      One row per audit record in the ts window (since/until, at most 31 days; newest first):
+      who created / updated / deleted a user, team, schedule, escalation policy, service or IP
+      allow list, how (browser, api_token, oauth ...), and which fields / references changed with
+      before and after values. Optional resource_type (users | teams | schedules |
+      escalation_policies | services | ip_allow_lists; IN), action (create | update | delete;
+      IN), actor_id (+ actor_type, default user_reference). Answers "did someone change the
+      escalation policy, schedule or service settings right before the page went missing?".
+      Needs an admin / account owner user key or an account-level API key on a plan with Audit
+      Trail.
+    kind: changes
+    request:
+      method: GET
+      path: /audit/records
+      query:
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+        "root_resource_types[]": "{{ filters.resource_type | as_list }}"
+        "actions[]": "{{ filters.action | as_list }}"
+        actor_type: "{{ (filters.actor_type or 'user_reference') if filters.actor_id else filters.actor_type }}"
+        actor_id: "{{ filters.actor_id }}"
+        limit: 100
+    filters:
+      - {column: resource_type, ops: ["=", "in"], fan_out: false, description: "Root resource type(s): users | teams | schedules | escalation_policies | services | ip_allow_lists (sent as root_resource_types[])", examples: [escalation_policies]}
+      - {column: action, ops: ["=", "in"], fan_out: false, description: "create | update | delete (actions[])", examples: [update]}
+      - {column: actor_id, description: "ID of the user / API key / app that acted (sent with actor_type)", examples: [PDUSER]}
+      - {column: actor_type, description: "user_reference (default with actor_id) | api_key_reference | app_reference", examples: [user_reference]}
+    time: {column: ts, default_lookback: 24h, max_window: 31d}
+    pagination: {type: cursor, cursor_path: "$.next_cursor", cursor_param: query.cursor, max_pages: 10}
+    response:
+      rows_path: "$.records[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: execution_time, description: "When the change was made"}
+      - {name: id, path: id}
+      - {name: action, path: action, description: "create | update | delete"}
+      - {name: title, path: root_resource.summary, description: "Name of the changed root object (service, schedule, policy ...)"}
+      - {name: root_resource_id, path: root_resource.id}
+      - {name: root_resource_type, path: root_resource.type, description: "service_reference | escalation_policy_reference | schedule_reference | team_reference | user_reference ..."}
+      - {name: changed_resource, path: details.resource.summary, description: "The sub-resource actually changed (e.g. a notification rule of a user)"}
+      - {name: changed_resource_type, path: details.resource.type}
+      - {name: fields, type: JSON, path: details.fields, description: "[{name, before_value, value}] field changes"}
+      - {name: references, type: JSON, path: details.references, description: "[{name, added:[...], removed:[...]}] reference changes (members, targets ...)"}
+      - {name: author, path: "actors[*].summary", transform: join, transform_arg: ", ", description: "Who acted (empty for some system / token changes)"}
+      - {name: author_types, path: "actors[*].type", transform: join, transform_arg: ",", description: "user_reference | api_key_reference | app_reference"}
+      - {name: method, path: method.type, description: "browser | oauth | api_token | identity_provider | other"}
+      - {name: resource_type, filter_only: true}
+      - {name: actor_id, filter_only: true}
+      - {name: actor_type, filter_only: true}
+    sort_hint: "newest first (execution_time)"
+    pitfalls:
+      - "HTTP 402/403 means the plan lacks Audit Trail or the key is not admin/account-level: not evidence that nothing changed. Per-resource audit endpoints (/services/{id}/audit/records ...) exist for other roles but are not modelled here."
+      - "until may be at most 31 days after since; longer windows are clamped."
+      - "resource_type takes the plural filter values (services, escalation_policies ...) while root_resource_type holds reference types (service_reference ...)."
+    examples:
+      - sql: >-
+          SELECT ts, author, action, root_resource_type, title, fields, references FROM pagerduty_audit_records
+          WHERE resource_type IN ('escalation_policies', 'schedules', 'services')
+            AND ts BETWEEN TIMESTAMP '2026-09-30 12:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Routing / on-call configuration changes in the 24 hours before a missed or misrouted page.
+      - sql: "SELECT ts, action, title, fields FROM pagerduty_audit_records WHERE actor_id = 'PDUSER' AND ts >= now() - INTERVAL 7 DAY"
+        description: What one user changed this week.
+    fixtures:
+      - file: audit_records.json
+        expect_rows: 5
+        expect_columns: {id: PDRECORDID1_TEAM_CREATED, ts: "2020-06-04T15:30:16.272Z", action: create, title: "my DevOps team", root_resource_type: team_reference, changed_resource: "my DevOps team", fields: '[{"name":"teamName","value":"DevOps team"}]', author: "John Snow", author_types: user_reference, method: api_token}
+        note: "Official example response of GET /audit/records (operation listAuditRecords, PagerDuty OpenAPI api-schema; shown on docs.pagerduty.com)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/audit/list-audit-records
+
+  # ----------------------------------------------------------------------------------------------
+  # Services and dependencies
+  # ----------------------------------------------------------------------------------------------
+  - name: pagerduty_services
+    title: Services (technical services)
+    description: >-
+      One row per service, sorted by name. query = name substring match (pushed down); team_id
+      (IN). Use it to map a service name to its ID, escalation policy, teams and status
+      (active | warning | critical | maintenance | disabled).
+    kind: entities
+    request:
+      method: GET
+      path: /services
+      query:
+        query: "{{ filters.query }}"
+        "team_ids[]": "{{ filters.team_id | as_list }}"
+        "include[]": [teams, escalation_policies]
+        sort_by: name
+        time_zone: UTC
+    filters:
+      - {column: query, description: "Service name substring (server-side match)", examples: [checkout]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s)", examples: [PQ9K7I8]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 10}
+    response:
+      rows_path: "$.services[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: service, path: name, description: "Service name"}
+      - {name: description, path: description}
+      - {name: status, path: status, description: "active | warning | critical | maintenance | disabled"}
+      - {name: escalation_policy, path: escalation_policy.summary}
+      - {name: escalation_policy_id, path: escalation_policy.id}
+      - {name: teams, type: JSON, path: "teams[*].summary"}
+      - {name: team_id, filter_only: true}
+      - {name: last_incident_timestamp, type: TIMESTAMP, path: last_incident_timestamp}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: alert_creation, path: alert_creation}
+      - {name: alert_grouping_parameters, type: JSON, path: alert_grouping_parameters}
+      - {name: auto_resolve_timeout_s, type: BIGINT, path: auto_resolve_timeout, description: "Seconds until auto-resolve (NULL = never)"}
+      - {name: acknowledgement_timeout_s, type: BIGINT, path: acknowledgement_timeout, description: "Seconds until an ack reverts to triggered"}
+      - {name: incident_urgency_rule, type: JSON, path: incident_urgency_rule}
+      - {name: integrations, type: JSON, path: "integrations[*].summary"}
+      - {name: url, path: html_url}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT id, service, status, escalation_policy, teams FROM pagerduty_services WHERE query = 'checkout'"
+        description: Resolve a service name to its PagerDuty ID before filtering incidents or change events.
+      - sql: "SELECT service, status, last_incident_timestamp FROM pagerduty_services WHERE status IN ('critical', 'warning') ORDER BY service"
+        description: Which services are degraded right now.
+    fixtures:
+      - file: services.json
+        expect_rows: 1
+        expect_columns: {id: PIJ90N7, service: "My Application Service", status: active, escalation_policy: "Another Escalation Policy", teams: '["Engineering"]', auto_resolve_timeout_s: 14400, acknowledgement_timeout_s: 600, url: "https://subdomain.pagerduty.com/service-directory/PIJ90N7"}
+        note: "Official example response of GET /services (operation listServices, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/services/list-services
+
+  - name: pagerduty_service_dependencies
+    title: Immediate dependencies of a technical service
+    description: >-
+      One row per dependency edge touching the service (service_id required, IN up to 10):
+      supporting_service (the one depended on) -> dependent_service (the one that depends on it).
+      Types are technical_service_reference or business_service_reference.
+    kind: entities
+    request:
+      method: GET
+      path: "/service_dependencies/technical_services/{{ filters.service_id }}"
+    filters:
+      - {column: service_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Technical service ID", examples: [P7AD56]}
+    response:
+      rows_path: "$.relationships[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: supporting_service_id, path: supporting_service.id, description: "The service being depended on (downstream / callee)"}
+      - {name: supporting_service_type, path: supporting_service.type}
+      - {name: dependent_service_id, path: dependent_service.id, description: "The service that depends on it (upstream / caller)"}
+      - {name: dependent_service_type, path: dependent_service.type}
+      - {name: service_id, filter_only: true}
+    pitfalls:
+      - "Only IDs are returned; join pagerduty_services (technical) or pagerduty_business_services to name them."
+    examples:
+      - sql: >-
+          SELECT dependent_service_id AS caller, supporting_service_id AS callee, dependent_service_type
+          FROM pagerduty_service_dependencies WHERE service_id = 'P7AD56'
+        description: Which services depend on this one, and what it depends on.
+    fixtures:
+      - file: service_dependencies.json
+        filters: {service_id: P7AD56}
+        expect_rows: 2
+        expect_columns: {id: DQVP7E6G0E8AC3NR, supporting_service_id: P7AD56, supporting_service_type: technical_service_reference, dependent_service_id: P99DJ6, dependent_service_type: business_service_reference}
+        note: "Official example response of GET /service_dependencies/technical_services/{id} (operation getTechnicalServiceServiceDependencies, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/service-dependencies/get-technical-service-service-dependencies
+
+  - name: pagerduty_business_services
+    title: Business services
+    description: One row per business service (customer-facing capability backed by technical services), with its point of contact and owning team.
+    kind: entities
+    request:
+      method: GET
+      path: /business_services
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.business_services[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: point_of_contact, path: point_of_contact}
+      - {name: team_id, path: team.id}
+      - {name: url, path: html_url}
+    examples:
+      - sql: "SELECT id, name, point_of_contact, team_id FROM pagerduty_business_services ORDER BY name"
+        description: Business capabilities and who to contact for each.
+    fixtures:
+      - file: business_services.json
+        expect_rows: 2
+        expect_columns: {id: P3U7V58, name: "stand-alone node", point_of_contact: "PagerDuty Admin", team_id: null}
+        note: "Official example response of GET /business_services (operation listBusinessServices, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/business-services/list-business-services
+
+  - name: pagerduty_maintenance_windows
+    title: Maintenance windows (services that will not page)
+    description: >-
+      One row per maintenance window (GET /maintenance_windows). While a window is ongoing its
+      services create NO incidents, so an expected page that never came is often explained here.
+      Filters: state = ongoing | open | future | past | all (pushed down as `filter`, default
+      all), service_id and team_id (IDs, IN lists), query (name match). No time pushdown: compare
+      start_at / end_at with the alert time in SQL.
+    kind: events
+    request:
+      method: GET
+      path: /maintenance_windows
+      query:
+        filter: "{{ filters.state or 'all' }}"
+        "service_ids[]": "{{ filters.service_id | as_list }}"
+        "team_ids[]": "{{ filters.team_id | as_list }}"
+        query: "{{ filters.query }}"
+    filters:
+      - {column: state, description: "ongoing | open | future | past | all (default all)", examples: [ongoing]}
+      - {column: service_id, ops: ["=", "in"], fan_out: false, description: "Service ID(s) (service_ids[])", examples: [PIJ90N7]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s) (team_ids[]; needs the teams ability)", examples: [PQ9K7I8]}
+      - {column: query, description: "Name / description match", examples: [eschaton]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.maintenance_windows[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: start_time, description: "Window start (same as start_at)"}
+      - {name: id, path: id}
+      - {name: title, path: summary}
+      - {name: description, path: description}
+      - {name: start_at, type: TIMESTAMP, path: start_time}
+      - {name: end_at, type: TIMESTAMP, path: end_time}
+      - {name: services, type: JSON, path: "services[*].summary", description: "Service names in maintenance"}
+      - {name: service_ids, type: JSON, path: "services[*].id"}
+      - {name: teams, type: JSON, path: "teams[*].summary"}
+      - {name: author, path: created_by.summary, description: "Who created the window"}
+      - {name: sequence_number, type: BIGINT, path: sequence_number}
+      - {name: url, path: html_url}
+      - {name: state, filter_only: true}
+      - {name: service_id, filter_only: true}
+      - {name: team_id, filter_only: true}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Alerts sent to a service during maintenance are dropped without an incident; pagerduty_incidents will be empty for that window even though monitoring fired."
+    examples:
+      - sql: >-
+          SELECT title, start_at, end_at, services, author FROM pagerduty_maintenance_windows
+          WHERE service_id = 'PIJ90N7' AND start_at <= TIMESTAMP '2026-10-01 11:00:00' AND end_at >= TIMESTAMP '2026-10-01 11:00:00'
+        description: Was the service in maintenance when the alert fired (explains a missing page)?
+      - sql: "SELECT title, start_at, end_at, services FROM pagerduty_maintenance_windows WHERE state = 'ongoing'"
+        description: Services in maintenance right now.
+    fixtures:
+      - file: maintenance_windows.json
+        filters: {state: all}
+        expect_rows: 1
+        expect_columns: {id: PW98YIO, title: "Immanentizing the eschaton", start_at: "2015-11-10T01:00:00Z", end_at: "2015-11-10T03:00:00Z", services: '["My Mail Service"]', service_ids: '["PIJ90N7"]', teams: '["Engineering"]', author: "Earline Greenholt", url: "https://subdomain.pagerduty.com/service-directory/maintenance-windows/PW98YIO", state: all}
+        note: "Official example response of GET /maintenance_windows (operation listMaintenanceWindows, PagerDuty OpenAPI api-schema); -05:00 times normalised to UTC by the engine."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/maintenance-windows/list-maintenance-windows
+
+  # ----------------------------------------------------------------------------------------------
+  # On-call
+  # ----------------------------------------------------------------------------------------------
+  - name: pagerduty_oncalls
+    title: Who is (was) on call
+    description: >-
+      One row per on-call period overlapping the ts window (since/until; default: the analysis
+      window, i.e. who was on call when the alert fired): user, escalation policy, escalation
+      level, schedule, and the period's start/end. Filters: escalation_policy_id, schedule_id,
+      user_id (IN lists), earliest = true for only the next/earliest period per (policy, level,
+      user). The ts predicate selects the overlap window and is not re-applied to rows.
+    kind: entities
+    request:
+      method: GET
+      path: /oncalls
+      query:
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+        "escalation_policy_ids[]": "{{ filters.escalation_policy_id | as_list }}"
+        "schedule_ids[]": "{{ filters.schedule_id | as_list }}"
+        "user_ids[]": "{{ filters.user_id | as_list }}"
+        earliest: "{{ filters.earliest }}"
+        time_zone: UTC
+    filters:
+      - {column: escalation_policy_id, ops: ["=", "in"], fan_out: false, description: "Escalation policy ID(s) (a service's policy: pagerduty_services.escalation_policy_id)", examples: [PT20YPA]}
+      - {column: schedule_id, ops: ["=", "in"], fan_out: false, description: "Schedule ID(s)", examples: [PI7DH85]}
+      - {column: user_id, ops: ["=", "in"], fan_out: false, description: "User ID(s)", examples: [PT23IWX]}
+      - {column: earliest, type: BOOLEAN, description: "Only the earliest on-call per (escalation policy, level, user)", examples: ["true"]}
+    time: {column: ts, default_lookback: 5m, max_window: 90d, reapply: false}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.oncalls[*]"
+    columns:
+      - {name: user, path: user.summary, description: "On-call user's name"}
+      - {name: user_id, path: user.id}
+      - {name: escalation_policy, path: escalation_policy.summary}
+      - {name: escalation_policy_id, path: escalation_policy.id}
+      - {name: escalation_level, type: BIGINT, path: escalation_level, description: "1 = first responder"}
+      - {name: schedule, path: schedule.summary, description: "Schedule name (NULL when the user is a direct target of the policy)"}
+      - {name: schedule_id, path: schedule.id}
+      - {name: start_at, type: TIMESTAMP, path: start, description: "Start of the on-call period (NULL for permanent on-call)"}
+      - {name: end_at, type: TIMESTAMP, path: end, description: "End of the on-call period (NULL for permanent on-call)"}
+      - {name: earliest, type: BOOLEAN, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Overlap window (pushed down as since/until)"}
+    pitfalls:
+      - "ts selects periods OVERLAPPING the window; filter start_at / end_at in SQL for containment. Without a ts predicate you get who was on call during the alert window."
+      - "This endpoint has operation-specific rate limits; avoid repeated wide queries."
+      - "Directly targeted users (no schedule) appear with schedule NULL and start/end NULL; future periods are limited to 90 days ahead."
+    examples:
+      - sql: >-
+          SELECT escalation_policy, escalation_level, user, schedule, start_at, end_at
+          FROM pagerduty_oncalls WHERE escalation_policy_id = 'PT20YPA' ORDER BY escalation_level
+        description: Who was on call for the service's escalation policy when the alert fired.
+      - sql: >-
+          SELECT user, escalation_policy, escalation_level FROM pagerduty_oncalls
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 03:00:00' AND TIMESTAMP '2026-10-01 03:05:00' AND escalation_level = 1
+        description: First responders on call at 03:00 UTC.
+    fixtures:
+      - file: oncalls.json
+        expect_rows: 1
+        expect_columns: {user: "Tim Wright", user_id: PT23IWX, escalation_policy: "Engineering Escalation Policy", escalation_level: 2, schedule: "Daily Engineering Rotation", start_at: "2015-03-06T20:28:51Z", end_at: "2015-03-07T20:28:51Z"}
+        note: "Official example response of GET /oncalls (operation listOnCalls, PagerDuty OpenAPI api-schema); -05:00 offsets normalised to UTC."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/on-calls/list-on-calls
+
+  - name: pagerduty_schedules
+    title: On-call schedules
+    description: "One row per schedule (query = name match) with its time zone, the escalation policies that use it and its users."
+    kind: entities
+    request:
+      method: GET
+      path: /schedules
+      query:
+        query: "{{ filters.query }}"
+        "team_ids[]": "{{ filters.team_id | as_list }}"
+        time_zone: UTC
+    filters:
+      - {column: query, description: "Schedule name substring", examples: [Engineering]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s)", examples: [PQ9K7I8]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.schedules[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: time_zone, path: time_zone}
+      - {name: escalation_policies, type: JSON, path: "escalation_policies[*].summary"}
+      - {name: users, type: JSON, path: "users[*].summary"}
+      - {name: url, path: html_url}
+      - {name: query, filter_only: true}
+      - {name: team_id, filter_only: true}
+    examples:
+      - sql: "SELECT id, name, time_zone, escalation_policies, users FROM pagerduty_schedules WHERE query = 'Engineering'"
+        description: Find a schedule's ID before rendering its entries.
+    fixtures:
+      - file: schedules.json
+        expect_rows: 1
+        expect_columns: {id: PI7DH85, name: "Daily Engineering Rotation", time_zone: America/New_York, escalation_policies: '["Another Escalation Policy"]', users: '["PagerDuty Admin"]'}
+        note: "Official example response 'Basic Example' of GET /schedules (operation listSchedules, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/schedules/list-schedules
+
+  - name: pagerduty_schedule_entries
+    title: Rendered final schedule (who is on call when)
+    description: >-
+      The schedule's final (after overrides) rendered entries overlapping the ts window: one row
+      per (user, start, end) shift. schedule_id required (IN up to 10). Entries are truncated at
+      the window bounds unless overflow = true (whole shifts). The ts predicate selects the
+      window and is not re-applied to rows.
+    kind: entities
+    request:
+      method: GET
+      path: "/schedules/{{ filters.schedule_id }}"
+      query:
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+        overflow: "{{ filters.overflow }}"
+        time_zone: UTC
+    filters:
+      - {column: schedule_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Schedule ID", examples: [PI7DH85]}
+      - {column: overflow, type: BOOLEAN, description: "true = return whole shifts instead of truncating them at the window bounds", examples: ["true"]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d, reapply: false}
+    response:
+      rows_path: "$.schedule.final_schedule.rendered_schedule_entries[*]"
+    columns:
+      - {name: schedule_id, path: "$.schedule.id"}
+      - {name: schedule, path: "$.schedule.name"}
+      - {name: user, path: user.summary}
+      - {name: user_id, path: user.id}
+      - {name: start_at, type: TIMESTAMP, path: start}
+      - {name: end_at, type: TIMESTAMP, path: end}
+      - {name: overflow, type: BOOLEAN, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Without overflow = true, start_at / end_at are clipped to the window bounds (not the real handoff times)."
+    examples:
+      - sql: >-
+          SELECT user, start_at, end_at FROM pagerduty_schedule_entries
+          WHERE schedule_id = 'PI7DH85' AND ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 00:00:00'
+          ORDER BY start_at
+        description: Who covered the schedule on a given day (handoffs during an incident).
+    fixtures:
+      - file: schedule.json
+        filters: {schedule_id: PI7DH85}
+        expect_rows: 1
+        expect_columns: {schedule_id: PI7DH85, schedule: "Daily Engineering Rotation", user: "Regina Phalange", user_id: PXPGF42, start_at: "2015-11-10T13:00:00Z", end_at: "2015-11-10T22:00:00Z"}
+        note: "Official example response of GET /schedules/{id} (operation getSchedule, PagerDuty OpenAPI api-schema); final_schedule entries, -05:00 normalised to UTC."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/schedules/get-schedule
+
+  - name: pagerduty_schedule_overrides
+    title: Schedule overrides
+    description: One row per override on the schedule overlapping the ts window (schedule_id required). Explains why the usual person was not paged.
+    kind: entities
+    request:
+      method: GET
+      path: "/schedules/{{ filters.schedule_id }}/overrides"
+      query:
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+    filters:
+      - {column: schedule_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Schedule ID", examples: [PI7DH85]}
+    time: {column: ts, default_lookback: 7d, max_window: 90d, reapply: false}
+    response:
+      rows_path: "$.overrides[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: user, path: user.summary}
+      - {name: user_id, path: user.id}
+      - {name: start_at, type: TIMESTAMP, path: start}
+      - {name: end_at, type: TIMESTAMP, path: end}
+      - {name: schedule_id, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT user, start_at, end_at FROM pagerduty_schedule_overrides WHERE schedule_id = 'PI7DH85' AND ts >= now() - INTERVAL 7 DAY"
+        description: Overrides in the last week.
+    fixtures:
+      - file: schedule_overrides.json
+        filters: {schedule_id: PI7DH85}
+        expect_rows: 1
+        expect_columns: {id: PQ47DCP, user: "Aurelio Rice", start_at: "2012-07-01T04:00:00Z", end_at: "2012-07-02T04:00:00Z", schedule_id: PI7DH85}
+        note: "Official example response of GET /schedules/{id}/overrides (operation listScheduleOverrides, PagerDuty OpenAPI api-schema; documented under status 201)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/schedules/list-schedule-overrides
+
+  - name: pagerduty_escalation_policies
+    title: Escalation policies
+    description: >-
+      One row per escalation policy (query = name match; user_id / team_id IN): its escalation
+      rules (levels with delays and targets), the services that use it, loops and teams.
+    kind: entities
+    request:
+      method: GET
+      path: /escalation_policies
+      query:
+        query: "{{ filters.query }}"
+        "user_ids[]": "{{ filters.user_id | as_list }}"
+        "team_ids[]": "{{ filters.team_id | as_list }}"
+        sort_by: name
+    filters:
+      - {column: query, description: "Policy name substring", examples: [Engineering]}
+      - {column: user_id, ops: ["=", "in"], fan_out: false, description: "Policies targeting these user IDs", examples: [PEYSGVF]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s)", examples: [PQ9K7I8]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.escalation_policies[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: num_loops, type: BIGINT, path: num_loops}
+      - {name: escalation_rules, type: JSON, path: escalation_rules, description: "[{escalation_delay_in_minutes, targets:[user/schedule refs]}] in level order"}
+      - {name: targets, type: JSON, path: "escalation_rules[*].targets[*].summary", description: "All user / schedule targets (all levels)"}
+      - {name: services, type: JSON, path: "services[*].summary"}
+      - {name: teams, type: JSON, path: "teams[*].summary"}
+      - {name: on_call_handoff_notifications, path: on_call_handoff_notifications}
+      - {name: url, path: html_url}
+      - {name: query, filter_only: true}
+      - {name: user_id, filter_only: true}
+      - {name: team_id, filter_only: true}
+    examples:
+      - sql: "SELECT name, escalation_rules, services FROM pagerduty_escalation_policies WHERE query = 'Engineering'"
+        description: How a page escalates (levels, delays, targets) and which services use the policy.
+    fixtures:
+      - file: escalation_policies.json
+        expect_rows: 1
+        expect_columns: {id: PANZZEQ, name: "Engineering Escalation Policy", num_loops: 0, targets: '["PagerDuty Admin","Daily Engineering Rotation"]', services: '["My Mail Service"]'}
+        note: "Official example response of GET /escalation_policies (operation listEscalationPolicies, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/escalation-policies/list-escalation-policies
+
+  # ----------------------------------------------------------------------------------------------
+  # Directory
+  # ----------------------------------------------------------------------------------------------
+  - name: pagerduty_users
+    title: Users
+    description: One row per user (query = name/email match; team_id IN). Use it to map names to user IDs.
+    kind: entities
+    request:
+      method: GET
+      path: /users
+      query:
+        query: "{{ filters.query }}"
+        "team_ids[]": "{{ filters.team_id | as_list }}"
+    filters:
+      - {column: query, description: "Name or email substring", examples: [greenholt]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s)", examples: [PQ9K7I8]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.users[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: email, path: email}
+      - {name: role, path: role}
+      - {name: job_title, path: job_title}
+      - {name: time_zone, path: time_zone}
+      - {name: teams, type: JSON, path: "teams[*].summary"}
+      - {name: url, path: html_url}
+      - {name: query, filter_only: true}
+      - {name: team_id, filter_only: true}
+    examples:
+      - sql: "SELECT id, name, email, teams FROM pagerduty_users WHERE query = 'greenholt'"
+        description: Find a responder's user ID.
+    fixtures:
+      - file: users.json
+        expect_rows: 2
+        expect_columns: {id: PXPGF42, name: "Earline Greenholt", role: admin, job_title: "Director of Engineering", teams: '["Engineering"]'}
+        note: "Official example response of GET /users (operation listUsers, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/users/list-users
+
+  - name: pagerduty_teams
+    title: Teams
+    description: One row per team (query = name match). Team IDs feed the team_id filters of other tables.
+    kind: entities
+    request:
+      method: GET
+      path: /teams
+      query:
+        query: "{{ filters.query }}"
+    filters:
+      - {column: query, description: "Team name substring", examples: [Engineering]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.teams[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: url, path: html_url}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT id, name FROM pagerduty_teams WHERE query = 'Engineering'"
+    fixtures:
+      - file: teams.json
+        expect_rows: 1
+        expect_columns: {id: PQ9K7I8, name: Engineering, description: "All engineering"}
+        note: "Official example response of GET /teams (operation listTeams, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/teams/list-teams
+
+  - name: pagerduty_priorities
+    title: Incident priorities
+    description: The account's priorities in order, most severe first (rank 1 = most severe).
+    kind: entities
+    request:
+      method: GET
+      path: /priorities
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, has_more_path: "$.more", max_pages: 2}
+    response:
+      rows_path: "$.priorities[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: rank, type: BIGINT, expr: "_i + 1", description: "Position in PagerDuty's order (1 = most severe), within the first page"}
+    examples:
+      - sql: "SELECT rank, name, description FROM pagerduty_priorities ORDER BY rank"
+        description: What P1..P5 mean in this account.
+    fixtures:
+      - file: priorities.json
+        expect_rows: 5
+        expect_columns: {id: PSLWBL8, name: P1, rank: 1}
+        note: "Official example response of GET /priorities (operation listPriorities, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/priorities/list-priorities
+
+  # ----------------------------------------------------------------------------------------------
+  # Insights analytics
+  # ----------------------------------------------------------------------------------------------
+  - name: pagerduty_analytics_incidents
+    title: Incident metrics (Insights raw data)
+    description: >-
+      Enriched per-incident metrics for incidents created in the ts window (filters.created_at_start
+      / created_at_end): seconds to first ack / engage / mobilize / resolve, escalation and
+      reassignment counts, interruptions, engaged users, major flag. Optional service_id /
+      team_id / priority (name) IN lists, urgency (high | low), major (true/false). POST
+      /analytics/raw/incidents, newest first, cursor-paginated (starting_after). Data lags up to
+      ~24h.
+    kind: incidents
+    request:
+      method: POST
+      path: /analytics/raw/incidents
+      body:
+        filters:
+          created_at_start: "{{ time.start | rfc3339 }}"
+          created_at_end: "{{ time.end | rfc3339 }}"
+          service_ids: "{{ (filters.service_id | as_list) or None }}"
+          team_ids: "{{ (filters.team_id | as_list) or None }}"
+          priority_names: "{{ (filters.priority | as_list) or None }}"
+          urgency: "{{ filters.urgency }}"
+          major: "{{ ((filters.major | string | lower) in ['true', '1']) if (filters.major is defined and filters.major is not none) else None }}"
+        limit: 1000
+        order: desc
+        order_by: created_at
+        time_zone: Etc/UTC
+    filters:
+      - {column: service_id, ops: ["=", "in"], fan_out: false, description: "Service ID(s) (required for user-level API keys, or team_id)", examples: [PPSCXAN]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s)", examples: [P3XUQ75]}
+      - {column: priority, ops: ["=", "in"], fan_out: false, description: "Priority name(s), e.g. P1", examples: [P1]}
+      - {column: urgency, description: "high | low", examples: [high]}
+      - {column: major, type: BOOLEAN, description: "Only major incidents (true) or exclude them (false)", examples: ["true"]}
+    time: {column: ts, default_lookback: 30d, max_window: 365d}
+    pagination: {type: cursor, cursor_path: "$.last", cursor_param: body.starting_after, has_more_path: "$.more", max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at, description: "Creation time (UTC; the API renders it without offset in time_zone Etc/UTC)"}
+      - {name: id, path: id}
+      - {name: incident_number, type: BIGINT, path: incident_number}
+      - {name: title, path: description}
+      - {name: status, path: status}
+      - {name: urgency, path: urgency}
+      - {name: priority, path: priority_name}
+      - {name: major, type: BOOLEAN, path: major}
+      - {name: service, path: service_name}
+      - {name: service_id, path: service_id}
+      - {name: team, path: team_name}
+      - {name: team_id, path: team_id}
+      - {name: escalation_policy, path: escalation_policy_name}
+      - {name: resolved_at, type: TIMESTAMP, path: resolved_at}
+      - {name: resolved_by, path: resolved_by_user_name}
+      - {name: seconds_to_first_ack, type: DOUBLE, path: seconds_to_first_ack, description: "MTTA input"}
+      - {name: seconds_to_engage, type: DOUBLE, path: seconds_to_engage}
+      - {name: seconds_to_mobilize, type: DOUBLE, path: seconds_to_mobilize}
+      - {name: seconds_to_resolve, type: DOUBLE, path: seconds_to_resolve, description: "MTTR input"}
+      - {name: duration_ms, type: DOUBLE, path: seconds_to_resolve, transform: s_to_ms, description: "Time to resolve in ms"}
+      - {name: engaged_seconds, type: DOUBLE, path: engaged_seconds}
+      - {name: snoozed_seconds, type: DOUBLE, path: snoozed_seconds}
+      - {name: escalation_count, type: BIGINT, path: escalation_count}
+      - {name: timeout_escalation_count, type: BIGINT, path: timeout_escalation_count}
+      - {name: manual_escalation_count, type: BIGINT, path: manual_escalation_count}
+      - {name: reassignment_count, type: BIGINT, path: reassignment_count}
+      - {name: assignment_count, type: BIGINT, path: assignment_count}
+      - {name: acknowledgement_count, type: BIGINT, path: acknowledgement_count}
+      - {name: auto_resolved, type: BOOLEAN, path: auto_resolved}
+      - {name: total_notifications, type: BIGINT, path: total_notifications}
+      - {name: sleep_hour_interruptions, type: BIGINT, path: sleep_hour_interruptions}
+      - {name: off_hour_interruptions, type: BIGINT, path: off_hour_interruptions}
+      - {name: business_hour_interruptions, type: BIGINT, path: business_hour_interruptions}
+      - {name: engaged_user_count, type: BIGINT, path: engaged_user_count}
+      - {name: acknowledged_by, type: JSON, path: acknowledged_user_names}
+      - {name: assigned_to, type: JSON, path: assigned_user_names}
+      - {name: incident_type, path: incident_type_name}
+    pitfalls:
+      - "Insights data lags up to ~24h (pipeline cycles): recent incidents may be missing. Use pagerduty_incidents for the last day."
+      - "User-level API keys and OAuth tokens MUST filter on service_id or team_id (HTTP 400 otherwise); account-level keys need not."
+    examples:
+      - sql: >-
+          SELECT service, count(*) AS incidents, median(seconds_to_first_ack) AS p50_ack_s,
+                 median(seconds_to_resolve) / 60 AS p50_resolve_min, sum(escalation_count) AS escalations
+          FROM pagerduty_analytics_incidents WHERE ts >= now() - INTERVAL 30 DAY
+          GROUP BY service ORDER BY incidents DESC
+        description: 30-day MTTA / MTTR and escalations per service.
+      - sql: >-
+          SELECT ts, title, seconds_to_resolve, escalation_count, resolved_by FROM pagerduty_analytics_incidents
+          WHERE service_id = 'PPSCXAN' AND ts >= now() - INTERVAL 90 DAY ORDER BY seconds_to_resolve DESC LIMIT 10
+        description: Longest incidents on a service in the last quarter.
+    fixtures:
+      - file: analytics_raw_incidents.json
+        expect_rows: 2
+        expect_columns: {ts: "2023-05-31T10:05:00Z", id: PYC0H08, incident_number: 928, title: "The server is on fire!", service: Engineering, seconds_to_first_ack: 5, seconds_to_resolve: 3305, duration_ms: 3305000, escalation_count: 1, acknowledged_by: '["John Smith"]', resolved_at: "2023-05-31T10:15:00Z"}
+        note: "Official 'Example Response' of POST /analytics/raw/incidents (operation getAnalyticsIncidents, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/analytics/get-analytics-incidents
+
+  - name: pagerduty_analytics_services
+    title: Per-service incident aggregates (Insights)
+    description: >-
+      Aggregated incident metrics per service for incidents created in the ts window: incident
+      counts, mean seconds to ack / resolve, escalations, interruptions, uptime %. Set
+      aggregate_unit = day | week | month for one row per (service, period) with ts =
+      range_start; without it one row per service for the whole window (ts NULL). Optional
+      service_id / team_id IN, urgency, major. Data lags up to ~24h.
+    kind: timeseries
+    request:
+      method: POST
+      path: /analytics/metrics/incidents/services
+      body:
+        filters:
+          created_at_start: "{{ time.start | rfc3339 }}"
+          created_at_end: "{{ time.end | rfc3339 }}"
+          service_ids: "{{ (filters.service_id | as_list) or None }}"
+          team_ids: "{{ (filters.team_id | as_list) or None }}"
+          urgency: "{{ filters.urgency }}"
+          major: "{{ ((filters.major | string | lower) in ['true', '1']) if (filters.major is defined and filters.major is not none) else None }}"
+        aggregate_unit: "{{ filters.aggregate_unit }}"
+        time_zone: Etc/UTC
+    filters:
+      - {column: aggregate_unit, description: "day | week | month (omit for one row per service)", examples: [day]}
+      - {column: service_id, ops: ["=", "in"], fan_out: false, description: "Service ID(s)", examples: [PPSCXAN]}
+      - {column: team_id, ops: ["=", "in"], fan_out: false, description: "Team ID(s)", examples: [P3XUQ75]}
+      - {column: urgency, description: "high | low", examples: [high]}
+      - {column: major, type: BOOLEAN, description: "Only major incidents", examples: ["true"]}
+    time: {column: ts, default_lookback: 30d, max_window: 365d, reapply: false}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: range_start, description: "Start of the aggregation period (NULL without aggregate_unit)"}
+      - {name: service, path: service_name}
+      - {name: service_id, path: service_id}
+      - {name: team, path: team_name}
+      - {name: team_id, path: team_id}
+      - {name: total_incident_count, type: BIGINT, path: total_incident_count}
+      - {name: mean_seconds_to_first_ack, type: DOUBLE, path: mean_seconds_to_first_ack}
+      - {name: mean_seconds_to_engage, type: DOUBLE, path: mean_seconds_to_engage}
+      - {name: mean_seconds_to_mobilize, type: DOUBLE, path: mean_seconds_to_mobilize}
+      - {name: mean_seconds_to_resolve, type: DOUBLE, path: mean_seconds_to_resolve}
+      - {name: total_escalation_count, type: BIGINT, path: total_escalation_count}
+      - {name: total_incidents_acknowledged, type: BIGINT, path: total_incidents_acknowledged}
+      - {name: total_incidents_auto_resolved, type: BIGINT, path: total_incidents_auto_resolved}
+      - {name: total_incidents_manual_escalated, type: BIGINT, path: total_incidents_manual_escalated}
+      - {name: total_incidents_timeout_escalated, type: BIGINT, path: total_incidents_timeout_escalated}
+      - {name: total_interruptions, type: BIGINT, path: total_interruptions}
+      - {name: total_notifications, type: BIGINT, path: total_notifications}
+      - {name: total_sleep_hour_interruptions, type: BIGINT, path: total_sleep_hour_interruptions}
+      - {name: total_engaged_seconds, type: DOUBLE, path: total_engaged_seconds}
+      - {name: up_time_pct, type: DOUBLE, path: up_time_pct}
+      - {name: aggregate_unit, filter_only: true}
+      - {name: urgency, filter_only: true}
+      - {name: major, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "The created_at_start..end range may span at most one year."
+      - "The ts predicate selects incidents by creation time and is not re-applied to range_start."
+    examples:
+      - sql: >-
+          SELECT ts, service, total_incident_count, mean_seconds_to_resolve / 60 AS mttr_min
+          FROM pagerduty_analytics_services
+          WHERE aggregate_unit = 'week' AND ts >= now() - INTERVAL 90 DAY ORDER BY ts, service
+        description: Weekly incident volume and MTTR per service over a quarter (trend before/after a change).
+    fixtures:
+      - file: analytics_services.json
+        filters: {aggregate_unit: day}
+        expect_rows: 2
+        expect_columns: {ts: "2023-06-11T00:00:00Z", service: "Critical Prod Service 1", service_id: PPSCXAN, team: Engineering, total_incident_count: 124, mean_seconds_to_resolve: 380, up_time_pct: 99.92677595628416, aggregate_unit: day}
+        note: "Official 'Example Response' of POST /analytics/metrics/incidents/services (operation getAnalyticsMetricsIncidentsService, PagerDuty OpenAPI api-schema)."
+    docs_url: https://docs.pagerduty.com/developer/api/reference/rest/analytics/get-analytics-metrics-incidents-service
+
+roles:
+  incidents:
+    table: pagerduty_incidents
+    columns: {ts: ts, id: id, title: title, state: status, status: status, severity: severity, urgency: urgency, service: service, url: url, assignee: assignees}
+    notes: "PagerDuty incidents created in the window (pages). service is the PagerDuty service NAME, which may differ from the alert's service: match with ILIKE, or resolve the ID via pagerduty_services."
+  active_alerts:
+    table: pagerduty_incidents
+    filters: {status: "{{ ['triggered', 'acknowledged'] }}", date_range: "all"}
+    columns: {ts: ts, title: title, state: status, severity: severity, service: service, url: url, name: title}
+    notes: "Open PagerDuty incidents (triggered or acknowledged), whatever their age."
+  oncall:
+    table: pagerduty_oncalls
+    columns: {name: user, user: user, schedule: schedule, escalation_policy: escalation_policy, level: escalation_level, start: start_at, end: end_at}
+    notes: "Who was on call during the window, per escalation policy and level (filter escalation_policy_id from pagerduty_services)."
+  change_events:
+    table: pagerduty_change_events
+    columns: {ts: ts, title: title, service: service_id, source: source, url: url}
+    notes: "Only changes sent to PagerDuty as change events; service is a PagerDuty service ID."
+  services:
+    table: pagerduty_services
+    columns: {service: service, id: id, status: status, owner: escalation_policy, url: url}
+  alert_history:
+    table: pagerduty_log_entries
+    columns: {ts: ts, state: type, message: message, title: incident, url: url}
+    notes: "Account-wide incident state transitions (trigger / acknowledge / escalate / resolve) in the window."

@@ -1,0 +1,26 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "alerts": {
+          "nrqlConditionsSearch": {
+            "nrqlConditions": [
+              {
+                "baselineDirection": "UPPER_ONLY",
+                "id": "342",
+                "name": "My baseline condition",
+                "type": "BASELINE"
+              },
+              {
+                "id": "553",
+                "name": "My static condition",
+                "type": "STATIC",
+                "valueFunction": "SINGLE_VALUE"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

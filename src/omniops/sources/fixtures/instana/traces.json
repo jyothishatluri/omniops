@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "trace": {
+        "id": "506aef767d8ec147",
+        "label": "sdk.reloading-config-cache",
+        "startTime": 1725601763937,
+        "duration": 0,
+        "erroneous": false,
+        "service": {
+          "id": "84b5041665ce4ed6f60b47d1fd96c12d4132c9ed",
+          "label": "appdata-processor",
+          "types": [],
+          "technologies": [],
+          "snapshotIds": [],
+          "entityType": "SERVICE"
+        },
+        "endpoint": null
+      },
+      "cursor": {
+        "@class": ".IngestionOffsetCursor",
+        "ingestionTime": 1725601787000,
+        "offset": 1
+      }
+    }
+  ],
+  "canLoadMore": true,
+  "totalHits": 154,
+  "totalRepresentedItemCount": 154,
+  "totalRetainedItemCount": 154,
+  "adjustedTimeframe": {
+    "windowSize": 600000,
+    "to": 1725601780000
+  }
+}

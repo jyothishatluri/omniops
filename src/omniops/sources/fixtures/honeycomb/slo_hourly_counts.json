@@ -1,0 +1,27 @@
+{
+  "slo_id": "bZ1aRHAUsjG",
+  "resolution_seconds": 3600,
+  "buckets": [
+    {
+      "start_time": 1745168400,
+      "end_time": 1745172000,
+      "total_count": 74520,
+      "error_count": 182,
+      "is_partial": false
+    },
+    {
+      "start_time": 1745172000,
+      "end_time": 1745175600,
+      "total_count": 71043,
+      "error_count": 97,
+      "is_partial": false
+    },
+    {
+      "start_time": 1745251200,
+      "end_time": 1745254800,
+      "total_count": 12300,
+      "error_count": 14,
+      "is_partial": true
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+ "kind": "HorizontalPodAutoscalerList",
+ "apiVersion": "autoscaling/v2",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "frontend",
+    "namespace": "shop",
+    "uid": "b1714253-0000-4000-8000-000000000027",
+    "creationTimestamp": "2026-10-01T08:00:00Z"
+   },
+   "spec": {
+    "scaleTargetRef": {
+     "kind": "Deployment",
+     "name": "frontend",
+     "apiVersion": "apps/v1"
+    },
+    "minReplicas": 1,
+    "maxReplicas": 5,
+    "metrics": [
+     {
+      "type": "Resource",
+      "resource": {
+       "name": "cpu",
+       "target": {
+        "type": "Utilization",
+        "averageUtilization": 70
+       }
+      }
+     }
+    ]
+   },
+   "status": {
+    "lastScaleTime": "2026-10-01T11:47:00Z",
+    "currentReplicas": 5,
+    "desiredReplicas": 5,
+    "currentMetrics": [
+     {
+      "type": "Resource",
+      "resource": {
+       "name": "cpu",
+       "current": {
+        "averageValue": "412m",
+        "averageUtilization": 164
+       }
+      }
+     }
+    ],
+    "conditions": [
+     {
+      "type": "AbleToScale",
+      "status": "True",
+      "lastTransitionTime": "2026-10-01T08:00:15Z",
+      "reason": "ReadyForNewScale",
+      "message": "recommended size matches current size"
+     },
+     {
+      "type": "ScalingActive",
+      "status": "True",
+      "lastTransitionTime": "2026-10-01T08:00:15Z",
+      "reason": "ValidMetricFound",
+      "message": "the HPA was able to successfully calculate a replica count from cpu resource utilization (percentage of request)"
+     },
+     {
+      "type": "ScalingLimited",
+      "status": "True",
+      "lastTransitionTime": "2026-10-01T11:47:00Z",
+      "reason": "TooManyReplicas",
+      "message": "the desired replica count is more than the maximum replica count"
+     }
+    ]
+   }
+  }
+ ]
+}

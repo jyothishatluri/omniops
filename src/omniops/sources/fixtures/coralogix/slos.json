@@ -1,0 +1,29 @@
+{
+ "slos": [
+  {
+   "createTime": "2024-07-29T15:51:28.071Z",
+   "creator": "test@domain.com",
+   "description": "A brief description of my SLO",
+   "grouping": {},
+   "id": "b11919d5-ef85-4bb1-8655-02640dbe94d9",
+   "labels": {
+    "service": "checkout"
+   },
+   "name": "Example Slo Name",
+   "productType": "SLO_PRODUCT_TYPE_UNSPECIFIED",
+   "requestBasedMetricSli": {
+    "goodEvents": {
+     "query": "sum(rate(http_requests_total{service=\"checkout\",status_code!~\"5..\"}[5m]))"
+    },
+    "totalEvents": {
+     "query": "sum(rate(http_requests_total{service=\"checkout\"}[5m]))"
+    }
+   },
+   "sloTimeFrame": "SLO_TIME_FRAME_1_DAY",
+   "sloType": "SLO_TYPE_REQUEST",
+   "targetThresholdPercentage": 99.999,
+   "type": "request",
+   "updateTime": "2024-07-29T15:51:28.071Z"
+  }
+ ]
+}

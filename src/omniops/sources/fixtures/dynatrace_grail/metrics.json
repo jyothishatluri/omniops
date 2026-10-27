@@ -1,0 +1,87 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 42,
+    "locale": "en_US",
+    "query": "timeseries value = percentile(dt.service.request.response_time, 95), ts = start(), by: { dt.entity.service }, interval: 60s",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 125000,
+    "scannedBytes": 52428800,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "timeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T11:03:00.000000000Z"
+    },
+    "interval": "60000000000",
+    "dt.entity.service": "SERVICE-5D53A2A6A1F2C3B4",
+    "value": [
+     212000.5,
+     845000.0,
+     null
+    ],
+    "ts": [
+     "2026-10-01T11:00:00.000000000Z",
+     "2026-10-01T11:01:00.000000000Z",
+     "2026-10-01T11:02:00.000000000Z"
+    ]
+   },
+   {
+    "timeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T11:03:00.000000000Z"
+    },
+    "interval": "60000000000",
+    "dt.entity.service": "SERVICE-9A1B2C3D4E5F6071",
+    "value": [
+     15000.0,
+     16000.0,
+     15500.0
+    ],
+    "ts": [
+     "2026-10-01T11:00:00.000000000Z",
+     "2026-10-01T11:01:00.000000000Z",
+     "2026-10-01T11:02:00.000000000Z"
+    ]
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     1
+    ],
+    "mappings": {
+     "timeframe": {
+      "type": "timeframe"
+     },
+     "interval": {
+      "type": "duration"
+     },
+     "dt.entity.service": {
+      "type": "string"
+     },
+     "value": {
+      "type": "array"
+     },
+     "ts": {
+      "type": "array"
+     }
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,15 @@
+{
+  "data": {
+    "attributes": {
+      "metadata": [
+        {
+          "isTraced": false,
+          "isUsm": false
+        }
+      ],
+      "services": []
+    },
+    "id": "string",
+    "type": "services_list"
+  }
+}

@@ -1,0 +1,152 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "ttlSeconds": 300,
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "canonicalQuery": "fetch events | filter event.kind == \"SDLC_EVENT\" and event.type == \"deployment\" | append [fetch dt.davis.events | filter in(event.type, array(\"CUSTOM_DEPLOYMENT\", \"CUSTOM_CONFIGURATION\")) | dedup event.id, sort: { timestamp desc }] | ...",
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 37,
+    "locale": "en_US",
+    "query": "fetch events | filter event.kind == \"SDLC_EVENT\" and event.type == \"deployment\" | append [fetch dt.davis.events | filter in(event.type, array(\"CUSTOM_DEPLOYMENT\", \"CUSTOM_CONFIGURATION\")) | dedup event.id, sort: { timestamp desc }] | ...",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 1840,
+    "scannedBytes": 1048576,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "ts": "2026-10-01T11:31:12.000000000Z",
+    "end_time": "2026-10-01T11:33:40.000000000Z",
+    "timestamp": "2026-10-01T11:33:40.000000000Z",
+    "event.kind": "SDLC_EVENT",
+    "event.type": "deployment",
+    "event.status": "finished",
+    "event.name": null,
+    "event.provider": "argocd",
+    "service": "payment-service",
+    "version": null,
+    "stage": "production",
+    "revision": "d4322ab6cba38d21ad83c9de3046a8c19b2a3f11",
+    "cicd.deployment.id": "3f6a2c1e-9b7d-4e2a-8c5f-1a2b3c4d5e6f",
+    "cicd.deployment.name": "payment-service",
+    "cicd.deployment.namespace": "shop",
+    "cicd.deployment.status": "succeeded",
+    "task.name": "sync payment-service",
+    "task.outcome": "Success",
+    "vcs.repository.url.full": "https://github.com/acme/payment-service",
+    "vcs.ref.base.name": "main",
+    "dt.event.deployment.ci_back_link": null,
+    "dt.source_entity": null
+   },
+   {
+    "ts": "2026-10-01T10:05:00.000000000Z",
+    "end_time": null,
+    "timestamp": "2026-10-01T10:05:00.000000000Z",
+    "event.kind": "DAVIS_EVENT",
+    "event.type": "CUSTOM_DEPLOYMENT",
+    "event.status": "CLOSED",
+    "event.name": "Deployment checkout 1.9.3",
+    "event.provider": "EVENTS_REST_API_INGEST",
+    "service": "checkout",
+    "version": "1.9.3",
+    "stage": "production",
+    "revision": null,
+    "cicd.deployment.id": null,
+    "cicd.deployment.name": null,
+    "cicd.deployment.namespace": null,
+    "cicd.deployment.status": null,
+    "task.name": null,
+    "task.outcome": null,
+    "vcs.repository.url.full": null,
+    "vcs.ref.base.name": null,
+    "dt.event.deployment.ci_back_link": "https://ci.example.com/job/checkout/412",
+    "dt.source_entity": "PROCESS_GROUP-0A9A52EA262BC039"
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     1
+    ],
+    "mappings": {
+     "ts": {
+      "type": "timestamp"
+     },
+     "end_time": {
+      "type": "timestamp"
+     },
+     "timestamp": {
+      "type": "timestamp"
+     },
+     "event.kind": {
+      "type": "string"
+     },
+     "event.type": {
+      "type": "string"
+     },
+     "event.status": {
+      "type": "string"
+     },
+     "event.name": {
+      "type": "string"
+     },
+     "event.provider": {
+      "type": "string"
+     },
+     "service": {
+      "type": "string"
+     },
+     "version": {
+      "type": "string"
+     },
+     "stage": {
+      "type": "string"
+     },
+     "revision": {
+      "type": "string"
+     },
+     "cicd.deployment.id": {
+      "type": "string"
+     },
+     "cicd.deployment.name": {
+      "type": "string"
+     },
+     "cicd.deployment.namespace": {
+      "type": "string"
+     },
+     "cicd.deployment.status": {
+      "type": "string"
+     },
+     "task.name": {
+      "type": "string"
+     },
+     "task.outcome": {
+      "type": "string"
+     },
+     "vcs.repository.url.full": {
+      "type": "string"
+     },
+     "vcs.ref.base.name": {
+      "type": "string"
+     },
+     "dt.event.deployment.ci_back_link": {
+      "type": "string"
+     },
+     "dt.source_entity": {
+      "type": "string"
+     }
+    }
+   }
+  ]
+ }
+}

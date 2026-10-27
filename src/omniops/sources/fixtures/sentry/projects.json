@@ -1,0 +1,56 @@
+[
+ {
+  "slug": "prime-mover",
+  "name": "Prime Mover",
+  "dateCreated": "2018-11-06T21:19:58.536Z",
+  "firstEvent": null,
+  "access": [],
+  "hasAccess": true,
+  "id": "3",
+  "isBookmarked": false,
+  "isMember": true,
+  "platform": "",
+  "platforms": [],
+  "team": {
+   "id": "2",
+   "name": "Powerful Abolitionist",
+   "slug": "powerful-abolitionist"
+  },
+  "teams": [
+   {
+    "id": "2",
+    "name": "Powerful Abolitionist",
+    "slug": "powerful-abolitionist"
+   }
+  ],
+  "environments": [
+   "local"
+  ],
+  "features": [
+   "releases"
+  ],
+  "firstTransactionEvent": true,
+  "hasSessions": true,
+  "hasProfiles": true,
+  "hasReplays": true,
+  "hasFlags": true,
+  "hasMinifiedStackTrace": false,
+  "hasMonitors": true,
+  "hasFeedbacks": false,
+  "hasNewFeedbacks": false,
+  "hasUserReports": false,
+  "hasInsightsHttp": true,
+  "hasInsightsDb": false,
+  "hasInsightsAssets": true,
+  "hasInsightsAppStart": false,
+  "hasInsightsScreenLoad": false,
+  "hasInsightsVitals": false,
+  "hasInsightsCaches": false,
+  "hasInsightsQueues": false,
+  "hasInsightsAgentMonitoring": false,
+  "hasInsightsMCP": false,
+  "hasLogs": false,
+  "hasTraceMetrics": false,
+  "latestRelease": null
+ }
+]

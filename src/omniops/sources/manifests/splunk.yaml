@@ -1,0 +1,747 @@
+# Splunk Enterprise / Splunk Cloud Platform REST API (management port 8089), direct REST, no MCP.
+#
+# Search is the async job flow from the REST API Reference (search endpoints):
+#   POST  {ns}/search/jobs                       (form body; returns {"sid": ...} with output_mode=json)
+#   GET   {ns}/search/jobs/{sid}?output_mode=json (poll until entry[0].content.isDone)
+#   GET   {ns}/search/v2/jobs/{sid}/results       (v2: the v1 results/events/export GETs are
+#                                                  deprecated AND disabled since 9.0.1 / 9.0.2208)
+# Knowledge objects (saved searches, fired alerts) are read through /servicesNS/-/-/ so every
+# app and owner is visible; /services/ only shows the token user's default app context.
+# Every Atom-feed endpoint is called with output_mode=json (default is XML); the JSON envelope
+# ({entry:[{name,id,updated,links,author,acl,content}], paging:{total,perPage,offset}, messages})
+# is documented by the server/info JSON example.
+# Research notes and doc links: docs/sources/splunk.md
+source: splunk
+display_name: Splunk Enterprise / Splunk Cloud Platform
+vendor: Splunk LLC (Cisco)
+description: >-
+  Splunk platform REST API: SPL searches (logs, stats, timecharts, tstats, mstats metrics),
+  results of existing search jobs, saved searches / alert definitions and their run history,
+  fired (triggered) alerts, indexes, the metrics catalog, system messages and splunkd health.
+docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/introduction
+categories: [logs, metrics, alerts, events]
+base_url: "{{ env.SPLUNK_URL }}"
+ui_base_url: "{{ env.SPLUNK_WEB_URL }}"
+env:
+  - {name: SPLUNK_URL, description: "REST (management) base URL including port, e.g. https://splunk.example.com:8089 or https://<deployment>.splunkcloud.com:8089. Not the :8000 web UI and not the :8088 HEC port. No trailing slash."}
+  - {name: SPLUNK_TOKEN, description: "Splunk authentication token (Settings > Tokens, Splunk 7.3+), sent as 'Authorization: Bearer <token>'. The user's roles decide which indexes and knowledge objects are visible.", secret: true}
+  - {name: SPLUNK_WEB_URL, description: "Optional Splunk Web base URL for deep links, e.g. https://splunk.example.com:8000 or https://<deployment>.splunkcloud.com", default: ""}
+  - {name: SPLUNK_SEARCH_NAMESPACE, description: "REST namespace used to dispatch searches: 'services' (token user's default app) or 'servicesNS/<user>/<app>' (use when searches need an app's macros, lookups or eventtypes, e.g. servicesNS/nobody/my_app)", default: services}
+required_env: [SPLUNK_URL, SPLUNK_TOKEN]
+auth:
+  type: bearer
+  token: "{{ env.SPLUNK_TOKEN }}"
+rate_limit:
+  concurrency: 3
+  notes: >-
+    Splunk has no HTTP rate limit, but every search occupies a search slot: concurrent searches
+    per user/role are capped (role srchJobsQuota, default 3 for 'user', 50 for 'admin') and
+    per search head (limits.conf). Over quota the job is queued (dispatchState QUEUED) and the
+    poll times out. Keep concurrency low, narrow time ranges, prefer tstats/mstats.
+retention:
+  events: "per index: frozenTimePeriodInSecs (default 188697600 s = 6 years); see splunk_indexes"
+  search_jobs: "ad hoc job artifacts: 'timeout' seconds after completion (this manifest sets 600); scheduled/alert jobs: dispatch.ttl (default 2p) or alert action ttl (default 86400 s)"
+  fired_alerts: "alert.expires per saved search (default 24h)"
+errors:
+  # Wildcard paths fire when ANY message has the type (DEBUG/INFO/WARN messages are ignored).
+  - path: "$.messages[*].type"
+    equals: FATAL
+    message: "$.messages"
+    hint: "Splunk reported a fatal search/REST error (bad SPL, unknown command or macro, permission): fix the query; do not retry unchanged"
+  - path: "$.messages[*].type"
+    equals: ERROR
+    message: "$.messages"
+    hint: "Splunk reported an error in a 2xx body (missing lookup/macro, search peer failure; results may be partial or empty): read the message before trusting the rows"
+pitfalls:
+  - "Port 8089 must be reachable: on Splunk Cloud add your egress IPs to the search-api IP allow list (Admin Config Service) or ask Support to open 8089; free trial Splunk Cloud stacks cannot use the REST API at all."
+  - "Management ports often use self-signed certificates; set OMNIOPS_TLS_VERIFY=false only for lab instances."
+  - "Search results are limited by the token user's role: an index the role cannot search returns 0 rows, not an error. Confirm the index exists with splunk_indexes or '| eventcount summarize=false index=*'."
+  - "Field names are not standardised across Splunk deployments (log_level vs level vs severity, service vs app vs service.name). Look at a few raw events (fields JSON) before filtering on a field."
+query_languages:
+  spl: >-
+    SPL (Search Processing Language). Start with the search terms: index=<idx> sourcetype=<st>
+    host=<h> "phrase" field=value (AND is implicit; OR/NOT uppercase); wildcards with *. Then pipe:
+    | stats count by field | timechart span=1m count AS value | top limit=10 field |
+    | where status>=500 | rex field=_raw "(?<code>\d{3})" | table _time host message | head 100.
+    Fast index-only counts: | tstats count AS value where index=web by _time span=1m.
+    Metrics indexes: | mstats avg(cpu.usage) AS value WHERE index=metrics host=web* span=1m BY host.
+    Never put earliest=/latest= in the SPL (it overrides the ts window). Always alias the number
+    you want as value (... AS value). Raw searches return newest events first.
+tables:
+  - name: splunk_search
+    title: SPL search (async search job)
+    description: >-
+      Run an SPL search over the ts window and return its result rows. Plain searches return one
+      row per event (ts=_time, host, source, sourcetype, index, message=_raw, every extracted field
+      in the `fields` JSON column and as dynamic columns); transforming searches (stats, timechart,
+      top, tstats, mstats) return one row per result row. Filter on query (required SPL) and ts.
+      Use it for log search, error counts, top-N breakdowns, rates over time and metric-index
+      (mstats) queries. Implemented as create job -> poll until done -> page v2 results.
+    kind: logs
+    steps:
+      - name: create
+        method: POST
+        path: "/{{ env.SPLUNK_SEARCH_NAMESPACE or 'services' }}/search/jobs"
+        query: {output_mode: json}
+        body_format: form
+        body:
+          search: "{{ filters.query if ((filters.query | trim)[:1] == '|' or (filters.query | trim | lower)[:7] == 'search ') else 'search ' ~ (filters.query | trim) }}"
+          earliest_time: "{{ time.start | epoch_s }}"
+          latest_time: "{{ time.end | epoch_s }}"
+          exec_mode: normal
+          adhoc_search_level: smart
+          max_count: 50000
+          auto_cancel: 300
+          timeout: 600
+          output_mode: json
+        capture: {sid: "$.sid"}
+        timeout_s: 60
+      - name: wait
+        method: GET
+        path: "/{{ env.SPLUNK_SEARCH_NAMESPACE or 'services' }}/search/jobs/{{ captures.sid }}"
+        query: {output_mode: json}
+        poll:
+          until: "response.entry[0].content.isDone in (true, 1, '1', 'true') or response.entry[0].content.dispatchState == 'DONE'"
+          fail_if: "response.entry[0].content.isFailed in (true, 1, '1', 'true') or response.entry[0].content.dispatchState in ('FAILED', 'BAD_INPUT_CANCEL', 'USER_CANCEL', 'INTERNAL_CANCEL')"
+          interval_s: 1.0
+          timeout_s: 150
+      - name: results
+        method: GET
+        path: "/{{ env.SPLUNK_SEARCH_NAMESPACE or 'services' }}/search/v2/jobs/{{ captures.sid }}/results"
+        query: {output_mode: json, count: 1000}
+    filters:
+      - column: query
+        required: true
+        description: "SPL. 'search' is prepended unless it starts with 'search ' or '|' (generating commands such as | tstats, | mstats, | metadata, | rest)."
+        examples: ['index=main sourcetype=access_combined status>=500 | timechart span=1m count AS value']
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 6h}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+      dynamic: "."
+    columns:
+      - {name: ts, type: TIMESTAMP, path: _time, transform: auto_time, description: "_time: event time, or bucket start for timechart/bin/tstats/mstats span=; null for aggregates without _time"}
+      - {name: host, path: host}
+      - {name: source, path: source}
+      - {name: sourcetype, path: sourcetype}
+      - {name: index, path: index, description: "Splunk index of the event"}
+      - {name: message, path: _raw, description: "Raw event text (_raw); null for transforming searches"}
+      - {name: level, expr: "_['log_level'] or _['level'] or _['severity'] or _['loglevel']", description: "First of log_level / level / severity / loglevel (if the deployment extracts one)"}
+      - {name: service, expr: "_['service'] or _['service.name'] or _['service_name'] or _['app']", description: "First of service / service.name / service_name / app"}
+      - {name: trace_id, expr: "_['trace_id'] or _['traceId'] or _['trace.id']"}
+      - {name: value, type: DOUBLE, path: value, description: "The result field literally named 'value': alias the number you want AS value (timechart span=1m count AS value, stats avg(x) AS value)"}
+      - {name: count, type: BIGINT, path: count, description: "The result field named 'count' (stats count, top, timechart count without alias)"}
+      - {name: fields, type: JSON, path: ".", description: "All fields of the result row as JSON, e.g. fields->>'status', fields->>'uri_path'. Multivalue fields are JSON arrays."}
+      - {name: query, filter_only: true, description: "The SPL search"}
+    max_rows: 5000
+    sort_hint: "Raw event searches return newest events first; transforming searches return rows in the order the SPL produces (add | sort - count)."
+    pitfalls:
+      - "Do not put earliest=/latest= inside the SPL: they override the ts window the engine sends as earliest_time/latest_time (epoch seconds)."
+      - "Aggregate in SPL (stats/timechart/tstats) rather than pulling raw events into SQL: at most 5000 rows come back (1000 per page, 5 pages)."
+      - "timechart fills empty buckets with 0, 'stats count by _time' (after bin) does not: prefer timechart span=1m count AS value for rates so a burst does not look like it ended at its peak."
+      - "timechart ... BY field pivots series into columns named after field values (dynamic columns / fields JSON); for a long format use '| bin _time span=1m | stats count AS value by _time, field'."
+      - "adhoc_search_level=smart: for transforming searches only fields used by the search exist; add '| table *' or name the fields to keep them."
+      - "A search that finds no events returns 0 rows and no error. Before concluding 'no errors', run a positive control on the same index/sourcetype without the error filter."
+      - "The poll waits up to 150 s; a timeout means the search is too expensive or queued behind the role's concurrent-search quota: narrow the window, add index=/sourcetype=, or use tstats."
+      - "Results are capped by max_count=50000 stored results per job; for more, aggregate."
+      - "A results message 'Your timerange was substituted based on your search string' (INFO) means earliest=/latest= in the SPL replaced the ts window: the rows are NOT for the window you asked."
+      - "Generating commands (| tstats, | mstats, | metadata, | rest, | inputlookup) must start the query with '|'; anything else gets 'search ' prepended, so 'tstats count ...' without the pipe searches for the literal word tstats."
+    examples:
+      - sql: >-
+          SELECT ts, host, sourcetype, message FROM splunk_search
+          WHERE query = 'index=prod sourcetype=kube:container:checkout (ERROR OR Exception) | head 200'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Recent error log lines for one service's container logs in the incident window.
+      - sql: >-
+          SELECT ts, value FROM splunk_search
+          WHERE query = 'index=web sourcetype=access_combined status>=500 | timechart span=1m count AS value'
+            AND ts >= TIMESTAMP '2026-10-01 11:00:00' AND ts < TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: 5xx responses per minute (zero-filled by timechart) to find onset and peak.
+      - sql: >-
+          SELECT fields->>'uri_path' AS uri_path, fields->>'status' AS status, count
+          FROM splunk_search
+          WHERE query = 'index=web status>=500 | stats count by uri_path, status | sort - count | head 20'
+          ORDER BY count DESC
+        description: Which endpoints and status codes produce the errors.
+      - sql: >-
+          SELECT ts, fields->>'host' AS host, value FROM splunk_search
+          WHERE query = '| mstats avg(cpu.usage) AS value WHERE index=metrics host=web-* span=1m BY host'
+          ORDER BY ts
+        description: Metric-index query (mstats) for CPU per host in the analysis window.
+      - sql: >-
+          WITH baseline AS (
+            SELECT avg(value) AS base FROM splunk_search
+            WHERE query = 'index=web status>=500 | timechart span=1m count AS value'
+              AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 11:00:00')
+          SELECT s.ts, s.value, b.base FROM splunk_search s, baseline b
+          WHERE s.query = 'index=web status>=500 | timechart span=1m count AS value'
+            AND s.ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND s.value > 3 * b.base
+          ORDER BY s.ts
+        description: Minutes where the error rate exceeded 3x the previous hour's baseline.
+    fixtures:
+      - file: search_results.json
+        filters: {query: 'index=_internal source=*/metrics.log'}
+        expect_rows: 3
+        expect_columns: {index: _internal, source: /Applications/splunk/var/log/splunk/metrics.log, sourcetype: splunkd, ts: null, message: null}
+        note: "Verbatim JSON response of GET search/v2/jobs/{search_id}/results (output_mode=json) from the REST API Reference, Search endpoint descriptions."
+      - file: search_results_basic_concepts.json
+        filters: {query: 'index=_internal source=*metrics.log'}
+        expect_rows: 3
+        expect_columns: {host: splunks-ombra.sv.splunk.com, sourcetype: splunkd}
+        note: "Verbatim 'Example B: JSON response format example' from the REST API User Manual, Basic concepts about the Splunk platform REST API (results JSON with messages)."
+      - file: search_results_error.json
+        filters: {query: 'index=web | lookup missing_lookup host'}
+        expect_error: "Error in 'lookup' command"
+        note: >-
+          Error-rule check. Built strictly from the documented results JSON envelope (init_offset /
+          messages[{type,text}] / preview / results, REST API Reference search/v2/jobs/{search_id}/results)
+          with one message of type ERROR next to a documented DEBUG message. The reference examples only
+          show DEBUG/INFO/WARN message types; ERROR/FATAL are the remaining Splunk message levels.
+      - file: search_results_events.json
+        filters: {query: 'index=_internal | head 1'}
+        expect_rows: 1
+        expect_columns: {ts: "2012-04-06T12:13:42.943000-07:00", host: mbp15.splunk.com, index: _internal, sourcetype: splunkd_access, count: null}
+        note: >-
+          Built strictly from the documented search/jobs/export example event (REST API Reference,
+          search/jobs/export XML response: _raw, _time, host, index, source, sourcetype, _indextime ...)
+          rendered in the documented results JSON envelope (init_offset/messages/preview/results).
+          _time is rendered with the documented default time_format %FT%T.%Q%:z.
+    ui_link: >-
+      {{ (env.SPLUNK_WEB_URL ~ '/app/search/search?q=' ~ (('search ' ~ filters.query) if (filters.query and (filters.query | trim)[:1] != '|') else filters.query) | urlencode ~ '&earliest=' ~ (time.start | epoch_s) ~ '&latest=' ~ (time.end | epoch_s)) if env.SPLUNK_WEB_URL else none }}
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/search-endpoints/search-endpoint-descriptions
+
+  - name: splunk_job_results
+    title: Results of an existing search job (by sid)
+    description: >-
+      Result rows of a search job that already ran, by its search ID (sid): e.g. the job of a
+      fired alert (splunk_fired_alerts.sid) or a scheduled run (splunk_saved_search_history.sid).
+      Shows exactly what the alert's search returned when it triggered. Filter on sid (required).
+    kind: logs
+    request:
+      method: GET
+      path: "/{{ env.SPLUNK_SEARCH_NAMESPACE or 'services' }}/search/v2/jobs/{{ filters.sid | urlencode }}/results"
+      query: {output_mode: json, count: 1000}
+    filters:
+      - column: sid
+        required: true
+        description: "Search job ID, e.g. scheduler__admin__search__RMD5..._at_1351181001_5.31 or 1423855196.339"
+        examples: ['scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715420_1']
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+      dynamic: "."
+    columns:
+      - {name: ts, type: TIMESTAMP, path: _time, transform: auto_time}
+      - {name: host, path: host}
+      - {name: source, path: source}
+      - {name: sourcetype, path: sourcetype}
+      - {name: index, path: index}
+      - {name: message, path: _raw}
+      - {name: value, type: DOUBLE, path: value}
+      - {name: count, type: BIGINT, path: count}
+      - {name: fields, type: JSON, path: ".", description: "All fields of the result row as JSON"}
+      - {name: sid, filter_only: true, description: "Search job ID"}
+    pitfalls:
+      - "Jobs expire: ad hoc jobs after their timeout, scheduled jobs after dispatch.ttl (default 2 scheduled periods), alert-triggered jobs after the alert action ttl (default 24h). An expired sid is an HTTP 404, not empty data: rerun the saved search's SPL with splunk_search instead."
+      - "Scheduler jobs run as the saved search owner; the token user needs read access to the job (same user, or admin/'admin_all_objects')."
+    examples:
+      - sql: >-
+          SELECT ts, host, message, fields FROM splunk_job_results
+          WHERE sid = 'scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715420_1'
+        description: What the alert's search returned at trigger time (sid from splunk_fired_alerts).
+    fixtures:
+      - file: search_results.json
+        filters: {sid: mysearch_02151949}
+        expect_rows: 3
+        expect_columns: {sourcetype: splunkd, index: _internal}
+        note: "Verbatim JSON response of GET search/v2/jobs/mysearch_02151949/results from the REST API Reference."
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/search-endpoints/search-endpoint-descriptions
+
+  - name: splunk_saved_searches
+    title: Saved searches, reports and alert definitions
+    description: >-
+      Saved search configurations across all apps and owners: the SPL (query), schedule, alert
+      condition (alert_type / comparator / threshold / condition), severity, actions, dispatch
+      time range and whether triggered alerts are tracked. Use it to read the definition of an
+      alert that fired. Filter by exact name, or by a REST filter expression.
+    kind: entities
+    request:
+      method: GET
+      path: "/servicesNS/-/-/saved/searches{{ ('/' ~ (filters.name | urlencode)) if filters.name else '' }}"
+      query:
+        output_mode: json
+        search: "{{ filters.filter }}"
+        count: 100
+      accept_status: [404]
+    filters:
+      - {column: name, description: "Exact saved search / alert name (fetched directly)", examples: ['Errors in the last 24 hours']}
+      - {column: filter, description: "REST 'search' filter over entry fields: free text matches any field substring, field=value restricts to one field, e.g. 'is_scheduled=1', 'alert.track=1', 'checkout'", examples: ['is_scheduled=1']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 100, total_path: "$.paging.total", max_pages: 10}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: name, path: name, description: "Saved search name (unique per app/owner)"}
+      - {name: title, path: name}
+      - {name: query, path: content.search, description: "The SPL of the saved search"}
+      - {name: description, path: content.description}
+      - {name: app, path: acl.app}
+      - {name: owner, path: acl.owner}
+      - {name: sharing, path: acl.sharing, description: "user | app | global"}
+      - {name: disabled, type: BOOLEAN, path: content.disabled}
+      - {name: is_scheduled, type: BOOLEAN, path: content.is_scheduled}
+      - {name: cron_schedule, path: content.cron_schedule}
+      - {name: next_scheduled_time, path: content.next_scheduled_time}
+      - {name: alert_type, path: content.alert_type, description: "always | custom | number of events | number of hosts | number of sources"}
+      - {name: alert_comparator, path: content.alert_comparator, description: "greater than | less than | equal to | rises by | drops by | rises by perc | drops by perc"}
+      - {name: alert_threshold, path: content.alert_threshold}
+      - {name: alert_condition, path: content.alert_condition, description: "Custom condition SPL (alert_type=custom)"}
+      - {name: severity, path: "content['alert.severity']", description: "alert.severity 1-6: 1 DEBUG/Info, 2 INFO/Low, 3 WARN/Medium (default), 4 ERROR/High, 5 SEVERE/Critical, 6 FATAL"}
+      - {name: severity_name, expr: "{'1': 'info', '2': 'low', '3': 'medium', '4': 'high', '5': 'critical', '6': 'fatal'}.get((_['content'] or {})['alert.severity'] | string)", description: "Severity as the UI names it: info | low | medium | high | critical | fatal"}
+      - {name: alert_track, type: BOOLEAN, path: "content['alert.track']", description: "Whether triggers are recorded in fired alerts (splunk_fired_alerts)"}
+      - {name: alert_expires, path: "content['alert.expires']", description: "How long fired-alert records are kept, e.g. 24h"}
+      - {name: alert_digest_mode, type: BOOLEAN, path: "content['alert.digest_mode']"}
+      - {name: suppress_period, path: "content['alert.suppress.period']", description: "Throttling window; a throttled alert does not re-fire"}
+      - {name: actions, path: content.actions, description: "Comma-separated enabled alert actions (email, webhook, ...)"}
+      - {name: dispatch_earliest, path: "content['dispatch.earliest_time']", description: "Relative window the scheduled search covers, e.g. -15m"}
+      - {name: dispatch_latest, path: "content['dispatch.latest_time']"}
+      - {name: updated, type: TIMESTAMP, path: updated, transform: auto_time}
+      - {name: id, path: id, description: "Management URL of the entity"}
+      - {name: content, type: JSON, path: content, description: "Every setting of the saved search"}
+      - {name: filter, filter_only: true, description: "REST 'search' filter expression (pushdown only)"}
+    pitfalls:
+      - "Only objects the token user can read are listed (private searches of other users are hidden unless admin)."
+      - "A saved search with alert_track=false never appears in splunk_fired_alerts even when it triggers: check its actions (email/webhook) or its run history instead."
+      - "alert.severity is numeric in the API (UI shows Info/Low/Medium/High/Critical); 3 is the default Medium. Compare severity_name for readable filters."
+      - "Names are matched exactly (case-sensitive); use filter='<substring>' to search."
+    examples:
+      - sql: >-
+          SELECT name, app, query, cron_schedule, alert_type, alert_comparator, alert_threshold, severity, dispatch_earliest
+          FROM splunk_saved_searches WHERE name = 'Checkout 5xx rate high'
+        description: Read the definition (SPL, schedule, threshold) of the alert that fired.
+      - sql: >-
+          SELECT name, app, cron_schedule, alert_type, actions FROM splunk_saved_searches
+          WHERE filter = 'is_scheduled=1' AND alert_type <> 'always' AND NOT disabled
+        description: All enabled scheduled alerts.
+    fixtures:
+      - file: saved_searches.json
+        expect_rows: 1
+        expect_columns: {name: Errors in the last 24 hours, app: search, owner: nobody, alert_type: always, severity: '3', severity_name: medium, dispatch_earliest: '-1d', is_scheduled: false, disabled: false, query: 'error OR failed OR severe OR ( sourcetype=access_* ( 404 OR 500 OR 503 ) )'}
+        note: >-
+          Built strictly from the documented GET saved/searches example entry (XML response in the
+          REST API Reference, Search endpoint descriptions: 'Errors in the last 24 hours') rendered in
+          the JSON Atom envelope shown by the server/info output_mode=json example
+          (entry/name/id/updated/links/author/acl/content, paging, messages).
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/search-endpoints/search-endpoint-descriptions
+
+  - name: splunk_saved_search_history
+    title: Run history (search jobs) of a saved search / alert
+    description: >-
+      The available (not yet expired) search jobs dispatched from one saved search: sid, when it
+      ran, whether it finished. Use the sid with splunk_job_results to see what a scheduled alert
+      search returned. Filter on saved_search (required, exact name).
+    kind: events
+    request:
+      method: GET
+      path: "/servicesNS/-/-/saved/searches/{{ filters.saved_search | urlencode }}/history"
+      query: {output_mode: json, count: 100}
+      accept_status: [404]
+    filters:
+      - {column: saved_search, required: true, description: "Exact saved search name", examples: ['summary_durable']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 100, total_path: "$.paging.total", max_pages: 5}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: sid, path: name, description: "Search job ID (use with splunk_job_results)"}
+      - {name: ts, type: TIMESTAMP, expr: "_['published'] or _['updated']", transform: auto_time, description: "When the job was dispatched (published) or last updated"}
+      - {name: is_done, type: BOOLEAN, path: content.isDone}
+      - {name: is_scheduled, type: BOOLEAN, path: content.isScheduled}
+      - {name: is_zombie, type: BOOLEAN, path: content.isZombie}
+      - {name: is_finalized, type: BOOLEAN, path: content.isFinalized}
+      - {name: earliest_time, path: content.earliest_time}
+      - {name: latest_time, path: content.latest_time}
+      - {name: ttl, type: BIGINT, path: content.ttl}
+      - {name: owner, path: author}
+      - {name: saved_search, filter_only: true}
+    sort_hint: "Splunk returns entries sorted by name (sid); ORDER BY ts DESC in SQL."
+    pitfalls:
+      - "Only unexpired jobs are listed (dispatch.ttl); an alert that ran days ago may have no history left."
+      - "The name is resolved across all apps and owners (/servicesNS/-/-/); if two apps define a saved search with the same name the call can fail or pick one: check splunk_saved_searches (app, owner) first."
+      - "isZombie=true means the search process died: the alert may have silently not evaluated."
+    examples:
+      - sql: >-
+          SELECT sid, ts, is_done, is_zombie FROM splunk_saved_search_history
+          WHERE saved_search = 'Checkout 5xx rate high' ORDER BY ts DESC LIMIT 10
+        description: Latest runs of an alert's scheduled search (did it run, did it finish).
+    fixtures:
+      - file: saved_search_history.json
+        filters: {saved_search: summary_durable}
+        expect_rows: 2
+        expect_columns: {sid: scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715420_1, owner: admin, ts: "2021-04-29T09:57:17-07:00", is_done: true, is_scheduled: true, is_zombie: false, ttl: 118}
+        note: >-
+          Built strictly from the documented GET saved/searches/{name}/history example (XML response
+          for summary_durable in the REST API Reference) rendered in the JSON Atom envelope of the
+          server/info JSON example; content keys are the documented returned values.
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/search-endpoints/search-endpoint-descriptions
+
+  - name: splunk_fired_alerts
+    title: Fired (triggered) alerts
+    description: >-
+      Unexpired triggered alert records: which saved search fired, when (ts = trigger time),
+      severity, the sid of the search job that triggered it, alert type and actions. Optional
+      filter alert_name (exact saved search name); without it every fired alert is returned.
+    kind: alerts
+    request:
+      method: GET
+      path: "/servicesNS/-/-/alerts/fired_alerts/{{ (filters.alert_name | urlencode) if filters.alert_name else '-' }}"
+      query: {output_mode: json, count: 100}
+      accept_status: [404]
+    filters:
+      - {column: alert_name, description: "Exact saved search name of the alert", examples: ['MyAlert']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 100, total_path: "$.paging.total", max_pages: 10}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: id, path: name, description: "Fired alert record id"}
+      - {name: alert_name, path: content.savedsearch_name, description: "Saved search that triggered"}
+      - {name: title, path: content.savedsearch_name}
+      - {name: ts, type: TIMESTAMP, path: content.trigger_time, transform: epoch_s, description: "Trigger time"}
+      - {name: severity, path: content.severity, description: "Numeric severity 1-6 (1 Info, 2 Low, 3 Medium = default, 4 High, 5 Critical, 6 Fatal)"}
+      - {name: severity_name, expr: "{'1': 'info', '2': 'low', '3': 'medium', '4': 'high', '5': 'critical', '6': 'fatal'}.get((_['content'] or {})['severity'] | string)", description: "info | low | medium | high | critical | fatal"}
+      - {name: sid, path: content.sid, description: "Search job that triggered the alert (splunk_job_results)"}
+      - {name: alert_type, path: content.alert_type, description: "scheduled (historical) or real time"}
+      - {name: digest_mode, type: BOOLEAN, path: content.digest_mode}
+      - {name: triggered_alerts, type: BIGINT, path: content.triggered_alerts, description: "Number of results/alerts in this trigger"}
+      - {name: actions, path: content.actions}
+      - {name: expires, path: content.expiration_time_rendered}
+      - {name: trigger_time_rendered, path: content.trigger_time_rendered}
+      - {name: app, path: acl.app}
+      - {name: owner, path: acl.owner}
+    sort_hint: "Entries come sorted by name; ORDER BY ts DESC in SQL. No server-side time filter: ts predicates are applied in SQL."
+    pitfalls:
+      - "Only alerts with the 'Add to Triggered Alerts' action (alert.track=1) are recorded, and records expire after alert.expires (default 24h). An empty result does NOT mean nothing fired: check splunk_saved_search_history or index=_audit action=alert_fired via splunk_search."
+      - "Throttled (suppressed) triggers are not recorded."
+    examples:
+      - sql: >-
+          SELECT ts, alert_name, severity, sid, triggered_alerts FROM splunk_fired_alerts
+          WHERE ts >= TIMESTAMP '2026-10-01 11:00:00' ORDER BY ts DESC
+        description: Alerts that fired since 11:00, newest first, with the sid to inspect their results.
+    fixtures:
+      - file: fired_alerts.json
+        filters: {alert_name: MyAlert}
+        expect_rows: 1
+        expect_columns: {alert_name: MyAlert, ts: "2012-10-25T16:19:47Z", severity: '3', severity_name: medium, sid: rt_scheduler__admin__search__MyAlert_at_1351181001_5.31, alert_type: real time, triggered_alerts: 5}
+        note: >-
+          Built strictly from the documented GET alerts/fired_alerts/{name} example (XML response for
+          MyAlert in the REST API Reference, Search endpoint descriptions) rendered in the JSON Atom
+          envelope of the server/info JSON example.
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/search-endpoints/search-endpoint-descriptions
+
+  - name: splunk_fired_alert_summary
+    title: Fired alert counts per alert
+    description: One row per alert (saved search) that has unexpired triggered records, with the number of triggers. A quick 'what fired recently' overview.
+    kind: alerts
+    request:
+      method: GET
+      path: /servicesNS/-/-/alerts/fired_alerts
+      query: {output_mode: json, count: 100}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 100, total_path: "$.paging.total", max_pages: 5}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: alert_name, path: name, description: "Saved search name ('-' is the aggregate of all alerts)"}
+      - {name: triggered_alert_count, type: BIGINT, path: content.triggered_alert_count}
+      - {name: app, path: acl.app}
+      - {name: owner, path: acl.owner}
+    pitfalls:
+      - "Same visibility rules as splunk_fired_alerts: only tracked (alert.track=1), unexpired triggers are counted."
+    examples:
+      - sql: "SELECT alert_name, triggered_alert_count FROM splunk_fired_alert_summary WHERE alert_name <> '-' ORDER BY triggered_alert_count DESC"
+        description: Which alerts fired most among the unexpired records.
+    fixtures:
+      - file: fired_alert_summary.json
+        expect_rows: 1
+        expect_columns: {alert_name: '-', triggered_alert_count: 0, app: search}
+        note: >-
+          Built strictly from the documented GET alerts/fired_alerts example (XML: one entry '-' with
+          triggered_alert_count 0, REST API Reference) rendered in the JSON Atom envelope of the
+          server/info JSON example.
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/search-endpoints/search-endpoint-descriptions
+
+  - name: splunk_indexes
+    title: Indexes
+    description: >-
+      Indexes known to the instance with type (event/metric), event count, size, earliest and
+      latest event time (min_time/max_time) and retention. Use max_time to spot an ingestion gap
+      (data stopped arriving) before trusting an empty search. Optional filter datatype.
+    kind: entities
+    request:
+      method: GET
+      path: /services/data/indexes
+      query:
+        output_mode: json
+        datatype: "{{ filters.datatype or 'all' }}"
+        count: 500
+    filters:
+      - {column: datatype, description: "all (default) | event | metric", examples: ['all']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 500, total_path: "$.paging.total", max_pages: 5}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: name, path: name}
+      - {name: datatype, path: content.datatype, description: "event | metric"}
+      - {name: total_event_count, type: BIGINT, path: content.totalEventCount}
+      - {name: current_size_mb, type: DOUBLE, path: content.currentDBSizeMB}
+      - {name: max_size_mb, type: DOUBLE, path: content.maxTotalDataSizeMB}
+      - {name: min_time, type: TIMESTAMP, path: content.minTime, transform: auto_time, description: "Earliest event time in the index"}
+      - {name: max_time, type: TIMESTAMP, path: content.maxTime, transform: auto_time, description: "Latest event time in the index (staleness = ingestion gap)"}
+      - {name: frozen_time_period_s, type: BIGINT, path: content.frozenTimePeriodInSecs, description: "Retention in seconds"}
+      - {name: disabled, type: BOOLEAN, path: content.disabled}
+      - {name: is_internal, type: BOOLEAN, path: content.isInternal}
+      - {name: home_path, path: content.homePath}
+    pitfalls:
+      - "On a distributed deployment (and Splunk Cloud) this endpoint describes the instance you call (the search head), whose local counts are usually 0. For cluster-wide freshness use splunk_search with '| tstats latest(_time) AS value where index=* by index' or '| rest /services/data/indexes splunk_server=*'."
+      - "Roles may restrict listing (indexes_list_all capability)."
+      - "Splunk Cloud Platform only supports the Access control, Federated Search, Knowledge, KV store, Metrics and Search REST resource groups (search tier only): this introspection endpoint may be refused there; fall back to splunk_search with '| eventcount summarize=false index=*' or '| tstats latest(_time) AS value where index=* by index'."
+    examples:
+      - sql: >-
+          SELECT name, datatype, total_event_count, max_time, frozen_time_period_s / 86400 AS retention_days
+          FROM splunk_indexes WHERE NOT is_internal ORDER BY max_time
+        description: Indexes ordered by staleness (oldest latest-event first) to spot ingestion gaps.
+    fixtures:
+      - file: indexes.json
+        expect_rows: 1
+        expect_columns: {name: _audit, datatype: event, total_event_count: 230, current_size_mb: 1.0, max_time: "2011-07-10T22:20:53-07:00", frozen_time_period_s: 188697600, is_internal: true, disabled: false}
+        note: >-
+          Built strictly from the documented GET data/indexes example entry (_audit, XML response in
+          the REST API Reference, Introspection endpoint descriptions) rendered in the JSON Atom
+          envelope of the server/info JSON example.
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/introspection-endpoints
+
+  - name: splunk_metric_names
+    title: Metrics catalog - metric names
+    description: >-
+      Metric names present in metrics indexes during the ts window (default last 24h), optionally
+      restricted by a dimension filter. Use before writing mstats to confirm the exact metric name.
+    kind: entities
+    request:
+      method: GET
+      path: /services/catalog/metricstore/metrics
+      query:
+        output_mode: json
+        earliest: "{{ time.start | epoch_s }}"
+        latest: "{{ time.end | epoch_s }}"
+        filter: "{{ filters.dimension_filter }}"
+        count: 500
+    filters:
+      - {column: dimension_filter, description: "Catalog filter: a dimension name (dc), dimension=value (dc=east) or index=<metrics index>", examples: ['index=metrics']}
+    time: {column: ts, default_lookback: 24h}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 500, total_path: "$.paging.total", max_pages: 5}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: metric, path: name}
+      - {name: dimension_filter, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Without an index filter the catalog uses the role's default indexes, and only metrics indexes among them; an empty list can mean the role has no default metrics index: pass dimension_filter='index=<name>'."
+      - "Requires the list_metrics_catalog capability."
+    examples:
+      - sql: "SELECT metric FROM splunk_metric_names WHERE dimension_filter = 'index=metrics' AND metric LIKE 'cpu%'"
+        description: Which CPU metrics exist in the metrics index.
+    fixtures:
+      - file: metric_names.json
+        expect_rows: 1
+        expect_columns: {metric: aws.ec2.CPUUtilization}
+        note: "Built strictly from the documented GET catalog/metricstore/metrics example entry (aws.ec2.CPUUtilization, REST API Reference, Metrics Catalog endpoint descriptions) in the JSON Atom envelope of the server/info JSON example."
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/metrics-catalog-endpoints
+
+  - name: splunk_metric_dimensions
+    title: Metrics catalog - dimensions of a metric
+    description: Dimension names recorded for a metric (metric required; '*' for all metrics) in the ts window. Use to learn what you can BY/filter on in mstats.
+    kind: entities
+    request:
+      method: GET
+      path: /services/catalog/metricstore/dimensions
+      query:
+        output_mode: json
+        metric_name: "{{ filters.metric }}"
+        earliest: "{{ time.start | epoch_s }}"
+        latest: "{{ time.end | epoch_s }}"
+        filter: "{{ filters.dimension_filter }}"
+        count: 500
+    filters:
+      - {column: metric, required: true, description: "Metric name, or * for all", examples: ['os.mem.free']}
+      - {column: dimension_filter, description: "Catalog filter, e.g. dc=east or index=metrics"}
+    time: {column: ts, default_lookback: 24h}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 500, total_path: "$.paging.total", max_pages: 5}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: dimension, path: name}
+      - {name: metric, filter_only: true}
+      - {name: dimension_filter, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT dimension FROM splunk_metric_dimensions WHERE metric = 'cpu.usage'"
+        description: Dimensions available for cpu.usage.
+    fixtures:
+      - file: metric_dimensions.json
+        filters: {metric: '*'}
+        expect_rows: 1
+        expect_columns: {dimension: App, metric: '*'}
+        note: "Built strictly from the documented GET catalog/metricstore/dimensions?metric_name=* example entry (App) in the JSON Atom envelope of the server/info JSON example."
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/metrics-catalog-endpoints
+
+  - name: splunk_metric_dimension_values
+    title: Metrics catalog - values of a dimension
+    description: Values of one dimension for a metric in the ts window (dimension and metric required). Confirms the exact host/service value before filtering mstats.
+    kind: entities
+    request:
+      method: GET
+      path: "/services/catalog/metricstore/dimensions/{{ filters.dimension | urlencode }}/values"
+      query:
+        output_mode: json
+        metric_name: "{{ filters.metric }}"
+        earliest: "{{ time.start | epoch_s }}"
+        latest: "{{ time.end | epoch_s }}"
+        filter: "{{ filters.dimension_filter }}"
+        count: 500
+    filters:
+      - {column: dimension, required: true, description: "Dimension name", examples: ['app']}
+      - {column: metric, required: true, description: "Metric name", examples: ['os.mem.free']}
+      - {column: dimension_filter, description: "Catalog filter, e.g. dc=east"}
+    time: {column: ts, default_lookback: 24h}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 500, total_path: "$.paging.total", max_pages: 5}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: value, path: name, description: "Dimension value"}
+      - {name: dimension, filter_only: true}
+      - {name: metric, filter_only: true}
+      - {name: dimension_filter, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value AS host FROM splunk_metric_dimension_values WHERE dimension = 'host' AND metric = 'cpu.usage'"
+        description: Hosts reporting cpu.usage.
+    fixtures:
+      - file: metric_dimension_values.json
+        filters: {dimension: app, metric: os.mem.free}
+        expect_rows: 1
+        expect_columns: {value: accountmanagement, dimension: app}
+        note: "Built strictly from the documented GET catalog/metricstore/dimensions/app/values?metric_name=os.mem.free example entry (accountmanagement) in the JSON Atom envelope of the server/info JSON example."
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/metrics-catalog-endpoints
+
+  - name: splunk_messages
+    title: System messages (bulletins)
+    description: >-
+      Splunk bulletin-board messages raised by splunkd: search peers down, skipped scheduled
+      searches, license violations, disk space, misconfigured indexes. Tells you whether Splunk
+      itself was degraded (missing or partial data) during the incident.
+    kind: events
+    request:
+      method: GET
+      path: /services/messages
+      query: {output_mode: json, count: 200}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.count, page_size: 200, total_path: "$.paging.total", max_pages: 3}
+    response:
+      rows_path: "$.entry[*]"
+    columns:
+      - {name: name, path: name}
+      - {name: message, path: content.message}
+      - {name: severity, path: content.severity, description: "info | warn | error"}
+      - {name: server, path: content.server}
+      - {name: ts, type: TIMESTAMP, path: content.timeCreated_epochSecs, transform: epoch_s}
+    pitfalls:
+      - "Splunk Cloud Platform only supports the Access control, Federated Search, Knowledge, KV store, Metrics and Search REST resource groups (search tier only): this system endpoint may be refused there; fall back to splunk_search with '| rest /services/messages'."
+    examples:
+      - sql: "SELECT ts, severity, server, message FROM splunk_messages WHERE severity IN ('warn', 'error') ORDER BY ts DESC"
+        description: Current Splunk warnings/errors that could explain missing data.
+    fixtures:
+      - file: messages.json
+        expect_rows: 1
+        expect_columns: {name: manifest_error, severity: warn, server: docs-unix-4, ts: "2016-09-01T14:18:49Z"}
+        note: "Built strictly from the documented GET messages example entry (manifest_error, REST API Reference, System endpoint descriptions) in the JSON Atom envelope of the server/info JSON example."
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/system-endpoints
+
+  - name: splunk_health
+    title: splunkd health report
+    description: >-
+      One row per top-level splunkd health feature (Data Forwarding, File Monitor Input, Indexer
+      Clustering, Search Scheduler...) with its color (green/yellow/red), the non-green reasons
+      and the nested sub-features. Requires admin or the list_health capability.
+    kind: entities
+    request:
+      method: GET
+      path: /services/server/health/splunkd/details
+      query: {output_mode: json}
+    response:
+      rows_path: "$.entry[0].content.features"
+      expand:
+        - {entries: ".", as: f}
+    columns:
+      - {name: feature, path: "@f.key"}
+      - {name: health, path: "@f.value.health", description: "green | yellow | red (worst color of its sub-features)"}
+      - {name: reasons, type: JSON, path: "@f.value.reasons", description: "Non-green indicators, thresholds and reasons"}
+      - {name: messages, type: JSON, path: "@f.value.messages", description: "Last splunkd.log messages related to a non-green feature"}
+      - {name: sub_features, type: JSON, path: "@f.value.features"}
+      - {name: overall_health, path: "$.entry[0].content.health"}
+    pitfalls:
+      - "Needs the admin role or the list_health capability (HTTP 403 otherwise)."
+      - "Splunk Cloud Platform only supports the Access control, Federated Search, Knowledge, KV store, Metrics and Search REST resource groups (search tier only): this introspection endpoint may be refused there; fall back to splunk_search with '| rest /services/server/health/splunkd/details'."
+    examples:
+      - sql: "SELECT feature, health, reasons FROM splunk_health WHERE health <> 'green'"
+        description: Unhealthy splunkd features (forwarding blocked, indexer clustering, scheduler...).
+    fixtures:
+      - file: health_details.json
+        expect_rows: 3
+        expect_columns: {feature: Data Forwarding, health: green, overall_health: green}
+        note: >-
+          Built strictly from the documented GET server/health/splunkd/details XML example (features
+          Data Forwarding / File Monitor Input / Indexer Clustering with nested features and health
+          colors, REST API Reference, Introspection endpoint descriptions) in the JSON Atom envelope
+          of the server/info JSON example.
+    docs_url: https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.6/introspection-endpoints
+
+roles:
+  logs:
+    table: splunk_search
+    query_language: spl
+    filters:
+      query: >-
+        search index=*{{ (' (service="' ~ service ~ '" OR service.name="' ~ service ~ '" OR sourcetype="*' ~ service ~ '*" OR source="*' ~ service ~ '*")') if service else '' }}{{ (' host="' ~ host ~ '"') if host else '' }}{{ ' (log_level=ERROR OR level=error OR severity=ERROR OR ERROR OR Exception)' if error_only else '' }} | head 1000
+    columns: {ts: ts, service: service, message: message, level: level, host: host}
+    notes: "Generic default; replace index=* and the service match with the deployment's index/sourcetype conventions once known."
+  log_counts:
+    table: splunk_search
+    query_language: spl
+    filters:
+      query: >-
+        search index=*{{ (' (service="' ~ service ~ '" OR service.name="' ~ service ~ '" OR sourcetype="*' ~ service ~ '*" OR source="*' ~ service ~ '*")') if service else '' }}{{ (' host="' ~ host ~ '"') if host else '' }}{{ ' (log_level=ERROR OR level=error OR severity=ERROR OR ERROR OR Exception)' if error_only else '' }} | timechart span=1m count AS value
+    columns: {ts: ts, value: value}
+  metrics:
+    table: splunk_search
+    query_language: spl
+    columns: {ts: ts, value: value, labels: fields}
+    notes: "Metrics indexes: | mstats avg(<metric>) AS value WHERE index=<metrics idx> span=1m BY <dim>; discover names with splunk_metric_names."
+  alert_rules:
+    table: splunk_saved_searches
+    filters: {name: "{{ alert_id }}"}
+    columns: {name: name, title: title, query: query, severity: severity}
+  active_alerts:
+    table: splunk_fired_alerts
+    columns: {ts: ts, name: alert_name, title: title, severity: severity, id: id}
+  alert_history:
+    - table: splunk_fired_alerts
+      filters: {alert_name: "{{ alert_id }}"}
+      columns: {ts: ts, name: alert_name, severity: severity}
+    - table: splunk_saved_search_history
+      filters: {saved_search: "{{ alert_id }}"}
+      columns: {ts: ts, id: sid}
+  hosts:
+    table: splunk_search
+    filters: {query: "| metadata type=hosts index=*"}
+    columns: {host: host, labels: fields}
+    notes: "Returns host, firstTime, lastTime, recentTime, totalCount per host (in fields JSON)."

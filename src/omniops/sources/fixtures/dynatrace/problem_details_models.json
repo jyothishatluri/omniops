@@ -1,0 +1,238 @@
+{
+ "affectedEntities": [
+  {
+   "entityId": {
+    "id": "string",
+    "type": "string"
+   },
+   "name": "string"
+  }
+ ],
+ "displayId": "string",
+ "endTime": 1,
+ "entityTags": [
+  {
+   "context": "string",
+   "key": "string",
+   "stringRepresentation": "string",
+   "value": "string"
+  }
+ ],
+ "evidenceDetails": {
+  "details": [
+   {
+    "evidenceType": "AVAILABILITY_EVIDENCE",
+    "displayName": "string",
+    "entity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "groupingEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "rootCauseRelevant": true,
+    "startTime": 1602500000000,
+    "endTime": 1602600000000
+   },
+   {
+    "evidenceType": "EVENT",
+    "displayName": "string",
+    "entity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "groupingEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "rootCauseRelevant": true,
+    "startTime": 1602511312869,
+    "eventId": "string",
+    "eventType": "string"
+   },
+   {
+    "evidenceType": "MAINTENANCE_WINDOW",
+    "displayName": "string",
+    "entity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "groupingEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "rootCauseRelevant": true,
+    "startTime": 1602500000000,
+    "maintenanceWindowConfigId": "string",
+    "endTime": 1602600000000
+   },
+   {
+    "evidenceType": "METRIC",
+    "displayName": "string",
+    "entity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "groupingEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "rootCauseRelevant": true,
+    "startTime": 1602500000000,
+    "metricId": "string",
+    "valueBeforeChangePoint": 2,
+    "valueAfterChangePoint": 3,
+    "unit": "Count",
+    "endTime": 1602600000000
+   },
+   {
+    "evidenceType": "TRANSACTIONAL",
+    "displayName": "string",
+    "entity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "groupingEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "rootCauseRelevant": true,
+    "startTime": 1602500000000,
+    "valueBeforeChangePoint": 2,
+    "valueAfterChangePoint": 3,
+    "unit": "Count",
+    "endTime": 1602600000000
+   }
+  ],
+  "totalCount": 5
+ },
+ "impactAnalysis": {
+  "impacts": [
+   {
+    "impactType": "APPLICATION",
+    "impactedEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "estimatedAffectedUsers": 5
+   },
+   {
+    "impactType": "CUSTOM_APPLICATION",
+    "impactedEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "estimatedAffectedUsers": 5
+   },
+   {
+    "impactType": "MOBILE",
+    "impactedEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "estimatedAffectedUsers": 5
+   },
+   {
+    "impactType": "SERVICE",
+    "impactedEntity": {
+     "entityId": {
+      "id": "string",
+      "type": "string"
+     },
+     "name": "string"
+    },
+    "estimatedAffectedUsers": 5,
+    "numberOfPotentiallyAffectedServiceCalls": 50
+   }
+  ]
+ },
+ "impactLevel": "APPLICATION",
+ "impactedEntities": [
+  {}
+ ],
+ "k8s.cluster.name": [
+  "string"
+ ],
+ "k8s.cluster.uid": [
+  "string"
+ ],
+ "k8s.namespace.name": [
+  "string"
+ ],
+ "linkedProblemInfo": {
+  "displayId": "string",
+  "problemId": "string"
+ },
+ "managementZones": [
+  {
+   "id": "string",
+   "name": "string"
+  }
+ ],
+ "problemFilters": [
+  {
+   "id": "string",
+   "name": "string"
+  }
+ ],
+ "problemId": "string",
+ "recentComments": {
+  "comments": [
+   {
+    "authorName": "string",
+    "content": "string",
+    "context": "string",
+    "createdAtTimestamp": 1,
+    "id": "string"
+   }
+  ],
+  "nextPageKey": "AQAAABQBAAAABQ==",
+  "pageSize": 1,
+  "totalCount": 1
+ },
+ "rootCauseEntity": {},
+ "severityLevel": "AVAILABILITY",
+ "startTime": 1,
+ "status": "CLOSED",
+ "title": "string"
+}

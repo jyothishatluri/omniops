@@ -1,0 +1,70 @@
+{
+  "items": [
+    {
+      "name": "Service A",
+      "timestamp": 1720076400000,
+      "cursor": {
+        "@class": ".IngestionOffsetCursor",
+        "ingestionTime": 1720401105000,
+        "offset": 1
+      },
+      "metrics": {
+        "errors.mean": [
+          [
+            1720080000000,
+            0.0
+          ]
+        ],
+        "calls.sum": [
+          [
+            1720080000000,
+            200
+          ]
+        ],
+        "latency.mean": [
+          [
+            1720080000000,
+            0.500
+          ]
+        ]
+      }
+    },
+    {
+      "name": "Service B",
+      "timestamp": 1720076400000,
+      "cursor": {
+        "@class": ".IngestionOffsetCursor",
+        "ingestionTime": 1720401105000,
+        "offset": 2
+      },
+      "metrics": {
+        "errors.mean": [
+          [
+            1720080000000,
+            1.5
+          ]
+        ],
+        "calls.sum": [
+          [
+            1720080000000,
+            150
+          ]
+        ],
+        "latency.mean": [
+          [
+            1720080000000,
+            2.200
+          ]
+        ]
+      }
+    }
+  ],
+  "canLoadMore": false,
+  "totalHits": 2,
+  "totalRepresentedItemCount": 2,
+  "totalRetainedItemCount": 2,
+  "adjustedTimeframe": {
+    "windowSize": 3600000,
+    "to": 1720080000000
+  }
+}

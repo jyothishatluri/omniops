@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "data": {
+    "type": "raw",
+    "data": {"results": [{"queryName": "A", "nextCursor": "", "rows": null}]},
+    "meta": {"rowsScanned": 0, "bytesScanned": 0, "durationMs": 3}
+  }
+}

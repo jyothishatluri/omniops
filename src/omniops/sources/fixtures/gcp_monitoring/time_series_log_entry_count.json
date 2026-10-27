@@ -1,0 +1,14 @@
+{
+  "timeSeries": [
+    {
+      "metric": {"labels": {"log": "kubelet", "severity": "DEFAULT"}, "type": "logging.googleapis.com/log_entry_count"},
+      "resource": {"type": "gce_instance", "labels": {"instance_id": "5106847938295940291", "zone": "us-central1-a", "project_id": "a-gcp-project"}},
+      "metricKind": "DELTA",
+      "valueType": "INT64",
+      "points": [
+        {"interval": {"startTime": "2019-12-20T20:25:38Z", "endTime": "2019-12-20T20:26:38Z"}, "value": {"int64Value": "20"}}
+      ]
+    }
+  ],
+  "unit": "1"
+}

@@ -1,0 +1,5 @@
+[
+  {"name": "slack-oncall"},
+  {"name": "pagerduty-critical", "labels": {"owner": "platform"}},
+  {"name": "null"}
+]

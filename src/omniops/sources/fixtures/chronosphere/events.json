@@ -1,0 +1,32 @@
+{
+ "events": [
+  {
+   "title": "Deploy checkout v2.14.0",
+   "happened_at": "2026-10-01T11:48:00Z",
+   "category": "deploys",
+   "type": "deploy",
+   "source": "argocd",
+   "labels": {
+    "service": "checkout",
+    "cluster": "prod-eu",
+    "version": "v2.14.0"
+   },
+   "payload_json": "{\"commit\":\"9f3c2ab\"}",
+   "id": "evt_01J9ZK0Z"
+  },
+  {
+   "title": "Flag new-pricing enabled 50%",
+   "happened_at": "2026-10-01T11:30:00Z",
+   "category": "feature_flags",
+   "type": "flag_change",
+   "source": "launchdarkly",
+   "labels": {
+    "service": "checkout"
+   },
+   "id": "evt_01J9ZJ7Q"
+  }
+ ],
+ "page": {
+  "next_token": ""
+ }
+}

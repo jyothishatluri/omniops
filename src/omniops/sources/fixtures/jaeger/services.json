@@ -1,0 +1,8 @@
+{
+  "services": [
+    "api-gateway",
+    "order-service",
+    "payment-service",
+    "webapp"
+  ]
+}

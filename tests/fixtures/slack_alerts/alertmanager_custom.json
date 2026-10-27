@@ -1,0 +1,42 @@
+{
+  "platform": "prometheus",
+  "description": "Alertmanager with the widely used community Slack text template (per-alert '*Alert:*', '*Graph:*' generatorURL, '*Runbook:*', '*Details:*' label bullets). Route group_by [alertname, service].",
+  "provenance": "Community template built from documented Alertmanager template data (.Alerts, .Annotations, .Labels.SortedPairs, .GeneratorURL); Prometheus sets GeneratorURL to <prometheus>/graph?g0.expr=<url-encoded expr>&g0.tab=1. Title is the default __subject.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B03ALERTMG",
+    "username": "Alertmanager",
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "danger",
+        "fallback": "[FIRING:1] CheckoutHighErrorRate checkout (shop critical payments) | http://alertmanager.monitoring.svc:9093/#/alerts?receiver=slack-payments",
+        "title": "[FIRING:1] CheckoutHighErrorRate checkout (shop critical payments)",
+        "title_link": "http://alertmanager.monitoring.svc:9093/#/alerts?receiver=slack-payments",
+        "text": "*Alert:* Checkout 5xx error rate above 5% - `critical`\n*Description:* 7.1% of checkout requests fail with 5xx.\n*Graph:* <http://prometheus.monitoring.svc:9090/graph?g0.expr=sum+by+%28service%29+%28rate%28http_requests_total%7Bservice%3D%22checkout%22%2Ccode%3D~%225..%22%7D%5B5m%5D%29%29+%2F+sum+by+%28service%29+%28rate%28http_requests_total%7Bservice%3D%22checkout%22%7D%5B5m%5D%29%29+%3E+0.05&amp;g0.tab=1|:chart_with_upwards_trend:>\n*Runbook:* <https://wiki.acme.example/runbooks/checkout-errors|:spiral_note_pad:>\n*Details:*\n  • *alertname:* `CheckoutHighErrorRate`\n  • *namespace:* `shop`\n  • *service:* `checkout`\n  • *severity:* `critical`\n  • *team:* `payments`\n",
+        "mrkdwn_in": ["fallback", "pretext", "text"]
+      }
+    ],
+    "ts": "1792504957.000410",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.000410",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "prometheus",
+    "rule_id": "CheckoutHighErrorRate",
+    "rule_name": "CheckoutHighErrorRate",
+    "status": "firing",
+    "severity": "critical",
+    "service": "checkout",
+    "namespace": "shop",
+    "group": "namespace=shop,service=checkout,team=payments",
+    "query": "sum by (service) (rate(http_requests_total{service=\"checkout\",code=~\"5..\"}[5m])) / sum by (service) (rate(http_requests_total{service=\"checkout\"}[5m])) > 0.05",
+    "threshold": "0.05",
+    "url": "http://prometheus.monitoring.svc:9090/graph?g0.expr=sum+by+%28service%29+%28rate%28http_requests_total%7Bservice%3D%22checkout%22%2Ccode%3D~%225..%22%7D%5B5m%5D%29%29+%2F+sum+by+%28service%29+%28rate%28http_requests_total%7Bservice%3D%22checkout%22%7D%5B5m%5D%29%29+%3E+0.05&g0.tab=1",
+    "summary": "7.1% of checkout requests fail with 5xx.",
+    "tags": {"team": "payments"}
+  }
+}

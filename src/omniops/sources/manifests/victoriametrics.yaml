@@ -1,0 +1,447 @@
+# VictoriaMetrics (single-node and cluster vmselect) + vmalert (directly or proxied with -vmalert.proxyURL).
+# Extends templates/prometheus.yaml (VictoriaMetrics implements the Prometheus querying API and MetricsQL, a
+# PromQL superset) and adds JSON-line export of raw samples, TSDB cardinality stats and label names.
+# Docs: https://docs.victoriametrics.com/victoriametrics/url-examples/
+#       https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#prometheus-querying-api-usage
+source: victoriametrics
+display_name: VictoriaMetrics
+vendor: VictoriaMetrics Inc.
+extends: prometheus
+description: >-
+  VictoriaMetrics single-node or cluster (vmselect): MetricsQL/PromQL range and instant queries, series, labels,
+  metadata, raw-sample export, TSDB cardinality stats, scrape targets and vmalert alerts/rules.
+docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/
+categories: [metrics, alerts]
+base_url: "{{ env.VM_URL.rstrip('/') }}{{ ('/select/' ~ env.VM_TENANT ~ '/prometheus') if env.VM_TENANT else '' }}"
+env:
+  - name: VM_URL
+    description: >-
+      Single-node: http://victoriametrics:8428. Cluster: the vmselect (or vmauth) root, e.g. http://vmselect:8481,
+      together with VM_TENANT. If a proxy already routes to /select/<tenant>/prometheus, put that full URL here
+      and leave VM_TENANT empty.
+  - {name: VM_TENANT, description: "Cluster only: tenant 'accountID' or 'accountID:projectID' (e.g. 0 or 42:1); 'multitenant' queries all tenants"}
+  - {name: VMALERT_URL, description: "Optional vmalert root (http://vmalert:8880). Without it, alerts/rules go through VM_URL and need -vmalert.proxyURL on vmsingle/vmselect"}
+  - {name: VMAGENT_URL, description: "Optional vmagent root (http://vmagent:8429) for scrape targets; cluster vmselect has no targets API"}
+  - {name: VM_TOKEN, description: "Optional bearer token (vmauth / vmgateway)", secret: true}
+  - {name: VM_USERNAME, description: "Optional basic-auth user (vmauth)"}
+  - {name: VM_PASSWORD, description: "Optional basic-auth password (vmauth)", secret: true}
+required_env: [VM_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Bearer ' ~ env.VM_TOKEN) if env.VM_TOKEN
+      else (('Basic ' ~ ((env.VM_USERNAME ~ ':' ~ env.VM_PASSWORD) | b64)) if env.VM_USERNAME else None) }}
+rate_limit:
+  concurrency: 6
+  notes: "No API rate limit; -search.maxConcurrentRequests queues/rejects (503) and -search.maxQueryDuration (default 30s) aborts slow queries."
+retention:
+  metrics: "-retentionPeriod (default 1 month; any duration); export limited by -search.maxExportDuration"
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "MetricsQL error or limit: fix the expression or narrow the range; do not retry unchanged"}
+query_languages:
+  metricsql: >-
+    MetricsQL, a backwards-compatible PromQL superset: any PromQL works. Selectors use braces
+    metric{label="value"}; rate()/increase() need [5m] (the window may be omitted: rate(x) uses the step).
+    Extras: label_set/label_del, topk_avg, histogram_quantiles, range_median, WITH templates,
+    keep_metric_names, `default` operator. Aggregate with sum by (label) (...).
+  promql: "Plain PromQL is accepted unchanged (MetricsQL is a superset)."
+pitfalls:
+  - "An unknown metric or label returns 0 series, not an error: check victoriametrics_label_values or the series_fetched column (0 = the selector matched nothing)."
+  - "/api/v1/labels, /api/v1/label/.../values and /api/v1/series round start..end to whole UTC days: they may list values that did not exist in the incident window. Use a query for exact windows."
+  - "MetricsQL differs from PromQL in edge cases: rate/increase extrapolate differently (no Prometheus extrapolation), and staleness is detected by gaps; small numeric differences vs Prometheus are expected."
+  - "The rollup result cache can hide backfilled/late samples; pass nocache = true when values look stale."
+  - "Cluster mode needs the tenant in the URL (VM_TENANT); a wrong tenant silently returns no data."
+tables:
+  - name: victoriametrics_query_range
+    description: >-
+      Evaluate a MetricsQL/PromQL expression over a time range (/api/v1/query_range). One row per (series,
+      timestamp). Filter on query (required) and ts; optional step (s) and nocache. series_fetched (0 = the
+      selectors matched no series) and execution_ms come from VictoriaMetrics' extra 'stats' object.
+    request:
+      method: GET
+      path: /api/v1/query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+        nocache: "{{ 1 if filters.nocache else None }}"
+    filters:
+      - {column: query, required: true, description: "MetricsQL / PromQL expression", examples: ['sum by (job) (rate(http_requests_total[5m]))']}
+      - {column: step, type: BIGINT, description: "Resolution step in seconds (default: auto, ~300 points)"}
+      - {column: nocache, type: BOOLEAN, description: "true = bypass the rollup result cache (nocache=1)"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s, description: "Sample timestamp (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value"}
+      - {name: metric, path: "metric.__name__", description: "Metric name when the expression keeps it"}
+      - {name: labels, type: JSON, path: metric, description: "All series labels as JSON; use labels->>'job'"}
+      - {name: series_fetched, type: BIGINT, path: "$.stats.seriesFetched", description: "Series fetched from storage before filtering (0 = selector matched nothing)"}
+      - {name: execution_ms, type: BIGINT, path: "$.stats.executionTimeMsec"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+      - {name: nocache, type: BOOLEAN, filter_only: true}
+    time: {column: ts, default_lookback: 1h, max_window: 90d}
+    pitfalls:
+      - "Use rate()/increase() on counters; raw counter values only ever go up."
+      - "Aggregate in MetricsQL (sum by (...)) before fetching rather than in SQL."
+    examples:
+      - sql: >-
+          SELECT labels->>'job' AS job, max(value) AS peak, arg_max(ts, value) AS peak_at
+          FROM victoriametrics_query_range
+          WHERE query = 'sum by (job) (rate(http_requests_total{code=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per job over an hour, and when it peaked.
+      - sql: >-
+          SELECT ts, value, series_fetched FROM victoriametrics_query_range
+          WHERE query = 'histogram_quantile(0.99, sum by (vmrange) (rate(http_request_duration_seconds_bucket{service="checkout"}[5m])))'
+            AND nocache = true
+            AND ts >= TIMESTAMP '2026-10-01 10:00:00' AND ts < TIMESTAMP '2026-10-01 12:00:00'
+        description: p99 latency from VictoriaMetrics histograms (vmrange buckets), bypassing the cache.
+    tests:
+      - {sql: "SELECT count(*) AS n FROM victoriametrics_query_range WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_range.json
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up, series_fetched: 2, execution_ms: 4}
+        note: "Prometheus HTTP API docs range example (VictoriaMetrics docs: Prometheus querying API) plus the documented top-level 'stats' object {seriesFetched (string), executionTimeMsec}."
+      - file: query_error.json
+        filters: {query: 'up{job=}'}
+        expect_error: "parse error"
+        note: "Built strictly from the documented Prometheus API error envelope (status=error, errorType, error); proves the 2xx error rule fires when a proxy/gateway answers 200 with an error body. Message text illustrative."
+    ui_link: null
+    docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1query_range
+
+  - name: victoriametrics_query
+    description: >-
+      Evaluate a MetricsQL/PromQL expression at one instant (/api/v1/query; evaluation time = upper bound of ts).
+      One row per series, plus series_fetched / execution_ms stats.
+    request:
+      method: GET
+      path: /api/v1/query
+      query:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | epoch_s }}"
+        nocache: "{{ 1 if filters.nocache else None }}"
+    filters:
+      - {column: query, required: true, description: "MetricsQL / PromQL expression", examples: ['topk(5, sum by (instance) (rate(node_cpu_seconds_total{mode!="idle"}[5m])))']}
+      - {column: nocache, type: BOOLEAN, description: "true = bypass the rollup result cache"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: series_fetched, type: BIGINT, path: "$.stats.seriesFetched"}
+      - {name: execution_ms, type: BIGINT, path: "$.stats.executionTimeMsec"}
+      - {name: query, filter_only: true}
+      - {name: nocache, type: BOOLEAN, filter_only: true}
+    examples:
+      - sql: "SELECT labels->>'instance' AS instance, labels->>'job' AS job FROM victoriametrics_query WHERE query = 'up == 0'"
+        description: Targets that are down at the anchor time.
+    tests:
+      - {sql: "SELECT value FROM victoriametrics_query WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_vector.json
+        filters: {query: up}
+        expect_rows: 2
+        expect_columns: {value: 1.0, metric: up, series_fetched: 2}
+        note: "Prometheus HTTP API docs instant example plus VictoriaMetrics' documented 'stats' object."
+    docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1query
+
+  - name: victoriametrics_series
+    description: Label sets of series matching a selector (/api/v1/series). The time range is rounded to whole UTC days; limit is honoured.
+    fixtures:
+      - file: series.json
+        filters: {match: up}
+        expect_rows: 3
+        expect_columns: {metric: up}
+        note: "Prometheus HTTP API docs series example (VictoriaMetrics docs: Prometheus-compatible /api/v1/series)."
+    examples:
+      - sql: "SELECT DISTINCT labels->>'job' AS job FROM victoriametrics_series WHERE match = 'up'"
+    docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1series
+
+  - name: victoriametrics_label_values
+    description: >-
+      Values of one label (/api/v1/label/{name}/values). VictoriaMetrics rounds the range to whole UTC days, so
+      values may come from outside the incident window.
+    fixtures:
+      - file: label_values.json
+        filters: {label: code}
+        expect_rows: 2
+        expect_columns: {value: "200"}
+        note: "Prometheus HTTP API docs label-values example (VictoriaMetrics docs: /api/v1/label/.../values)."
+    examples:
+      - sql: "SELECT value AS job FROM victoriametrics_label_values WHERE label = 'job'"
+    docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1labelvalues
+
+  - name: victoriametrics_metric_metadata
+    description: TYPE / HELP / UNIT per metric (/api/v1/metadata; single-node v1.130+, enabled by default since v1.137).
+    pitfalls:
+      - "Metadata is an in-memory ring buffer, not persisted across restarts; entries not updated for 1h are dropped. Missing metadata does not mean a missing metric."
+    fixtures:
+      - file: metadata.json
+        expect_rows: 3
+        expect_columns: {metric: cortex_ring_tokens, type: gauge}
+        note: "Prometheus HTTP API docs metadata example (VictoriaMetrics docs: response compatible with the Prometheus metadata API)."
+    examples:
+      - sql: "SELECT metric, type, help FROM victoriametrics_metric_metadata WHERE metric = 'node_os_version'"
+    docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1metadata
+
+  - name: victoriametrics_alerts
+    title: vmalert active alerts
+    description: >-
+      Alerts pending or firing in vmalert (/api/v1/alerts on VMALERT_URL, or proxied through vmsingle/vmselect
+      with -vmalert.proxyURL). Rows include the rule expression and a link to the alert in the vmalert UI.
+    request:
+      method: GET
+      url: "{{ (env.VMALERT_URL or source.base_url).rstrip('/') }}/api/v1/alerts"
+      query:
+        "rule_group[]": "{{ filters.group_name }}"
+    filters:
+      - {column: group_name, ops: ["=", "in"], fan_out: false, description: "Rule group name(s) (rule_group[])"}
+    columns:
+      - {name: alertname, expr: "_.labels.alertname or _.name"}
+      - {name: state, path: state, description: "pending | firing"}
+      - {name: active_at, type: TIMESTAMP, path: activeAt}
+      - {name: value, type: DOUBLE, path: value}
+      - {name: severity, path: "labels.severity"}
+      - {name: expression, path: expression, description: "The rule's MetricsQL expression"}
+      - {name: group_id, path: group_id}
+      - {name: rule_id, path: rule_id}
+      - {name: group_name, filter_only: true}
+      - {name: url, path: source, description: "Link to the alert in the vmalert UI"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+    pitfalls:
+      - "Without VMALERT_URL this needs -vmalert.proxyURL on vmsingle/vmselect; otherwise it returns 400/404."
+    examples:
+      - sql: "SELECT alertname, state, active_at, expression, url FROM victoriametrics_alerts WHERE state = 'firing' ORDER BY active_at"
+        description: Firing alerts with their expressions and vmalert links.
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: my-alert, state: firing, expression: "up == 0", value: 1.0}
+        note: "Prometheus HTTP API docs alerts example extended with the vmalert ApiAlert fields (id, rule_id, group_id, expression, source) from app/vmalert/rule/web.go; vmalert docs: Prometheus-compatible /api/v1/alerts."
+    docs_url: https://docs.victoriametrics.com/victoriametrics/vmalert/#web
+
+  - name: victoriametrics_rules
+    title: vmalert rules
+    description: >-
+      Alerting and recording rules loaded in vmalert (/api/v1/rules), one row per rule with expression, state
+      (ok | nomatch | inactive | pending | firing | unhealthy | recovering), last error, last evaluation, samples
+      returned and series fetched. state = nomatch / last_series_fetched = 0 means the rule's selector matches
+      nothing (a rule that can never fire).
+    kind: entities
+    request:
+      method: GET
+      url: "{{ (env.VMALERT_URL or source.base_url).rstrip('/') }}/api/v1/rules"
+      query:
+        type: "{{ 'alert' if filters.type == 'alerting' else ('record' if filters.type == 'recording' else None) }}"
+        "rule_name[]": "{{ filters.rule_name }}"
+        "rule_group[]": "{{ filters.group_name }}"
+        "file[]": "{{ filters.file }}"
+        state: "{{ filters.state }}"
+        extended_states: "true"
+    filters:
+      - {column: type, description: "alerting | recording (sent as type=alert|record)", examples: [alerting]}
+      - {column: rule_name, ops: ["=", "in"], fan_out: false, description: "Exact rule name(s)", examples: [HighRequestLatency]}
+      - {column: group_name, ops: ["=", "in"], fan_out: false, description: "Rule group name(s)"}
+      - {column: file, ops: ["=", "in"], fan_out: false, description: "Rule file(s)"}
+      - {column: state, ops: ["=", "in"], fan_out: false, description: "firing | pending | ok | nomatch | unhealthy (extended states, always requested) | inactive", examples: [nomatch]}
+    response:
+      rows_path: "$.data.groups[*]"
+      expand:
+        - {explode: rules, as: r}
+    columns:
+      - {name: group_name, path: name}
+      - {name: group_id, path: id}
+      - {name: file, path: file}
+      - {name: datasource_type, path: type, description: "prometheus | graphite | vlogs"}
+      - {name: rule_name, path: "@r.name"}
+      - {name: rule_id, path: "@r.id"}
+      - {name: type, path: "@r.type", description: "alerting | recording"}
+      - {name: query, path: "@r.query"}
+      - {name: duration_s, type: DOUBLE, path: "@r.duration"}
+      - {name: state, path: "@r.state", description: "firing | pending (alerting rules with alerts), else ok | nomatch (query matched no series) | unhealthy (last evaluation failed)"}
+      - {name: health, path: "@r.health"}
+      - {name: last_error, path: "@r.lastError"}
+      - {name: last_evaluation, type: TIMESTAMP, path: "@r.lastEvaluation"}
+      - {name: evaluation_time_s, type: DOUBLE, path: "@r.evaluationTime"}
+      - {name: last_samples, type: BIGINT, path: "@r.lastSamples"}
+      - {name: last_series_fetched, type: BIGINT, path: "@r.lastSeriesFetched"}
+      - {name: severity, path: "@r.labels.severity"}
+      - {name: labels, type: JSON, path: "@r.labels"}
+      - {name: annotations, type: JSON, path: "@r.annotations"}
+      - {name: active_alerts, type: JSON, path: "@r.alerts"}
+    pitfalls:
+      - "The manifest always sends extended_states=true: without it vmalert reports rules without alerts as inactive and never returns the nomatch / unhealthy states, so state = 'nomatch' would match nothing."
+    examples:
+      - sql: "SELECT rule_name, query, duration_s, state, last_error FROM victoriametrics_rules WHERE rule_name = 'HighRequestLatency'"
+        description: Look up the alert rule that fired.
+      - sql: "SELECT group_name, rule_name, query FROM victoriametrics_rules WHERE type = 'alerting' AND state = 'nomatch'"
+        description: Alert rules whose query matches no series (cannot fire).
+    fixtures:
+      - file: rules.json
+        expect_rows: 2
+        expect_columns: {rule_name: HighRequestLatency, type: alerting, state: firing, last_series_fetched: 3, datasource_type: prometheus}
+        note: "Prometheus HTTP API docs rules example extended with vmalert ApiGroup/ApiRule fields (app/vmalert/rule/web.go); vmalert docs: Prometheus-compatible /api/v1/rules."
+    docs_url: https://docs.victoriametrics.com/victoriametrics/vmalert/#web
+
+  - name: victoriametrics_targets
+    description: >-
+      Scrape targets of single-node VictoriaMetrics or vmagent (/api/v1/targets, Prometheus format). Uses
+      VMAGENT_URL when set; cluster vmselect has no targets API.
+    request:
+      method: GET
+      url: "{{ (env.VMAGENT_URL or env.VM_URL).rstrip('/') }}/api/v1/targets"
+      query: {state: active}
+    fixtures:
+      - file: targets.json
+        expect_rows: 1
+        expect_columns: {job: prometheus, health: up}
+        note: "Prometheus HTTP API docs targets example (VictoriaMetrics docs: 'scrape target status in Prometheus-compatible JSON format')."
+    examples:
+      - sql: "SELECT job, instance, health, last_error FROM victoriametrics_targets WHERE health <> 'up'"
+    docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1targets
+
+  - name: victoriametrics_labels
+    title: Label names
+    description: Label names (/api/v1/labels; range rounded to UTC days), optionally scoped by a selector.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/labels
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        limit: "{{ limit }}"
+    filters:
+      - {column: match, description: "Optional series selector", examples: ['http_requests_total']}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT label FROM victoriametrics_labels WHERE match = 'http_requests_total'"
+    fixtures:
+      - file: labels.json
+        expect_rows: 21
+        expect_columns: {label: __name__}
+        note: "Prometheus HTTP API docs label-names example (VictoriaMetrics docs: /api/v1/labels)."
+    docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1labels
+
+  - name: victoriametrics_export
+    title: Raw samples (JSON-line export)
+    description: >-
+      Raw stored samples of series matching a selector (/api/v1/export, JSON lines), no PromQL evaluation: one row
+      per (series, sample). Use it to check exactly what was ingested (gaps, duplicates, late samples) around an
+      incident. Keep the window short - every raw sample is returned.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/v1/export
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+      response_format: ndjson
+      timeout_s: 120
+    filters:
+      - {column: match, required: true, ops: ["=", "in"], fan_out: false, description: "Series selector(s) (match[])", examples: ['up{job="checkout"}']}
+    time: {column: ts, default_lookback: 15m, max_window: 6h}
+    response:
+      rows_path: "$"
+      expand:
+        - {zip: {t: timestamps, v: values}, as: pt}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@pt.t", transform: epoch_ms, description: "Raw sample timestamp (ms precision)"}
+      - {name: value, type: DOUBLE, path: "@pt.v"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: match, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "Returns every raw sample: a broad selector over hours can be millions of rows. Always use a narrow selector and window."
+      - "Export is deduplicated per -dedup.minScrapeInterval; recently written duplicates may still appear."
+    examples:
+      - sql: >-
+          SELECT labels->>'instance' AS instance, min(ts) AS first_sample, max(ts) AS last_sample, count(*) AS samples
+          FROM victoriametrics_export
+          WHERE match = 'up{job="checkout"}' AND ts BETWEEN TIMESTAMP '2026-10-01 11:40:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY last_sample
+        description: When did each checkout instance stop sending samples?
+    fixtures:
+      - file: export.ndjson
+        filters: {match: up}
+        expect_rows: 6
+        expect_columns: {ts: "2019-02-11T13:24:32Z", value: 0.0, metric: up}
+        note: "VictoriaMetrics docs 'How to export data in JSON line format' example output (two JSON lines)."
+    docs_url: https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1export
+
+  - name: victoriametrics_tsdb_status
+    title: TSDB cardinality stats
+    description: >-
+      Cardinality statistics for one day (/api/v1/status/tsdb): top metric names, label names and label=value
+      pairs by series count, totals, and (with focus_label) top values of one label. One row per (stat, name).
+      Use it when an incident is a cardinality explosion or slow queries.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/status/tsdb
+      query:
+        topN: "{{ [limit or 20, 1000] | min }}"
+        date: "{{ filters.day }}"
+        focusLabel: "{{ filters.focus_label }}"
+        "match[]": "{{ filters.match }}"
+    filters:
+      - {column: day, description: "Day to analyse, YYYY-MM-DD (sent as date=; default: today, UTC)", examples: ['2026-10-01']}
+      - {column: focus_label, description: "Label whose top values go to stat = seriesCountByFocusLabelValue", examples: [instance]}
+      - {column: match, description: "Optional series selector restricting the stats", examples: ['{job="checkout"}']}
+    response:
+      rows_path: "$.data"
+      expand:
+        - {entries: ".", as: e}
+        - {explode: "@e.value", as: s}
+    columns:
+      - {name: stat, path: "@e.key", description: "seriesCountByMetricName | seriesCountByLabelName | seriesCountByFocusLabelValue | seriesCountByLabelValuePair | labelValueCountByLabelName | totalSeries | totalLabelValuePairs ..."}
+      - {name: name, expr: "s.name if s is mapping else e.key", description: "Metric / label / label=value (or the stat name for scalar totals)"}
+      - {name: value, type: DOUBLE, expr: "s.value if s is mapping else s", description: "Series count (or label value count / bytes, per stat)"}
+      - {name: requests_count, type: BIGINT, expr: "s.requestsCount if s is mapping else None", description: "Query requests touching this metric name (when metric-name stats tracking is on)"}
+      - {name: day, filter_only: true}
+      - {name: focus_label, filter_only: true}
+      - {name: match, filter_only: true}
+    pitfalls:
+      - "Stats are per UTC day; in cluster mode vmselect sums per-vmstorage counts, which can be inflated by replication."
+    examples:
+      - sql: "SELECT name AS metric, value AS series FROM victoriametrics_tsdb_status WHERE stat = 'seriesCountByMetricName' ORDER BY value DESC LIMIT 10"
+        description: Metrics with the most series today.
+      - sql: "SELECT name, value FROM victoriametrics_tsdb_status WHERE focus_label = 'instance' AND stat = 'seriesCountByFocusLabelValue' ORDER BY value DESC"
+        description: Which instance contributes most series.
+    fixtures:
+      - file: tsdb_status.json
+        filters: {focus_label: pod}
+        expect_rows: 12
+        expect_columns: {stat: totalSeries, name: totalSeries, value: 2187430.0, requests_count: null}
+        note: >-
+          Built strictly from the response template app/vmselect/prometheus/tsdb_status_response.qtpl
+          (totalSeries, totalLabelValuePairs, seriesCountBy* lists of {name, value[, requestsCount,
+          lastRequestTimestamp]}); the VictoriaMetrics docs describe the args but show no example body, and unlike
+          Prometheus there is no headStats object. Values illustrative.
+    docs_url: https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#tsdb-stats
+roles:
+  metrics: {table: victoriametrics_query_range, query_language: metricsql}
+  active_alerts:
+    table: victoriametrics_alerts
+    columns: {name: alertname, state: state, ts: active_at, labels: labels, severity: severity, url: url}
+  alert_rules:
+    table: victoriametrics_rules
+    columns: {name: rule_name, query: query, state: state, severity: severity}
+  hosts:
+    table: victoriametrics_targets
+    columns: {host: instance, health: health}

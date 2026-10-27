@@ -1,0 +1,102 @@
+{
+ "kind": "PodList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "config-loader-7b8c9d6f5-m3n4p",
+    "generateName": "config-loader-7b8c9d6f5-",
+    "namespace": "batch",
+    "uid": "5f9a4e3b-7c0d-4e8f-9a1b-3c4d5e6f7081",
+    "creationTimestamp": "2026-10-01T11:40:20Z",
+    "labels": {
+     "app": "config-loader",
+     "pod-template-hash": "7b8c9d6f5"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "config-loader-7b8c9d6f5",
+      "uid": "6a0b5f4c-8d1e-4f9a-0b2c-4d5e6f708192",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "main",
+      "image": "fixture.local/config-loader:v1",
+      "env": [
+       {
+        "name": "ENDPOINT_URL",
+        "valueFrom": {
+         "configMapKeyRef": {
+          "name": "config-loader-settings",
+          "key": "ENDPOINT_URL"
+         }
+        }
+       }
+      ],
+      "resources": {
+       "limits": {
+        "memory": "32Mi"
+       },
+       "requests": {
+        "cpu": "10m",
+        "memory": "16Mi"
+       }
+      }
+     }
+    ],
+    "restartPolicy": "Always",
+    "nodeName": "incident-bench-worker",
+    "serviceAccountName": "default",
+    "automountServiceAccountToken": false
+   },
+   "status": {
+    "phase": "Pending",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "False",
+      "lastTransitionTime": "2026-10-01T11:40:20Z",
+      "reason": "ContainersNotReady",
+      "message": "containers with unready status: [main]"
+     },
+     {
+      "type": "PodScheduled",
+      "status": "True",
+      "lastTransitionTime": "2026-10-01T11:40:20Z"
+     }
+    ],
+    "hostIP": "172.18.0.2",
+    "podIP": "10.244.1.24",
+    "startTime": "2026-10-01T11:40:20Z",
+    "containerStatuses": [
+     {
+      "name": "main",
+      "state": {
+       "waiting": {
+        "reason": "CreateContainerConfigError",
+        "message": "couldn't find key ENDPOINT_URL in ConfigMap batch/config-loader-settings"
+       }
+      },
+      "lastState": {},
+      "ready": false,
+      "restartCount": 0,
+      "started": false,
+      "image": "fixture.local/config-loader:v1",
+      "imageID": ""
+     }
+    ],
+    "qosClass": "Burstable"
+   }
+  }
+ ]
+}

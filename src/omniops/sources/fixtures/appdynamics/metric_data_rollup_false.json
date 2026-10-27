@@ -1,0 +1,7 @@
+[
+  {"metricId": 2339, "metricPath": "Overall Application Performance|Average Response Time (ms)", "metricName": "BTM|Application Summary|Average Response Time (ms)", "frequency": "ONE_MIN", "metricValues": [
+    {"startTimeInMillis": 1450503540000, "value": 334, "min": 0, "max": 3340, "current": 2, "sum": 6678, "count": 20, "standardDeviation": 0.0, "occurrences": 0, "useRange": true},
+    {"startTimeInMillis": 1450503600000, "value": 771, "min": 1, "max": 11235, "current": 4113, "sum": 15424, "count": 20, "standardDeviation": 0.0, "occurrences": 0, "useRange": true},
+    {"startTimeInMillis": 1450503660000, "value": 215, "min": 0, "max": 4249, "current": 3, "sum": 4306, "count": 20, "standardDeviation": 0.0, "occurrences": 0, "useRange": true}
+  ]}
+]

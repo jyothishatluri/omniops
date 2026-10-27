@@ -1,0 +1,8 @@
+{
+ "request_id": "abc123",
+ "status": "ready",
+ "dependencies": [
+  {"parent_node": {"name": "frontend", "type": "service"}, "child_node": {"name": "user-service", "type": "service"}, "call_count": 142}
+ ],
+ "links": {"next": null}
+}

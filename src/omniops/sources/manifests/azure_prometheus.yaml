@@ -1,0 +1,167 @@
+# Azure Monitor managed service for Prometheus: PromQL API of an Azure Monitor workspace (query endpoint
+# https://<workspace>.<region>.prometheus.monitor.azure.com), Microsoft Entra ID client-credentials auth with the
+# https://prometheus.monitor.azure.com audience. Extends templates/prometheus.yaml; only query, query_range,
+# series, labels and label/__name__/values are supported, so the rest is dropped.
+# Docs: https://learn.microsoft.com/en-us/azure/azure-monitor/metrics/prometheus-api-promql
+source: azure_prometheus
+display_name: Azure Monitor managed Prometheus
+vendor: Microsoft Azure
+extends: prometheus
+description: >-
+  Azure Monitor workspace (managed Prometheus): PromQL range and instant queries, series, label names and metric
+  names, authenticated with a Microsoft Entra app (client credentials).
+docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/metrics/prometheus-api-promql
+categories: [metrics]
+base_url: "{{ env.AZURE_PROMETHEUS_QUERY_ENDPOINT.rstrip('/') }}"
+env:
+  - {name: AZURE_PROMETHEUS_QUERY_ENDPOINT, description: "Query endpoint from the Azure Monitor workspace Overview page, e.g. https://k8s02-workspace-abcd.eastus.prometheus.monitor.azure.com"}
+  - {name: AZURE_TENANT_ID, description: "Microsoft Entra tenant ID"}
+  - {name: AZURE_CLIENT_ID, description: "App registration (client) ID with the 'Monitoring Data Reader' role on the workspace"}
+  - {name: AZURE_CLIENT_SECRET, description: "App registration client secret", secret: true}
+  - {name: AZURE_AUTHORITY_HOST, description: "Entra authority host (sovereign clouds differ)", default: "https://login.microsoftonline.com"}
+required_env: [AZURE_PROMETHEUS_QUERY_ENDPOINT, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET]
+auth:
+  type: azure_ad
+  token_url: "{{ env.AZURE_AUTHORITY_HOST.rstrip('/') }}/{{ env.AZURE_TENANT_ID }}/oauth2/v2.0/token"
+  client_id: "{{ env.AZURE_CLIENT_ID }}"
+  client_secret: "{{ env.AZURE_CLIENT_SECRET }}"
+  scope: https://prometheus.monitor.azure.com/.default
+rate_limit:
+  concurrency: 4
+  notes: >-
+    Query throttling by 'query hours' over 30s windows (30,000 per user, 60,000 per workspace before parsing;
+    2,000,000 after expanding range vectors) and a max query cost of 15,000; 32-day max range; 500,000 series per
+    metric and 50M samples per query; step >= 60s when the range is >= 48h.
+retention:
+  metrics: "18 months (not configurable)"
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error or Azure limit (missing __name__ matcher, range > 32d, throttling): fix the query; do not retry unchanged"}
+query_languages:
+  promql: >-
+    PromQL, with Azure limits: every selector that fetches series must carry exactly one metric name
+    (__name__ matcher, i.e. write metric{...}, never {job="x"} alone); matching is case-insensitive. rate()/
+    increase() need a range vector [5m]. AKS metrics: container_cpu_usage_seconds_total,
+    container_memory_working_set_bytes, kube_pod_status_phase, kube_pod_container_status_restarts_total, with
+    the cluster label identifying the AKS cluster.
+pitfalls:
+  - "Every series-fetching query must include exactly one __name__ matcher (metric{...}); {job=\"x\"} alone or several metric names in one selector are rejected."
+  - "Azure managed Prometheus is case-insensitive for metric names, label names and values: series differing only by case are merged and the returned casing is unpredictable."
+  - "Duplicate series (same labels from two clusters ingesting into one workspace) surface as HTTP 422; add a unique cluster label."
+  - "query_range spans at most 32 days including the range selector itself (rate(x[1h]) over 31d+ fails); step must be >= 60s for ranges >= 48h."
+  - "Only __name__ label values are supported (azure_prometheus_metric_names); there is no metadata, rules, alerts, targets or exemplars API (Prometheus rule groups are ARM resources)."
+  - "An unknown metric returns 0 series, not an error: check azure_prometheus_metric_names first."
+drop_tables: [azure_prometheus_label_values, azure_prometheus_metric_metadata, azure_prometheus_alerts, azure_prometheus_rules, azure_prometheus_targets]
+tables:
+  - name: azure_prometheus_query_range
+    description: >-
+      Evaluate PromQL over a time range (GET /api/v1/query_range on the workspace query endpoint). One row per
+      (series, timestamp). Filter on query (required; every selector needs a metric name) and ts (max 32 days).
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 540d}
+    examples:
+      - sql: >-
+          SELECT labels->>'pod' AS pod, max(value) AS peak_bytes, arg_max(ts, value) AS peak_at
+          FROM azure_prometheus_query_range
+          WHERE query = 'sum by (pod) (container_memory_working_set_bytes{namespace="checkout"})'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak_bytes DESC
+        description: Peak working-set memory per pod in a namespace (OOM investigations).
+      - sql: >-
+          SELECT ts, labels->>'pod' AS pod, value FROM azure_prometheus_query_range
+          WHERE query = 'sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace="checkout"}[5m])) > 0'
+            AND ts >= TIMESTAMP '2026-10-01 10:00:00' AND ts < TIMESTAMP '2026-10-01 12:00:00'
+        description: Container restarts per pod around an incident.
+    fixtures:
+      - file: query_range.json
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+        note: "Azure docs point to the Prometheus range-query docs and show no response; this is the Prometheus HTTP API docs range example."
+      - file: query_error.json
+        filters: {query: 'up{job=}'}
+        expect_error: "parse error"
+        note: "Built strictly from the documented Prometheus API error envelope (status=error, errorType, error); proves the 2xx error rule fires when a proxy/gateway answers 200 with an error body. Message text illustrative."
+    ui_link: null
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/metrics/prometheus-api-promql#range-queries
+
+  - name: azure_prometheus_query
+    description: >-
+      Evaluate PromQL at one instant (GET /api/v1/query; evaluation time = upper bound of ts). One row per series.
+      Every selector needs a metric name.
+    examples:
+      - sql: "SELECT labels->>'namespace' AS namespace, labels->>'pod' AS pod FROM azure_prometheus_query WHERE query = 'kube_pod_status_phase{phase=\"Failed\"} == 1'"
+        description: Pods in Failed phase right now.
+      - sql: "SELECT labels->>'cluster' AS cluster, labels->>'instance' AS instance FROM azure_prometheus_query WHERE query = 'up == 0'"
+        description: Scrape targets that are down.
+    fixtures:
+      - file: query_vector.json
+        filters: {query: up}
+        expect_rows: 2
+        expect_columns: {value: 1.0, metric: up}
+        note: "Azure docs point to the Prometheus instant-query docs and show no response; this is the Prometheus HTTP API docs example."
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/metrics/prometheus-api-promql#instant-queries
+
+  - name: azure_prometheus_series
+    description: >-
+      Label sets of series matching a selector (GET /api/v1/series). The selector needs a metric name, no regex
+      filters are supported, and at most 12 hours are searched (older starts are moved to end - 12h).
+    request:
+      method: GET
+      path: /api/v1/series
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: match, required: true, description: "Series selector with a metric name and only = / != matchers", examples: ['kube_pod_info{namespace="checkout"}']}
+    time: {column: ts, default_lookback: 1h, max_window: 12h}
+    fixtures:
+      - file: series.json
+        filters: {match: up}
+        expect_rows: 3
+        expect_columns: {metric: up}
+        note: "Azure docs point to the Prometheus series docs and show no response; this is the Prometheus HTTP API docs series example."
+    examples:
+      - sql: "SELECT labels->>'pod' AS pod, labels->>'node' AS node FROM azure_prometheus_series WHERE match = 'kube_pod_info{namespace=\"checkout\"}'"
+        description: Pods (and their nodes) in a namespace during the last 12 hours.
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/metrics/prometheus-api-promql#series
+
+  - name: azure_prometheus_labels
+    title: Label names
+    description: All label names in the workspace (GET /api/v1/labels). start/end are ignored by Azure; all retained data is searched.
+    kind: entities
+    request: {method: GET, path: /api/v1/labels}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: "."}
+    examples:
+      - sql: "SELECT label FROM azure_prometheus_labels WHERE label LIKE 'kube%' OR label IN ('cluster', 'namespace', 'pod')"
+    fixtures:
+      - file: labels.json
+        expect_rows: 21
+        expect_columns: {label: __name__}
+        note: "Azure docs point to the Prometheus label-names docs and show no response; this is the Prometheus HTTP API docs example."
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/metrics/prometheus-api-promql#labels
+
+  - name: azure_prometheus_metric_names
+    title: Metric names
+    description: >-
+      All metric names in the workspace (GET /api/v1/label/__name__/values - the only label-values call Azure
+      supports). Use it to confirm a metric exists before querying. start/end are ignored.
+    kind: entities
+    request: {method: GET, path: /api/v1/label/__name__/values}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: metric, path: ".", description: "Metric name"}
+    examples:
+      - sql: "SELECT metric FROM azure_prometheus_metric_names WHERE metric LIKE 'container_%' ORDER BY metric"
+        description: Container metrics available in the workspace.
+    fixtures:
+      - file: metric_names.json
+        expect_rows: 4
+        expect_columns: {metric: container_memory_working_set_bytes}
+        note: "Prometheus label-values response shape (Azure docs show no response); values are metric names used in the Azure doc examples."
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/metrics/prometheus-api-promql#label-values
+roles:
+  metrics: {table: azure_prometheus_query_range, query_language: promql}

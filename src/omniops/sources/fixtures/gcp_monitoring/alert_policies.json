@@ -1,0 +1,45 @@
+{
+  "alertPolicies": [
+    {
+      "name": "projects/my-project/alertPolicies/4721338519483937810",
+      "displayName": "Very high CPU usage",
+      "combiner": "OR",
+      "conditions": [
+        {
+          "name": "projects/my-project/alertPolicies/4721338519483937810/conditions/4721338519483936223",
+          "displayName": "CPU usage is extremely high",
+          "conditionThreshold": {
+            "aggregations": [
+              {"alignmentPeriod": "60s", "crossSeriesReducer": "REDUCE_MEAN", "groupByFields": ["project"], "perSeriesAligner": "ALIGN_MAX"}
+            ],
+            "comparison": "COMPARISON_GT",
+            "duration": "900s",
+            "filter": "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" AND resource.type=\"gce_instance\"",
+            "thresholdValue": 0.9,
+            "trigger": {"count": 1}
+          }
+        }
+      ],
+      "enabled": true,
+      "creationRecord": {"mutateTime": "2026-09-01T10:00:00Z", "mutatedBy": "sre@example.com"},
+      "mutationRecord": {"mutateTime": "2026-10-20T13:55:00Z", "mutatedBy": "sre@example.com"}
+    },
+    {
+      "name": "projects/my-project/alertPolicies/9087213409872134561",
+      "displayName": "Data ingestion functioning",
+      "combiner": "OR",
+      "conditions": [
+        {
+          "name": "projects/my-project/alertPolicies/9087213409872134561/conditions/9087213409872133001",
+          "displayName": "Hourly pipeline is up",
+          "conditionAbsent": {
+            "duration": "3900s",
+            "filter": "resource.type=\"global\" AND metric.type=\"custom.googleapis.com/pipeline_runs\" AND metric.label.pipeline_name=\"hourly\""
+          }
+        }
+      ],
+      "enabled": true
+    }
+  ],
+  "totalSize": 2
+}

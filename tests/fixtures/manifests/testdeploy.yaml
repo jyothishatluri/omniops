@@ -1,0 +1,37 @@
+# TEST-ONLY manifest: a minimal GitOps / deploy-history source for the seed / specialist tests.
+source: testdeploy
+display_name: Test Deploys
+description: TEST-ONLY deploy / sync history feed for offline tests.
+categories: [changes]
+base_url: "{{ env.TESTDEPLOY_URL }}"
+env:
+  - {name: TESTDEPLOY_URL, description: "Base URL of the mocked deploy API"}
+required_env: [TESTDEPLOY_URL]
+tables:
+  - name: testdeploy_changes
+    title: Deploy history
+    description: One row per sync / rollout with revision, author and a link.
+    kind: changes
+    request:
+      method: GET
+      path: /changes
+      query:
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+    time: {column: ts, default_lookback: 48h}
+    response: {rows_path: "$.changes[*]"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: time, transform: auto_time}
+      - {name: app, path: app}
+      - {name: message, path: message}
+      - {name: revision, path: revision}
+      - {name: author, path: author}
+      - {name: url, path: url}
+    examples:
+      - {sql: "SELECT ts, app, message, revision FROM testdeploy_changes ORDER BY ts DESC"}
+    positive_control: false
+
+roles:
+  change_events:
+    table: testdeploy_changes
+    columns: {ts: ts, service: app, title: message, version: revision, author: author, url: url}

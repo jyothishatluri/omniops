@@ -1,0 +1,41 @@
+{
+  "traces": [
+    {
+      "projectId": "my-project",
+      "traceId": "382d4f4c6b7bb2f4a972559d9085001d",
+      "spans": [
+        {
+          "spanId": "2205310701640571284",
+          "kind": "RPC_SERVER",
+          "name": "/api/checkout",
+          "startTime": "2026-10-20T14:02:03.100000000Z",
+          "endTime": "2026-10-20T14:02:04.620500000Z",
+          "labels": {
+            "/http/method": "POST",
+            "/http/status_code": "503",
+            "/http/url": "https://shop.example.com/api/checkout",
+            "/http/route": "/api/checkout",
+            "g.co/r/k8s_container/namespace": "checkout",
+            "g.co/r/k8s_container/container_name": "checkout",
+            "g.co/agent": "opentelemetry-js 1.25.0; google-cloud-trace-exporter 2.2.0"
+          }
+        }
+      ]
+    },
+    {
+      "projectId": "my-project",
+      "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "spans": [
+        {
+          "spanId": "7349284012946158391",
+          "kind": "RPC_SERVER",
+          "name": "/api/cart",
+          "startTime": "2026-10-20T14:01:59.000Z",
+          "endTime": "2026-10-20T14:01:59.640Z",
+          "labels": {"/http/method": "GET", "/http/status_code": "200", "service.name": "cart"}
+        }
+      ]
+    }
+  ],
+  "nextPageToken": ""
+}

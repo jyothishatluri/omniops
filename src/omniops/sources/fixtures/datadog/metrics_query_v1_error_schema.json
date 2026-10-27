@@ -1,0 +1,7 @@
+{
+  "status": "error",
+  "res_type": "time_series",
+  "error": "Error parsing query: unable to parse avg:system.cpu.user{env:prod by {host}: Rule 'scope_expr' didn't match",
+  "query": "avg:system.cpu.user{env:prod by {host}",
+  "series": []
+}

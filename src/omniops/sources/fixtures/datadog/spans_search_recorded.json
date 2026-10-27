@@ -1,0 +1,86 @@
+{
+  "data": [
+    {
+      "id": "AYkGkCVkAADfl3Kz2yGWhekz",
+      "type": "spans",
+      "attributes": {
+        "custom": {
+          "duration": 3402932,
+          "env": "pcf-spartancrimson",
+          "http": {
+            "method": "GET",
+            "status_code": "200",
+            "route": "/",
+            "url": "http://localhost:8080/"
+          },
+          "language": "python",
+          "span": {
+            "kind": "server"
+          },
+          "version": "1.0.0",
+          "component": "flask"
+        },
+        "end_timestamp": "2023-06-29T09:50:52.475Z",
+        "env": "pcf-spartancrimson",
+        "host": "compute-0-7cf8c81f-0dee-468b-af1b-bb6ba06b4b29",
+        "ingestion_reason": "auto",
+        "parent_id": "0",
+        "resource_hash": "2c8cc8275262b3cd",
+        "resource_name": "GET /",
+        "retained_by": "diversity_sampling",
+        "service": "python-sample-app-spartancrimson",
+        "single_span": false,
+        "span_id": "9270756141854228302",
+        "start_timestamp": "2023-06-29T09:50:52.472Z",
+        "tags": [
+          "version:1.0.0",
+          "env:pcf-spartancrimson"
+        ],
+        "trace_id": "3740652481065462946",
+        "type": "web"
+      }
+    },
+    {
+      "id": "AYkGkCmDAACdei5v_BmVb8ZW",
+      "type": "spans",
+      "attributes": {
+        "custom": {
+          "duration": 1027645,
+          "env": "pcf-spartancrimson",
+          "language": "jvm",
+          "span": {
+            "kind": "server"
+          },
+          "version": "1.0.0",
+          "component": "spring-web-controller"
+        },
+        "end_timestamp": "2023-06-29T09:50:53.834Z",
+        "env": "pcf-spartancrimson",
+        "host": "compute-0-7cf8c81f-0dee-468b-af1b-bb6ba06b4b29",
+        "ingestion_reason": "auto",
+        "parent_id": "5407116910258794847",
+        "resource_hash": "7b7c528ae49eecb8",
+        "resource_name": "Controller.index",
+        "retained_by": "diversity_sampling",
+        "service": "java-sample-app-spartancrimson",
+        "single_span": false,
+        "span_id": "2283986807028514392",
+        "start_timestamp": "2023-06-29T09:50:53.833Z",
+        "tags": [
+          "version:1.0.0",
+          "env:pcf-spartancrimson"
+        ],
+        "trace_id": "6252933144469107600",
+        "type": "web"
+      }
+    }
+  ],
+  "meta": {
+    "elapsed": 88,
+    "request_id": "pddv1ChZjUlZPVGV5WVNFS1RKNW4zR3R3RnhBIi0KHZyFCoH2N3eHkR1DXTXA5oC-MZmH2KcFa0lIMEc-Egxy4r5txk9li1pxyr0",
+    "status": "done",
+    "page": {
+      "after": "eyJhZnRlciI6IkFnQUFBWWtHa0dESlFDNEplZ0FBQUFBQUFBQVlBQUFBQUVGWmEwZHJTRTlDUVVGRE5ESjZTRFZUT0RoeWFVOHlOZ0FBQUNRQUFBQUFNREU0T1RBMk9UY3RPRGRsWmkwMFpqQmpMVGhoWTJRdE5tTTFNakptT1RSbVpXRTQiLCJ2YWx1ZXMiOlsiMjAyMy0wNi0yOVQwOTo1MToxMi41ODVaIiwxMDc2NzU4OTA2XX0="
+    }
+  }
+}

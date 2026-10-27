@@ -1,0 +1,39 @@
+{
+  "platform": "prometheus",
+  "description": "Prometheus Alertmanager slack_configs with the built-in default templates: title and title link only (slack.default.text is empty). Route group_by [alertname, namespace].",
+  "provenance": "prometheus/alertmanager template/default.tmpl: slack.default.title = __subject '[FIRING:<n>] <group label values> (<common label values minus group labels>)', slack.default.username = 'Alertmanager', slack.default.titlelink = <ExternalURL>/#/alerts?receiver=<receiver>, slack.default.fallback = '<title> | <titlelink>', slack.default.color danger/good, empty pretext/text/footer.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B03ALERTMG",
+    "username": "Alertmanager",
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "danger",
+        "fallback": "[FIRING:1] KubePodCrashLooping shop (checkout kube-state-metrics checkout-7d9f8c6b5-x2x4q critical) | http://alertmanager.monitoring.svc:9093/#/alerts?receiver=slack-critical",
+        "title": "[FIRING:1] KubePodCrashLooping shop (checkout kube-state-metrics checkout-7d9f8c6b5-x2x4q critical)",
+        "title_link": "http://alertmanager.monitoring.svc:9093/#/alerts?receiver=slack-critical",
+        "mrkdwn_in": ["fallback", "pretext", "text"]
+      }
+    ],
+    "ts": "1792504957.000400",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.000400",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "prometheus",
+    "rule_id": "KubePodCrashLooping",
+    "rule_name": "KubePodCrashLooping",
+    "status": "firing",
+    "raw_status": "FIRING",
+    "alert_count": 1,
+    "group": "shop (checkout kube-state-metrics checkout-7d9f8c6b5-x2x4q critical)",
+    "url": "http://alertmanager.monitoring.svc:9093/#/alerts?receiver=slack-critical",
+    "triggered_at": null,
+    "window_start": null,
+    "anchor": {"source": "message_ts", "window_start": "2026-10-20T13:47:37Z", "window_end": "2026-10-20T14:07:37Z"}
+  }
+}

@@ -1,0 +1,2 @@
+# Generated credentials, run configurations, GitOps checkouts and logs (never commit).
+.state/

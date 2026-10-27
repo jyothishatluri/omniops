@@ -1,0 +1,22 @@
+{
+ "kind": "NodeMetricsList",
+ "apiVersion": "metrics.k8s.io/v1beta1",
+ "metadata": {
+  "selfLink": "/apis/metrics.k8s.io/v1beta1/nodes"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "minikube",
+    "selfLink": "/apis/metrics.k8s.io/v1beta1/nodes/minikube",
+    "creationTimestamp": "2022-01-27T18:48:43Z"
+   },
+   "timestamp": "2022-01-27T18:48:33Z",
+   "window": "30s",
+   "usage": {
+    "cpu": "487558164n",
+    "memory": "732212Ki"
+   }
+  }
+ ]
+}

@@ -1,0 +1,16 @@
+{
+ "data": [
+  {
+   "id": 1,
+   "action": "updated",
+   "createdAt": "2024-01-01T05:12:33.000000+00:00",
+   "createdBy": "jane.doe@example.com",
+   "createdByType": "email",
+   "flag": "new-checkout-flow",
+   "provider": "launchdarkly",
+   "tags": {
+    "environment": "production"
+   }
+  }
+ ]
+}

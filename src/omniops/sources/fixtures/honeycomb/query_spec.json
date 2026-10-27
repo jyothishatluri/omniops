@@ -1,0 +1,20 @@
+{
+ "id": "abc3419d",
+ "breakdowns": [
+  "user_agent"
+ ],
+ "calculations": [
+  {
+   "op": "COUNT"
+  }
+ ],
+ "orders": [
+  {
+   "op": "COUNT",
+   "order": "descending"
+  }
+ ],
+ "limit": 10,
+ "time_range": 7200,
+ "end_time": 1676467828
+}

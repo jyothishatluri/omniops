@@ -1,0 +1,17 @@
+{
+ "Messages": [
+  {
+   "Code": "MaxMetricsExceeded",
+   "Value": "Maximum number of allowed metrics exceeded"
+  }
+ ],
+ "MetricDataResults": [
+  {
+   "Id": "q1",
+   "Label": "Cluster CpuUtilization",
+   "StatusCode": "PartialData",
+   "Timestamps": [1637074245, 1637073945],
+   "Values": [1.2158469945359334, 0.8678863271635757]
+  }
+ ]
+}

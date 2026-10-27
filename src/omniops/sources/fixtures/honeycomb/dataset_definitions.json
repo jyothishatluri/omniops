@@ -1,0 +1,24 @@
+{
+ "duration_ms": {
+  "name": "duration_ms",
+  "column_type": "column"
+ },
+ "error": null,
+ "name": null,
+ "parent_id": null,
+ "route": null,
+ "service_name": null,
+ "span_id": {
+  "name": "my_span_id",
+  "column_type": "column"
+ },
+ "span_kind": null,
+ "annotation_type": null,
+ "link_trace_id": null,
+ "link_span_id": null,
+ "status": null,
+ "trace_id": null,
+ "user": null,
+ "log_severity": null,
+ "log_message": null
+}

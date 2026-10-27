@@ -1,0 +1,51 @@
+[
+ {
+  "id": 1,
+  "version": "frontend@1.0.0",
+  "shortVersion": "frontend@1.0.0",
+  "status": "open",
+  "versionInfo": {
+   "package": "frontend",
+   "version": {
+    "raw": "1.0.0",
+    "major": 1,
+    "minor": 0,
+    "patch": 0,
+    "pre": null,
+    "buildCode": null,
+    "components": 3
+   },
+   "description": "1.0.0",
+   "buildHash": null
+  },
+  "ref": null,
+  "url": null,
+  "dateReleased": null,
+  "dateCreated": "2024-01-01T00:00:00Z",
+  "data": {},
+  "newGroups": 0,
+  "owner": null,
+  "commitCount": 0,
+  "lastCommit": null,
+  "deployCount": 0,
+  "lastDeploy": null,
+  "authors": [],
+  "projects": [
+   {
+    "id": 1,
+    "slug": "sentry",
+    "name": "sentry",
+    "newGroups": 0,
+    "platform": "javascript",
+    "platforms": [
+     "javascript"
+    ],
+    "hasHealthData": false
+   }
+  ],
+  "firstEvent": null,
+  "lastEvent": null,
+  "currentProjectMeta": {},
+  "userAgent": null
+ }
+]

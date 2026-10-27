@@ -1,0 +1,49 @@
+{
+ "alertDef": {
+  "alertDefProperties": {
+   "name": "metrics threshold",
+   "description": "example of metrics threshold",
+   "enabled": true,
+   "priority": "ALERT_DEF_PRIORITY_P2",
+   "type": "ALERT_DEF_TYPE_METRIC_THRESHOLD",
+   "incidentsSettings": {
+    "notifyOn": "NOTIFY_ON_TRIGGERED_AND_RESOLVED",
+    "minutes": 10
+   },
+   "notificationGroup": {},
+   "phantomMode": false,
+   "deleted": false,
+   "metricThreshold": {
+    "metricFilter": {
+     "promql": "sum(http_requests_total{job=\"api-server\"}) by (job)"
+    },
+    "rules": [
+     {
+      "condition": {
+       "threshold": 5000,
+       "forOverPct": 80,
+       "ofTheLast": {
+        "metricTimeWindowSpecificValue": "METRIC_TIME_WINDOW_VALUE_HOUR_1"
+       },
+       "conditionType": "METRIC_THRESHOLD_CONDITION_TYPE_LESS_THAN_OR_EQUALS"
+      },
+      "override": {
+       "priority": "ALERT_DEF_PRIORITY_P2"
+      }
+     }
+    ],
+    "undetectedValuesManagement": {
+     "triggerUndetectedValues": true,
+     "autoRetireTimeframe": "AUTO_RETIRE_TIMEFRAME_HOURS_24"
+    },
+    "missingValues": {
+     "replaceWithZero": true
+    }
+   }
+  },
+  "id": "bb835aa2-7462-4d39-903b-9eab7dbaf1ca",
+  "createdTime": "2024-11-06T09:01:12Z",
+  "updatedTime": "2024-11-06T09:01:12Z",
+  "alertVersionId": "bb835aa2-7462-4d39-903b-9eab7dbaf1ca"
+ }
+}

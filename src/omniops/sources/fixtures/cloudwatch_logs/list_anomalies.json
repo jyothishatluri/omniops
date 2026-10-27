@@ -1,0 +1,123 @@
+{
+    "anomalies": [
+        {
+            "active": false,
+            "anomalyDetectorArn": "arn:aws:logs:us-west-1:123456789012:anomaly-detector:EXAMPLE-1234-5678-abcd-111111111111",
+            "anomalyId": "EXAMPLE-529d-4e1e-bea9-123EXAMPLE",
+            "description": "Count of ErrorCode: 200 at token: 9 deviated expected by: 20.00%",
+            "firstSeen": 1698488280000,
+            "histogram": {
+                "1698487995000": 2,
+                "1698488285000": 4,
+                "1698488295000": 1,
+                "1698488300000": 1,
+                "1698488305000": 4
+            },
+            "isPatternLevelSuppression": false,
+            "lastSeen": 1698488580000,
+            "logGroupArnList": [
+                "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/my-log-group-name"
+            ],
+            "logSamples": [
+                {
+                    "message": "2023-10-28T10:18:18.959Z\tEXAMPLE-4e26-41d8-8b54-EXAMPLE\tINFO\tResponse: 200 https://global.console.aws.amazon.com/EXAMPLEURL",
+                    "timestamp": 1698488298959
+                }
+            ],
+            "patternId": "EXAMPLE86827f77073836412345678",
+            "patternRegex": ".*\\Q\t\\E.*\\Q\tINFO\tResponse: \\E.*\\Q https:\\E.*\\Q=\\E.*\\Q=\\E.*\\Q=\\E.*\\Q\n\\E",
+            "patternString": "<*>\t<*>\tINFO\tResponse: <*> https:<*>=<*>=<*>=<*>\n",
+            "patternTokens": [
+                {
+                    "dynamicTokenPosition": 1,
+                    "enumerations": {
+                        "2023-10-28T10:18:08.420Z": 2,
+                        "2023-10-28T10:18:18.959Z": 1,
+                        "2023-10-28T10:18:20.260Z": 1,
+                        "2023-10-28T10:18:25.440Z": 1,
+                        "2023-10-28T10:18:27.508Z": 1
+                    },
+                    "isDynamic": true,
+                    "tokenString": "<*>"
+                },
+                {
+                    "dynamicTokenPosition": 0,
+                    "enumerations": {},
+                    "isDynamic": false,
+                    "tokenString": "\t"
+                },
+                {
+                    "dynamicTokenPosition": 2,
+                    "enumerations": {
+                        "4766bcdd-4e26-41d8-8b54-fa0ae43f6201": 6
+                    },
+                    "isDynamic": true,
+                    "tokenString": "<*>"
+                }
+            ],
+            "priority": "LOW",
+            "state": "Active",
+            "suppressed": false,
+            "suppressedDate": 0,
+            "suppressedUntil": 0
+        },
+        {
+            "active": false,
+            "anomalyDetectorArn": "arn:aws:logs:us-west-1:123456789012:anomaly-detector:EXAMPLE-1234-5678-abcd-111111111111",
+            "anomalyId": "EXAMPLE-09d4-4286-9cd3-EXAMPLE",
+            "description": "Count of ErrorCode: 200 at token: 9 deviated expected by: 95.12%",
+            "firstSeen": 1698392040000,
+            "histogram": {
+                "1698392035000": 17,
+                "1698392040000": 5
+            },
+            "isPatternLevelSuppression": true,
+            "lastSeen": 1698392340000,
+            "logGroupArnList": [
+                "arn:aws:logs:us-east-1:123456789012:log-group:another-log-group"
+            ],
+            "logSamples": [
+                {
+                    "message": "2023-10-27T07:33:56.178Z\tb3c81837-ead3-46ac-9334-68fa05453033\tINFO\tResponse: 200 https://EXAMPLE-URL-2",
+                    "timestamp": 1698392036178
+                }
+            ],
+            "patternId": "9f2e9e2844e41728651fb229351c90e0",
+            "patternRegex": ".*\\Q\t\\E.*\\Q\tINFO\tResponse: \\E.*\\Q https:\\E.*\\Q\n\\E",
+            "patternString": "<*>\t<*>\tINFO\tResponse: <*> https:<*>\n",
+            "patternTokens": [
+                {
+                    "dynamicTokenPosition": 1,
+                    "enumerations": {
+                        "2023-10-27T07:33:56.238Z": 1,
+                        "2023-10-27T07:33:56.253Z": 1,
+                        "2023-10-27T07:33:56.274Z": 1,
+                        "2023-10-27T07:33:56.295Z": 1,
+                        "2023-10-27T07:34:01.929Z": 1
+                    },
+                    "isDynamic": true,
+                    "tokenString": "<*>"
+                },
+                {
+                    "dynamicTokenPosition": 0,
+                    "enumerations": {},
+                    "isDynamic": false,
+                    "tokenString": "\t"
+                },
+                {
+                    "dynamicTokenPosition": 2,
+                    "enumerations": {
+                        "b3c81837-ead3-46ac-9334-68fa05453033": 22
+                    },
+                    "isDynamic": true,
+                    "tokenString": "<*>"
+                }
+            ],
+            "priority": "LOW",
+            "state": "Active",
+            "suppressed": true,
+            "suppressedDate": 0,
+            "suppressedUntil": 1702393208766
+        }
+    ]
+}

@@ -1,0 +1,18 @@
+{
+  "data": [
+    {
+      "parent": "api-gateway",
+      "child": "order-service",
+      "callCount": 1520
+    },
+    {
+      "parent": "order-service",
+      "child": "payment-service",
+      "callCount": 1498
+    }
+  ],
+  "total": 0,
+  "limit": 0,
+  "offset": 0,
+  "errors": null
+}

@@ -1,0 +1,23 @@
+{
+    "data": {
+        "id": "b0ee8414-1d29-45c3-850f-11dbf0f1402f",
+        "status": "planned",
+        "rules": [
+            {
+                "state": "enabled",
+                "entity": {
+                    "id": "1d9530bb-a079-43d9-8535-bbfd2fb6f8af",
+                    "type": "policy"
+                }
+            }
+        ],
+        "time": {
+            "type": "schedule",
+            "startDate": "2018-03-25T08:45:00Z",
+            "endDate": "2018-03-25T21:45:00Z"
+        },
+        "description": "Maintenance Description"
+    },
+    "took": 1.165,
+    "requestId": "f9ab08f1-484f-44b3-a8e7-9f894a6e84fe"
+}

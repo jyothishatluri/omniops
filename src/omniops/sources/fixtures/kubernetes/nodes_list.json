@@ -1,0 +1,207 @@
+{
+ "kind": "NodeList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "incident-bench-control-plane",
+    "uid": "n1721803-0000-4000-8000-000000000000",
+    "creationTimestamp": "2026-09-30T20:00:00Z",
+    "labels": {
+     "kubernetes.io/hostname": "incident-bench-control-plane",
+     "kubernetes.io/os": "linux",
+     "kubernetes.io/arch": "amd64",
+     "beta.kubernetes.io/os": "linux",
+     "node-role.kubernetes.io/control-plane": ""
+    },
+    "annotations": {
+     "node.alpha.kubernetes.io/ttl": "0"
+    }
+   },
+   "spec": {
+    "podCIDR": "10.244.0.0/24",
+    "providerID": "kind://docker/incident-bench/incident-bench-control-plane",
+    "taints": [
+     {
+      "key": "node-role.kubernetes.io/control-plane",
+      "effect": "NoSchedule"
+     }
+    ]
+   },
+   "status": {
+    "capacity": {
+     "cpu": "4",
+     "ephemeral-storage": "61202244Ki",
+     "memory": "8137656Ki",
+     "pods": "110"
+    },
+    "allocatable": {
+     "cpu": "4",
+     "ephemeral-storage": "61202244Ki",
+     "memory": "8137656Ki",
+     "pods": "110"
+    },
+    "conditions": [
+     {
+      "type": "MemoryPressure",
+      "status": "False",
+      "lastHeartbeatTime": "2026-10-01T11:59:30Z",
+      "lastTransitionTime": "2026-09-30T20:00:00Z",
+      "reason": "KubeletHasSufficientMemory",
+      "message": "kubelet has sufficient memory available"
+     },
+     {
+      "type": "DiskPressure",
+      "status": "False",
+      "lastHeartbeatTime": "2026-10-01T11:59:30Z",
+      "lastTransitionTime": "2026-09-30T20:00:00Z",
+      "reason": "KubeletHasNoDiskPressure",
+      "message": "kubelet has no disk pressure"
+     },
+     {
+      "type": "PIDPressure",
+      "status": "False",
+      "lastHeartbeatTime": "2026-10-01T11:59:30Z",
+      "lastTransitionTime": "2026-09-30T20:00:00Z",
+      "reason": "KubeletHasSufficientPID",
+      "message": "kubelet has sufficient PID available"
+     },
+     {
+      "type": "Ready",
+      "status": "True",
+      "lastHeartbeatTime": "2026-10-01T11:59:30Z",
+      "lastTransitionTime": "2026-09-30T20:00:30Z",
+      "reason": "KubeletReady",
+      "message": "kubelet is posting ready status"
+     }
+    ],
+    "addresses": [
+     {
+      "type": "InternalIP",
+      "address": "172.18.0.3"
+     },
+     {
+      "type": "Hostname",
+      "address": "incident-bench-control-plane"
+     }
+    ],
+    "daemonEndpoints": {
+     "kubeletEndpoint": {
+      "Port": 10250
+     }
+    },
+    "nodeInfo": {
+     "machineID": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+     "systemUUID": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+     "bootID": "1e2d3c4b-5a69-7887-96a5-b4c3d2e1f00f",
+     "kernelVersion": "6.10.14-linuxkit",
+     "osImage": "Debian GNU/Linux 12 (bookworm)",
+     "containerRuntimeVersion": "containerd://2.1.4",
+     "kubeletVersion": "v1.35.0",
+     "kubeProxyVersion": "",
+     "operatingSystem": "linux",
+     "architecture": "amd64"
+    }
+   }
+  },
+  {
+   "metadata": {
+    "name": "incident-bench-worker",
+    "uid": "n1721802-0000-4000-8000-000000000000",
+    "creationTimestamp": "2026-09-30T20:00:00Z",
+    "labels": {
+     "kubernetes.io/hostname": "incident-bench-worker",
+     "kubernetes.io/os": "linux",
+     "kubernetes.io/arch": "amd64",
+     "beta.kubernetes.io/os": "linux"
+    },
+    "annotations": {
+     "node.alpha.kubernetes.io/ttl": "0"
+    }
+   },
+   "spec": {
+    "podCIDR": "10.244.0.0/24",
+    "providerID": "kind://docker/incident-bench/incident-bench-worker"
+   },
+   "status": {
+    "capacity": {
+     "cpu": "4",
+     "ephemeral-storage": "61202244Ki",
+     "memory": "8137656Ki",
+     "pods": "110"
+    },
+    "allocatable": {
+     "cpu": "4",
+     "ephemeral-storage": "61202244Ki",
+     "memory": "8137656Ki",
+     "pods": "110"
+    },
+    "conditions": [
+     {
+      "type": "MemoryPressure",
+      "status": "False",
+      "lastHeartbeatTime": "2026-10-01T11:59:30Z",
+      "lastTransitionTime": "2026-09-30T20:00:00Z",
+      "reason": "KubeletHasSufficientMemory",
+      "message": "kubelet has sufficient memory available"
+     },
+     {
+      "type": "DiskPressure",
+      "status": "False",
+      "lastHeartbeatTime": "2026-10-01T11:59:30Z",
+      "lastTransitionTime": "2026-09-30T20:00:00Z",
+      "reason": "KubeletHasNoDiskPressure",
+      "message": "kubelet has no disk pressure"
+     },
+     {
+      "type": "PIDPressure",
+      "status": "False",
+      "lastHeartbeatTime": "2026-10-01T11:59:30Z",
+      "lastTransitionTime": "2026-09-30T20:00:00Z",
+      "reason": "KubeletHasSufficientPID",
+      "message": "kubelet has sufficient PID available"
+     },
+     {
+      "type": "Ready",
+      "status": "True",
+      "lastHeartbeatTime": "2026-10-01T11:59:30Z",
+      "lastTransitionTime": "2026-09-30T20:00:30Z",
+      "reason": "KubeletReady",
+      "message": "kubelet is posting ready status"
+     }
+    ],
+    "addresses": [
+     {
+      "type": "InternalIP",
+      "address": "172.18.0.2"
+     },
+     {
+      "type": "Hostname",
+      "address": "incident-bench-worker"
+     }
+    ],
+    "daemonEndpoints": {
+     "kubeletEndpoint": {
+      "Port": 10250
+     }
+    },
+    "nodeInfo": {
+     "machineID": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+     "systemUUID": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+     "bootID": "1e2d3c4b-5a69-7887-96a5-b4c3d2e1f00f",
+     "kernelVersion": "6.10.14-linuxkit",
+     "osImage": "Debian GNU/Linux 12 (bookworm)",
+     "containerRuntimeVersion": "containerd://2.1.4",
+     "kubeletVersion": "v1.35.0",
+     "kubeProxyVersion": "",
+     "operatingSystem": "linux",
+     "architecture": "amd64"
+    }
+   }
+  }
+ ]
+}

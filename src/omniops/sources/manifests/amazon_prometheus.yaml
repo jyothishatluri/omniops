@@ -1,0 +1,407 @@
+# Amazon Managed Service for Prometheus (AMP). Extends templates/prometheus.yaml: the workspace exposes the
+# Prometheus-compatible query API under /workspaces/<id>/api/v1 and the Alertmanager v2 API under
+# /workspaces/<id>/alertmanager/api/v2, both SigV4-signed for service "aps".
+# Docs: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-Prometheus-Compatible-Apis.html
+source: amazon_prometheus
+display_name: Amazon Managed Service for Prometheus
+vendor: Amazon Web Services
+extends: prometheus
+description: >-
+  Amazon Managed Service for Prometheus workspace: PromQL range/instant queries, series, labels, metadata,
+  ruler rules/alerts, and Alertmanager alerts, alert groups and silences (SigV4, service aps).
+docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-Prometheus-Compatible-Apis.html
+categories: [metrics, alerts]
+base_url: "https://aps-workspaces.{{ env.AMP_REGION }}.amazonaws.com/workspaces/{{ env.AMP_WORKSPACE_ID }}"
+env:
+  - {name: AMP_WORKSPACE_ID, description: "Workspace ID, e.g. ws-b226cc2a-a446-46a9-933a-ac50479a5568"}
+  - {name: AMP_REGION, description: "AWS region of the workspace, e.g. us-west-2 (host aps-workspaces.<region>.amazonaws.com)"}
+required_env: [AMP_WORKSPACE_ID, AMP_REGION]
+auth:
+  type: aws_sigv4
+  service: aps
+  region: "{{ env.AMP_REGION }}"
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 600
+  retry_body_patterns: [ThrottlingException, Rate exceeded, TooManyRequests]
+  notes: >-
+    Per workspace: QueryMetrics 300 TPS (adjustable); GetSeries/GetLabels/GetMetricMetadata 10 TPS combined
+    (not adjustable); other Prometheus-compatible APIs 100 TPS. Each query may scan at most 50M samples,
+    12M series and 5 GB per 24h of range, and the time range is capped at 95 days.
+retention:
+  metrics: "150 days by default; configurable per workspace up to 1095 days"
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL or quota error (QSP / samples / series limits): narrow the query; do not retry unchanged"}
+query_languages:
+  promql: >-
+    PromQL (Cortex-based engine). Selectors use braces: metric{label="value"}. rate()/increase() need a range
+    vector [5m]. Aggregate with sum by (label) (...). Histograms: histogram_quantile(0.95, sum by (le)
+    (rate(x_bucket[5m]))). Instant tables need vector results; wrap scalars with vector().
+pitfalls:
+  - "Every request must be SigV4-signed for service 'aps' in the workspace region; IAM needs aps:QueryMetrics, aps:GetSeries, aps:GetLabels, aps:GetMetricMetadata, aps:ListRules, aps:ListAlerts and aps:ListAlertManager* actions. 403 = IAM, not the query."
+  - "An unknown metric or label returns 0 series, not an error: list label values first, then filter."
+  - "Queries are billed by samples processed (QSP) and fail above 50M samples / 12M series per 24h of range: aggregate with sum by (...) and narrow selectors instead of retrying."
+  - "AMP has no scrape-target API: targets live in the collector (AMP managed scraper / ADOT / Prometheus agent)."
+  - "Range queries are capped at ~11,000 points per series and 95 days; the engine auto-sizes step to ~300 points."
+drop_tables: [amazon_prometheus_targets]
+tables:
+  - name: amazon_prometheus_query_range
+    description: >-
+      Evaluate a PromQL expression over a time range (QueryMetrics, GET /workspaces/<id>/api/v1/query_range).
+      One row per (series, timestamp). Filter on query (required) and ts; optional step (s) and
+      max_samples_error (abort above N samples processed instead of paying for it). QSP warnings land in warnings.
+    request:
+      method: GET
+      path: /api/v1/query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+        max_samples_processed_error_threshold: "{{ filters.max_samples_error }}"
+        max_samples_processed_warning_threshold: "{{ filters.max_samples_warning }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression", examples: ['sum by (job) (rate(http_requests_total[5m]))']}
+      - {column: step, type: BIGINT, description: "Resolution step in seconds (default: auto, ~300 points)"}
+      - {column: max_samples_error, type: BIGINT, description: "Reject (unbilled) the query if it would process more samples than this"}
+      - {column: max_samples_warning, type: BIGINT, description: "Return a QSP warning (in the warnings column) when the query processes more samples than this"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s, description: "Sample timestamp (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value (NaN/Inf preserved)"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric, description: "All series labels as JSON; use labels->>'job'"}
+      - {name: warnings, type: JSON, path: "$.warnings", description: "Response warnings (e.g. QSP warning threshold reached)"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+      - {name: max_samples_error, type: BIGINT, filter_only: true}
+      - {name: max_samples_warning, type: BIGINT, filter_only: true}
+    time: {column: ts, default_lookback: 1h, max_window: 95d, retention: 1095d}
+    examples:
+      - sql: >-
+          SELECT labels->>'job' AS job, max(value) AS peak, arg_max(ts, value) AS peak_at
+          FROM amazon_prometheus_query_range
+          WHERE query = 'sum by (job) (rate(http_requests_total{code=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per job over an hour, and when it peaked.
+      - sql: >-
+          SELECT ts, labels->>'pod' AS pod, value FROM amazon_prometheus_query_range
+          WHERE query = 'sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="checkout"}[5m]))'
+            AND max_samples_error = 20000000
+            AND ts >= TIMESTAMP '2026-10-01 10:00:00' AND ts < TIMESTAMP '2026-10-01 12:00:00'
+        description: Pod CPU in a namespace, refusing to run if it would scan more than 20M samples.
+    tests:
+      - {sql: "SELECT count(*) AS n FROM amazon_prometheus_query_range WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_range.json
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+        note: "AMP QueryMetrics reference shows only an instant (vector) sample; range shape from the Prometheus HTTP API docs range example that AMP's API mirrors."
+      - file: query_error.json
+        filters: {query: 'up{job=}'}
+        expect_error: "parse error"
+        note: "Built strictly from the documented Prometheus API error envelope (status=error, errorType, error); proves the 2xx error rule fires when a proxy/gateway answers 200 with an error body. Message text illustrative."
+    ui_link: null
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-QueryMetrics.html
+
+  - name: amazon_prometheus_query
+    description: >-
+      Evaluate a PromQL expression at one instant (QueryMetrics, GET /workspaces/<id>/api/v1/query; evaluation
+      time = upper bound of ts). One row per series.
+    request:
+      method: GET
+      path: /api/v1/query
+      query:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | epoch_s }}"
+    examples:
+      - sql: "SELECT labels->>'instance' AS instance, labels->>'job' AS job FROM amazon_prometheus_query WHERE query = 'up == 0'"
+        description: Targets that are down at the anchor time.
+      - sql: "SELECT value FROM amazon_prometheus_query WHERE query = 'sum(node_cpu_seconds_total)'"
+        description: A single aggregated value (labels is {}).
+    tests:
+      - {sql: "SELECT value FROM amazon_prometheus_query WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_vector.json
+        filters: {query: sum(node_cpu_seconds_total)}
+        expect_rows: 1
+        expect_columns: {value: 252590622.81000024, labels: "{}", ts: "2021-10-22T21:10:46Z"}
+        note: "AMP QueryMetrics API reference sample response (query=sum(node_cpu_seconds_total))."
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-QueryMetrics.html
+
+  - name: amazon_prometheus_series
+    description: >-
+      Label sets of series matching a selector (GetSeries, /workspaces/<id>/api/v1/series). At least one match[]
+      is required. Limited to 10 TPS per workspace together with labels/metadata.
+    request:
+      method: GET
+      path: /api/v1/series
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    fixtures:
+      - file: series.json
+        filters: {match: 'node_cpu_seconds_total{app="prometheus"}'}
+        expect_rows: 2
+        expect_columns: {metric: node_cpu_seconds_total}
+        note: "AMP GetSeries API reference sample response ('...' elision removed)."
+    examples:
+      - sql: "SELECT labels->>'kubernetes_node' AS node, labels->>'mode' AS mode FROM amazon_prometheus_series WHERE match = 'node_cpu_seconds_total{app=\"prometheus\"}'"
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-GetSeries.html
+
+  - name: amazon_prometheus_label_values
+    description: Values of one label (GetLabels, GET /workspaces/<id>/api/v1/label/{name}/values) - confirm a value exists before filtering.
+    fixtures:
+      - file: label_values.json
+        filters: {label: access_mode}
+        expect_rows: 1
+        expect_columns: {value: ReadWriteOnce}
+        note: "AMP GetLabels API reference sample response for /label/access_mode/values."
+    examples:
+      - sql: "SELECT value AS namespace FROM amazon_prometheus_label_values WHERE label = 'namespace'"
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-GetLabels.html
+
+  - name: amazon_prometheus_metric_metadata
+    description: Type / help / unit per metric (GetMetricMetadata, GET /workspaces/<id>/api/v1/metadata).
+    fixtures:
+      - file: metadata.json
+        expect_rows: 1
+        expect_columns: {metric: aggregator_openapi_v2_regeneration_count, type: counter}
+        note: "AMP GetMetricMetadata API reference sample response ('...' elision removed)."
+    examples:
+      - sql: "SELECT metric, type, help FROM amazon_prometheus_metric_metadata WHERE metric = 'http_requests_total'"
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-GetMetricMetadata.html
+
+  - name: amazon_prometheus_alerts
+    title: Ruler active alerts
+    description: Alerts currently pending or firing from the workspace's rule groups (ListAlerts, GET /workspaces/<id>/api/v1/alerts).
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: test-1.alert, state: firing, severity: none, value: 1.0}
+        note: "AMP ListAlerts API reference sample response."
+    examples:
+      - sql: "SELECT alertname, state, active_at, severity, annotations FROM amazon_prometheus_alerts WHERE state = 'firing' ORDER BY active_at"
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-ListAlerts.html
+
+  - name: amazon_prometheus_rules
+    title: Rule groups (alerting and recording rules)
+    description: >-
+      Rules configured in the workspace's rule groups namespaces (ListRules, GET /workspaces/<id>/api/v1/rules),
+      one row per rule: PromQL, for-duration, health, last error, last evaluation. Push down rule_name,
+      group_name, file (= rule groups namespace) and type.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/rules
+      query:
+        type: "{{ 'alert' if filters.type == 'alerting' else ('record' if filters.type == 'recording' else None) }}"
+        "rule_name[]": "{{ filters.rule_name }}"
+        "rule_group[]": "{{ filters.group_name }}"
+        "file[]": "{{ filters.file }}"
+        exclude_alerts: "{{ filters.exclude_alerts }}"
+        group_limit: 500
+    filters:
+      - {column: type, description: "alerting | recording (sent as type=alert|record)", examples: [alerting]}
+      - {column: rule_name, ops: ["=", "in"], fan_out: false, description: "Exact rule name(s)", examples: ['record:1']}
+      - {column: group_name, ops: ["=", "in"], fan_out: false, description: "Rule group name(s)"}
+      - {column: file, ops: ["=", "in"], fan_out: false, description: "Rule groups namespace name(s)"}
+      - {column: exclude_alerts, type: BOOLEAN, description: "true = omit active alerts per rule"}
+    pagination: {type: cursor, cursor_path: "$.data.groupNextToken", cursor_param: query.group_next_token, max_pages: 10}
+    response:
+      rows_path: "$.data.groups[*]"
+      expand:
+        - {explode: rules, as: r}
+    columns:
+      - {name: group_name, path: name}
+      - {name: file, path: file, description: "Rule groups namespace"}
+      - {name: group_interval_s, type: DOUBLE, path: interval}
+      - {name: rule_name, path: "@r.name"}
+      - {name: type, path: "@r.type", description: "alerting | recording"}
+      - {name: query, path: "@r.query"}
+      - {name: duration_s, type: DOUBLE, path: "@r.duration"}
+      - {name: state, path: "@r.state"}
+      - {name: health, path: "@r.health"}
+      - {name: last_error, path: "@r.lastError"}
+      - {name: last_evaluation, type: TIMESTAMP, path: "@r.lastEvaluation"}
+      - {name: evaluation_time_s, type: DOUBLE, path: "@r.evaluationTime"}
+      - {name: severity, path: "@r.labels.severity"}
+      - {name: labels, type: JSON, path: "@r.labels"}
+      - {name: annotations, type: JSON, path: "@r.annotations"}
+      - {name: active_alerts, type: JSON, path: "@r.alerts"}
+      - {name: exclude_alerts, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "A single response holds at most 100,000 rules and never splits a group; groupNextToken pagination (with group_limit) is followed automatically."
+    examples:
+      - sql: "SELECT rule_name, query, duration_s, health, last_error FROM amazon_prometheus_rules WHERE type = 'alerting' AND health <> 'ok'"
+        description: Alert rules that fail to evaluate.
+      - sql: "SELECT group_name, rule_name, query FROM amazon_prometheus_rules WHERE rule_name = 'record:1'"
+    fixtures:
+      - file: rules.json
+        expect_rows: 1
+        expect_columns: {rule_name: "record:1", type: recording, health: ok, file: test-rules, last_evaluation: "2021-10-21T21:22:34Z"}
+        note: "AMP ListRules API reference sample response."
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-ListRules.html
+
+  - name: amazon_prometheus_alertmanager_alerts
+    title: Alertmanager alerts (notification view)
+    description: >-
+      Alerts in the workspace Alertmanager (ListAlertManagerAlerts, GET /workspaces/<id>/alertmanager/api/v2/alerts):
+      state active | suppressed | unprocessed, silenced_by / inhibited_by and receivers (SNS topics).
+    kind: alerts
+    request:
+      method: GET
+      path: /alertmanager/api/v2/alerts
+      query:
+        filter: "{{ filters.matcher }}"
+        receiver: "{{ filters.receiver }}"
+    filters:
+      - {column: matcher, ops: ["=", "in"], fan_out: false, description: "Label matcher(s), AND-ed, e.g. alertname=\"HighErrorRate\"", examples: ['alertname="test-alert"']}
+      - {column: receiver, description: "Regex on receiver name", examples: [sns-0]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: alertname, path: "labels.alertname"}
+      - {name: state, path: "status.state", description: "active | suppressed | unprocessed"}
+      - {name: severity, path: "labels.severity"}
+      - {name: service, path: "labels.service"}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: summary, expr: "_.annotations.summary or _.annotations.description or _.annotations.message"}
+      - {name: receivers, path: "receivers[*].name", transform: join, transform_arg: ","}
+      - {name: silenced_by, type: JSON, path: "status.silencedBy"}
+      - {name: inhibited_by, type: JSON, path: "status.inhibitedBy"}
+      - {name: fingerprint, path: fingerprint}
+      - {name: url, path: generatorURL}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+      - {name: matcher, filter_only: true}
+      - {name: receiver, filter_only: true}
+    pitfalls:
+      - "AMP Alertmanager holds at most 1,000 alerts per workspace; receivers are SNS topics, so 'notified' means published to SNS, not delivered to a human."
+    examples:
+      - sql: "SELECT alertname, state, receivers, silenced_by, starts_at FROM amazon_prometheus_alertmanager_alerts ORDER BY starts_at DESC"
+        description: What the Alertmanager is (or is not) notifying about.
+    fixtures:
+      - file: alertmanager_alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: test-alert, state: active, receivers: sns-0, fingerprint: 375eab7b59892505}
+        note: "AMP ListAlertManagerAlerts API reference sample response."
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-ListAlertManagerAlerts.html
+
+  - name: amazon_prometheus_alert_groups
+    title: Alertmanager alert groups
+    description: >-
+      Alerts grouped the way Alertmanager routes them (ListAlertManagerAlertGroups,
+      GET /workspaces/<id>/alertmanager/api/v2/alerts/groups): one row per (group, alert) with the receiver.
+    kind: alerts
+    request:
+      method: GET
+      path: /alertmanager/api/v2/alerts/groups
+      query:
+        filter: "{{ filters.matcher }}"
+        receiver: "{{ filters.receiver }}"
+    filters:
+      - {column: matcher, ops: ["=", "in"], fan_out: false, description: "Label matcher(s), AND-ed", examples: ['alertname="test-alert"']}
+      - {column: receiver, description: "Regex on receiver name"}
+    response:
+      rows_path: "$[*]"
+      expand:
+        - {explode: alerts, as: a}
+    columns:
+      - {name: receiver, path: "receiver.name"}
+      - {name: group_labels, type: JSON, path: labels}
+      - {name: alertname, path: "@a.labels.alertname"}
+      - {name: state, path: "@a.status.state"}
+      - {name: starts_at, type: TIMESTAMP, path: "@a.startsAt"}
+      - {name: ends_at, type: TIMESTAMP, path: "@a.endsAt"}
+      - {name: fingerprint, path: "@a.fingerprint"}
+      - {name: url, path: "@a.generatorURL"}
+      - {name: labels, type: JSON, path: "@a.labels"}
+      - {name: annotations, type: JSON, path: "@a.annotations"}
+      - {name: matcher, filter_only: true}
+    examples:
+      - sql: "SELECT receiver, alertname, state, starts_at FROM amazon_prometheus_alert_groups ORDER BY receiver, starts_at"
+        description: Which receiver each firing alert group goes to.
+    fixtures:
+      - file: alert_groups.json
+        expect_rows: 1
+        expect_columns: {receiver: sns-0, alertname: test-alert, state: unprocessed, url: "https://www.amazon.com/"}
+        note: "AMP ListAlertManagerAlertGroups API reference sample response."
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-ListAlertManagerAlertGroups.html
+
+  - name: amazon_prometheus_silences
+    title: Alertmanager silences
+    description: "Silences in the workspace Alertmanager (ListAlertManagerSilences, GET /workspaces/<id>/alertmanager/api/v2/silences)."
+    kind: entities
+    request:
+      method: GET
+      path: /alertmanager/api/v2/silences
+      query:
+        filter: "{{ filters.matcher }}"
+    filters:
+      - {column: matcher, ops: ["=", "in"], fan_out: false, description: "Label matcher(s) the silence must match", examples: ['job="hello"']}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: state, path: "status.state", description: "active | pending | expired"}
+      - {name: created_by, path: createdBy}
+      - {name: comment, path: comment}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: matchers, type: JSON, path: matchers}
+      - {name: matcher, filter_only: true}
+    examples:
+      - sql: "SELECT created_by, comment, ends_at, matchers FROM amazon_prometheus_silences WHERE state = 'active'"
+        description: Active silences that could have muted the incident's alerts.
+    fixtures:
+      - file: silences.json
+        expect_rows: 1
+        expect_columns: {id: d29d9df3-9125-4441-912c-70b05f86f973, state: active, created_by: test-person, comment: hello-world}
+        note: "AMP ListAlertManagerSilences API reference sample response."
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-ListAlertManagerSilences.html
+
+  - name: amazon_prometheus_labels
+    title: Label names
+    description: Label names in the workspace (GetLabels, GET /workspaces/<id>/api/v1/labels), optionally scoped by a selector.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/labels
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: match, description: "Optional series selector", examples: ['node_cpu_seconds_total']}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT label FROM amazon_prometheus_labels WHERE match = 'node_cpu_seconds_total'"
+    fixtures:
+      - file: labels.json
+        expect_rows: 18
+        expect_columns: {label: __name__}
+        note: "AMP GetLabels API reference sample response ('...' elision removed)."
+    docs_url: https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-APIReference-GetLabels.html
+roles:
+  metrics: {table: amazon_prometheus_query_range, query_language: promql}
+  active_alerts:
+    - table: amazon_prometheus_alerts
+      columns: {name: alertname, state: state, ts: active_at, labels: labels, severity: severity}
+    - table: amazon_prometheus_alertmanager_alerts
+      columns: {name: alertname, state: state, ts: starts_at, labels: labels, severity: severity, service: service}
+      notes: "Notification view: silenced / inhibited / SNS receivers."
+  alert_rules:
+    table: amazon_prometheus_rules
+    columns: {name: rule_name, query: query, state: state, severity: severity}

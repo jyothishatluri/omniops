@@ -1,0 +1,27 @@
+{
+  "links": {"create": "/services/messages/_new"},
+  "origin": "https://10.140.53.114:8089/services/admin/messages",
+  "updated": "2016-09-01T13:10:34-07:00",
+  "generator": {"version": "6.5.0"},
+  "entry": [
+    {
+      "name": "manifest_error",
+      "id": "https://10.140.53.114:8089/services/admin/messages/manifest_error",
+      "updated": "2016-09-01T13:10:34-07:00",
+      "links": {"alternate": "/services/admin/messages/manifest_error", "remove": "/services/admin/messages/manifest_error"},
+      "author": "system",
+      "acl": {"app": "", "can_list": true, "can_write": true, "modifiable": false, "owner": "system", "perms": {"read": ["*"], "write": ["admin", "splunk-system-role"]}, "removable": false, "sharing": "system"},
+      "content": {
+        "help": "",
+        "manifest_error": "File Integrity checks found 145 files that did not match the system-provided manifest.  See splunkd.log for details.",
+        "message": "File Integrity checks found 145 files that did not match the system-provided manifest.  See splunkd.log for details.",
+        "server": "docs-unix-4",
+        "severity": "warn",
+        "timeCreated_epochSecs": 1472739529,
+        "timeCreated_iso": "2016-09-01T07:18:49-07:00"
+      }
+    }
+  ],
+  "paging": {"total": 1, "perPage": 30, "offset": 0},
+  "messages": []
+}

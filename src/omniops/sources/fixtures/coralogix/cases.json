@@ -1,0 +1,55 @@
+{
+ "cases": [
+  {
+   "acknowledgeTime": "2025-09-22T10:41:00.000Z",
+   "aiSummary": "Database connection pool exhausted after deploy; checkout and payments affected.",
+   "assignee": {
+    "userId": "u-456"
+   },
+   "caseIndicators": {
+    "alertIndicators": [
+     {
+      "alertId": "f56645c5-9cd4-4b9f-961f-4f852d8835a0",
+      "alertVersions": [
+       "550e8400-e29b-41d4-a716-446655440000"
+      ],
+      "latestAlertVersion": "550e8400-e29b-41d4-a716-446655440000",
+      "priority": "INDICATOR_PRIORITY_P2",
+      "state": "INDICATOR_STATE_TRIGGERED",
+      "triggerTime": "2025-09-22T10:30:00.000Z",
+      "groupingType": "GROUPING_TYPE_NONE"
+     }
+    ],
+    "genericIndicators": [],
+    "prometheusAlertIndicators": []
+   },
+   "category": "CASE_CATEGORY_AVAILABILITY",
+   "createTime": "2025-09-22T10:30:00.000Z",
+   "duration": "3600000",
+   "groupings": [
+    {
+     "key": "service",
+     "value": "checkout"
+    }
+   ],
+   "id": "3f166e9f-3c88-4af2-b52e-138f339dab3e",
+   "impactedEntities": [],
+   "labels": [
+    {
+     "key": "team",
+     "value": "backend"
+    }
+   ],
+   "priority": "CASE_PRIORITY_P2",
+   "readableId": "CASE-123",
+   "resolutionDetails": {},
+   "status": "CASE_STATUS_ACKNOWLEDGED",
+   "title": "Database outage investigation",
+   "updateTime": "2025-09-22T11:30:00.000Z"
+  }
+ ],
+ "pagination": {
+  "nextPageToken": ""
+ },
+ "pbacTruncated": false
+}

@@ -1,0 +1,129 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "ttlSeconds": 300,
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "canonicalQuery": "fetch dt.davis.problems | dedup event.id, sort: { timestamp desc } | ...",
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 37,
+    "locale": "en_US",
+    "query": "fetch dt.davis.problems | dedup event.id, sort: { timestamp desc } | ...",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 1840,
+    "scannedBytes": 1048576,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "event.id": "8812736451209845121_1727780400000V2",
+    "display_id": "P-24101301",
+    "event.name": "Response time degradation",
+    "event.status": "CLOSED",
+    "event.category": "SLOWDOWN",
+    "event.severity": "3",
+    "event.description": "Response time increased to 2.4 s.",
+    "event.start": "2026-10-01T11:00:00.000000000Z",
+    "event.end": "2026-10-01T11:25:00.000000000Z",
+    "timestamp": "2026-10-01T11:25:00.000000000Z",
+    "root_cause.smartscape_entity": {
+     "id": "SERVICE-9A1B2C3D4E5F6071",
+     "type": "SERVICE",
+     "name": "payment-service"
+    },
+    "smartscape.affected_entities": [
+     {
+      "id": "SERVICE-5D53A2A6A1F2C3B4",
+      "type": "SERVICE",
+      "name": "checkout-service"
+     },
+     {
+      "id": "SERVICE-1A2B3C4D5E6F7081",
+      "type": "SERVICE",
+      "name": "frontend"
+     }
+    ],
+    "dt.davis.event_ids": [
+     "4411223344556677889_1727780400000"
+    ],
+    "dt.davis.impact_level": "Services",
+    "dt.davis.affected_users_count": "312",
+    "dt.davis.mute.status": null,
+    "maintenance.is_under_maintenance": false,
+    "resolved_problem_duration": "1500000000000"
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     0
+    ],
+    "mappings": {
+     "event.id": {
+      "type": "string"
+     },
+     "display_id": {
+      "type": "string"
+     },
+     "event.name": {
+      "type": "string"
+     },
+     "event.status": {
+      "type": "string"
+     },
+     "event.category": {
+      "type": "string"
+     },
+     "event.severity": {
+      "type": "long"
+     },
+     "event.description": {
+      "type": "string"
+     },
+     "event.start": {
+      "type": "timestamp"
+     },
+     "event.end": {
+      "type": "timestamp"
+     },
+     "timestamp": {
+      "type": "timestamp"
+     },
+     "root_cause.smartscape_entity": {
+      "type": "record"
+     },
+     "smartscape.affected_entities": {
+      "type": "array"
+     },
+     "dt.davis.event_ids": {
+      "type": "array"
+     },
+     "dt.davis.impact_level": {
+      "type": "string"
+     },
+     "dt.davis.affected_users_count": {
+      "type": "long"
+     },
+     "dt.davis.mute.status": {
+      "type": "string"
+     },
+     "maintenance.is_under_maintenance": {
+      "type": "boolean"
+     },
+     "resolved_problem_duration": {
+      "type": "duration"
+     }
+    }
+   }
+  ]
+ }
+}

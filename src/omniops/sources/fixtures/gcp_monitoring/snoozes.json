@@ -1,0 +1,25 @@
+{
+  "snoozes": [
+    {
+      "name": "projects/my-project/snoozes/7816254109321",
+      "displayName": "Checkout maintenance window",
+      "criteria": {
+        "policies": ["projects/my-project/alertPolicies/4721338519483937810"],
+        "filter": "resource.labels.namespace_name=\"checkout\""
+      },
+      "interval": {"startTime": "2026-10-20T13:00:00Z", "endTime": "2026-10-20T15:00:00Z"}
+    },
+    {
+      "name": "projects/my-project/snoozes/7816254109999",
+      "displayName": "DB failover drill",
+      "criteria": {
+        "policies": [
+          "projects/my-project/alertPolicies/5550001112223334445",
+          "projects/my-project/alertPolicies/9087213409872134561"
+        ]
+      },
+      "interval": {"startTime": "2026-10-20T11:30:00.000Z", "endTime": "2026-10-20T12:30:00.000Z"}
+    }
+  ],
+  "nextPageToken": ""
+}

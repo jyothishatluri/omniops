@@ -1,0 +1,24 @@
+{
+    "logGroupFields": [
+        {
+            "name": "@timestamp",
+            "percent": 100
+        },
+        {
+            "name": "@message",
+            "percent": 100
+        },
+        {
+            "name": "@logStream",
+            "percent": 100
+        },
+        {
+            "name": "type",
+            "percent": 57
+        },
+        {
+            "name": "duration",
+            "percent": 13
+        }
+    ]
+}

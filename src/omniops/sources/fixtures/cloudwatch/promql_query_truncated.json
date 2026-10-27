@@ -1,0 +1,10 @@
+{
+    "status": "success",
+    "data": {
+        "resultType": "vector",
+        "result": []
+    },
+    "warnings": [
+        "result truncated to the maximum of 500 series; refine the query or use the limit parameter"
+    ]
+}

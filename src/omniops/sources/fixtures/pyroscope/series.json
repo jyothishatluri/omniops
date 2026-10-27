@@ -1,0 +1,22 @@
+{
+  "labelsSet": [
+    {
+      "labels": [
+        {"name": "__profile_type__", "value": "process_cpu:cpu:nanoseconds:cpu:nanoseconds"},
+        {"name": "namespace", "value": "shop"},
+        {"name": "pod", "value": "order-service-7d9f8c6b5-x2x9q"},
+        {"name": "service_name", "value": "order-service"},
+        {"name": "service_version", "value": "1.4.2"}
+      ]
+    },
+    {
+      "labels": [
+        {"name": "__profile_type__", "value": "process_cpu:cpu:nanoseconds:cpu:nanoseconds"},
+        {"name": "namespace", "value": "shop"},
+        {"name": "pod", "value": "order-service-7d9f8c6b5-k8j2m"},
+        {"name": "service_name", "value": "order-service"},
+        {"name": "service_version", "value": "1.4.3"}
+      ]
+    }
+  ]
+}

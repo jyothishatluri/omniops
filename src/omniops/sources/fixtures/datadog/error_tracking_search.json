@@ -1,0 +1,72 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "impacted_sessions": 12,
+        "impacted_users": 4,
+        "total_count": 82
+      },
+      "id": "c1726a66-1f64-11ee-b338-da7ad0900002",
+      "relationships": {
+        "issue": {
+          "data": {
+            "id": "c1726a66-1f64-11ee-b338-da7ad0900002",
+            "type": "issue"
+          }
+        }
+      },
+      "type": "error_tracking_search_result"
+    }
+  ],
+  "included": [
+    {
+      "attributes": {
+        "error_message": "object of type 'NoneType' has no len()",
+        "error_type": "builtins.TypeError",
+        "file_path": "/django-email/conduit/apps/core/utils.py",
+        "first_seen": 1671612804001,
+        "first_seen_version": "aaf65cd0",
+        "function_name": "filter_forbidden_tags",
+        "is_crash": false,
+        "languages": [
+          "PYTHON",
+          "GO"
+        ],
+        "last_seen": 1671620003100,
+        "last_seen_version": "b6199f80",
+        "platform": "BACKEND",
+        "regression": {
+          "regressed_at": "2024-01-03T08:00:00Z",
+          "regressed_at_version": "v2.5.2",
+          "resolved_at": "2024-01-01T10:00:00Z"
+        },
+        "service": "email-api-py",
+        "state": "RESOLVED"
+      },
+      "id": "c1726a66-1f64-11ee-b338-da7ad0900002",
+      "relationships": {
+        "assignee": {
+          "data": {
+            "id": "87cb11a0-278c-440a-99fe-701223c80296",
+            "type": "user"
+          }
+        },
+        "case": {
+          "data": {
+            "id": "2841440d-e780-4fe2-96cd-6a8c1d194da5",
+            "type": "case"
+          }
+        },
+        "team_owners": {
+          "data": [
+            {
+              "id": "221b0179-6447-4d03-91c3-3ca98bf60e8a",
+              "type": "team"
+            }
+          ]
+        }
+      },
+      "type": "issue"
+    }
+  ]
+}

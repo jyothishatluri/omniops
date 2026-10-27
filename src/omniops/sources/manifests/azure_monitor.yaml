@@ -1,0 +1,1738 @@
+# Azure Monitor control plane over Azure Resource Manager (management.azure.com), reached directly over REST (no SDK,
+# no MCP). One Microsoft Entra app (client credentials, scope https://management.azure.com/.default) reads:
+#
+#   GET  {resourceUri}/providers/Microsoft.Insights/metrics                       Metrics - List (2023-10-01)
+#   GET  /subscriptions/{id}/providers/Microsoft.Insights/metrics?region=        Metrics - List At Subscription Scope (2023-10-01)
+#   GET  {resourceUri}/providers/Microsoft.Insights/metricDefinitions            Metric Definitions - List (2023-10-01)
+#   GET  {resourceUri}/providers/microsoft.insights/metricNamespaces             Metric Namespaces - List (2017-12-01-preview)
+#   GET  /subscriptions/{id}/providers/Microsoft.AlertsManagement/alerts         Alerts - Get All (2019-03-01 stable)
+#   GET  {alertId} and {alertId}/history                                          Alerts - Get By Id / Get History (2019-03-01)
+#   GET  /subscriptions/{id}/providers/Microsoft.AlertsManagement/alertsSummary  Alerts - Get Summary (2019-03-01)
+#   GET  /subscriptions/{id}/providers/Microsoft.AlertsManagement/actionRules    Alert processing rules (2021-08-08)
+#   GET  /subscriptions/{id}/providers/Microsoft.Insights/metricAlerts           Metric alert rules (2018-03-01)
+#   GET  /subscriptions/{id}/providers/Microsoft.Insights/scheduledQueryRules    Log search alert rules (2023-12-01 GA)
+#   GET  /subscriptions/{id}/providers/Microsoft.Insights/activityLogAlerts      Activity log alert rules (2020-10-01)
+#   GET  /subscriptions/{id}/providers/Microsoft.Insights/autoscalesettings      Autoscale settings (2022-10-01)
+#   GET  /subscriptions/{id}/providers/Microsoft.Insights/eventtypes/management/values   Activity log (2015-04-01)
+#   POST /providers/Microsoft.ResourceGraph/resources                             Resource Graph KQL (2024-04-01)
+#   GET  /subscriptions/{id}/providers/Microsoft.ResourceHealth/events           Service Health events (2025-05-01)
+#   GET  .../Microsoft.ResourceHealth/events/{trackingId}/impactedResources      Service Health impacted resources (2025-05-01)
+#   GET  .../providers/Microsoft.ResourceHealth/availabilityStatuses             Resource Health (2025-05-01)
+#
+# 2xx-with-error bodies: Metrics - List returns HTTP 200 with a per-metric errorCode/errorMessage (e.g.
+# InvalidSamplingType); Resource Graph returns resultTruncated = "true" when rows were dropped.
+# Docs index: https://learn.microsoft.com/en-us/rest/api/monitor/   Research notes: docs/sources/azure_monitor.md
+source: azure_monitor
+display_name: Azure Monitor (metrics, alerts, activity log, Resource Graph, Service Health)
+vendor: Microsoft Azure
+description: >-
+  Azure Resource Manager APIs of Azure Monitor and friends: platform metrics per resource or per region across a
+  subscription, metric definitions and namespaces, fired alerts with their history and summary counts, metric / log
+  search / activity log alert rules, alert processing rules (suppression), autoscale settings, the activity log
+  (control-plane changes), Resource Graph inventory and resource changes, Service Health events with their impacted
+  resources and Resource Health availability.
+docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/
+categories: [metrics, alerts, changes, events, inventory, health]
+base_url: "{{ (env.AZURE_RESOURCE_MANAGER_ENDPOINT or 'https://management.azure.com').rstrip('/') }}"
+env:
+  - {name: AZURE_TENANT_ID, description: "Microsoft Entra tenant (directory) ID of the app registration"}
+  - {name: AZURE_CLIENT_ID, description: "App registration (client) ID; needs Monitoring Reader (alerts, metrics, rules, activity log) and Reader (Resource Graph, Resource Health) on the subscription"}
+  - {name: AZURE_CLIENT_SECRET, description: "App registration client secret", secret: true}
+  - {name: AZURE_SUBSCRIPTION_ID, description: "Default subscription GUID for subscription-scoped tables (override per query with subscription_id)"}
+  - {name: AZURE_REGION, description: "Optional default region for azure_monitor_subscription_metrics, e.g. westeurope (the API requires one region per request)"}
+  - {name: AZURE_AUTHORITY_HOST, description: "Entra authority host (sovereign clouds: https://login.chinacloudapi.cn, https://login.microsoftonline.us)", default: "https://login.microsoftonline.com"}
+  - {name: AZURE_RESOURCE_MANAGER_ENDPOINT, description: "ARM endpoint (China: https://management.chinacloudapi.cn, US Gov: https://management.usgovcloudapi.net)", default: "https://management.azure.com"}
+  - {name: AZURE_RESOURCE_MANAGER_SCOPE, description: "Token scope for ARM (China: https://management.chinacloudapi.cn/.default, US Gov: https://management.usgovcloudapi.net/.default)", default: "https://management.azure.com/.default"}
+  - {name: AZURE_PORTAL_URL, description: "Portal base for deep links", default: "https://portal.azure.com"}
+required_env: [AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SUBSCRIPTION_ID]
+auth:
+  type: azure_ad
+  token_url: "{{ env.AZURE_AUTHORITY_HOST.rstrip('/') }}/{{ env.AZURE_TENANT_ID }}/oauth2/v2.0/token"
+  client_id: "{{ env.AZURE_CLIENT_ID }}"
+  client_secret: "{{ env.AZURE_CLIENT_SECRET }}"
+  scope: "{{ env.AZURE_RESOURCE_MANAGER_SCOPE }}"
+rate_limit:
+  concurrency: 6
+  requests_per_minute: 600
+  notes: >-
+    ARM reads (token bucket, per subscription and service principal, per region): bucket 250, refill 25/s; tenant
+    reads the same; global subscription limit 15x that. 429 carries Retry-After (honoured). The metrics API is the
+    most common cause of subscription throttling. Alerts Management: Get All 100 calls/min/subscription, Get Summary
+    50/min, other alert calls 1000/min. Resource Graph: about 15 queries per 5 s per user (x-ms-user-quota-remaining,
+    x-ms-user-quota-resets-after), max 1000 rows per page. Activity log: 50 queries per 30 s, 75 s timeout.
+retention:
+  metrics: 93d
+  timeseries: 93d
+  alerts: 30d
+  changes: "activity log 90 days; Resource Graph resourcechanges 14 days"
+  events: "activity log 90 days"
+errors: []
+ui_base_url: "{{ env.AZURE_PORTAL_URL }}"
+query_languages:
+  azure_metrics_filter: >-
+    Metrics $filter (OData on dimensions, NOT on values): Dim eq 'v' and Other eq '*' splits by Other; one dimension may
+    OR several values (StatusCode eq '500' or StatusCode eq '503') but OR cannot join two different dimensions.
+    Dimension names are case-insensitive and come back lower-cased. A dimension filter splits the result into one
+    series per value, capped by top (default 10) and ordered by orderby (e.g. 'total desc'). metric names are exact,
+    comma-separated (max 20) and include spaces, e.g. 'Percentage CPU', 'Http5xx', 'requests/failed'.
+  azure_resource_graph: >-
+    Resource Graph KQL over tables resources, resourcecontainers (subscriptions, resource groups), resourcechanges,
+    resourcecontainerchanges, healthresources, servicehealthresources, alertsmanagementresources, advisorresources,
+    policyresources: resources | where type =~ 'microsoft.web/sites' and resourceGroup =~ 'rg' | project id, name,
+    location, properties.state | order by name asc. String compare with =~ (case-insensitive); type values are
+    lower-case; tags['env']. Max 1000 rows per page; project id so results can be paged.
+pitfalls:
+  - "Azure resource ids, resource groups and types are case-insensitive but come back in inconsistent casing (alerts and Resource Graph lower-case them, the activity log mixes cases). Filter with the pushdown columns here (they compare case-insensitively) and use lower() for joins across tables."
+  - "Subscription-scoped tables only see AZURE_SUBSCRIPTION_ID unless subscription_id is given; an alert, rule or resource in another subscription returns 0 rows, which is not evidence of absence."
+  - "Platform metrics are kept 93 days; alerts in Alerts Management 30 days; the activity log 90 days; Resource Graph resourcechanges 14 days. Older windows are missing data, not 'nothing happened'."
+  - "Metric values per interval: a total over PT5M is a 5-minute sum. Requests with no data in an interval return a timestamp with no value (value = null), not 0."
+  - "ARM throttling (HTTP 429, Retry-After) is per subscription and principal: fan-outs over many resources or regions slow down; prefer azure_monitor_subscription_metrics (one call per region) over per-resource calls."
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_metrics
+    title: Platform / custom metric values for one resource (Metrics - List)
+    description: >-
+      Azure Monitor metric values for one Azure resource (GET {resource_id}/providers/Microsoft.Insights/metrics,
+      api-version 2023-10-01). One row per (metric, dimension series, timestamp). resource_id (full ARM id) and
+      metric (exact name; IN list up to 20 names) are required. aggregation picks the statistics (average, minimum,
+      maximum, total, count; comma list); value is the first one requested (default average). interval is the
+      time grain (default: auto from the window, PT1M..P1D, or FULL for one point), filter is the OData dimension
+      filter that splits series (e.g. StatusCode eq '*'), top/orderby keep the N largest series. Dimensions of each
+      series are in dimensions (JSON object, lower-case keys): dimensions->>'statuscode'. List the metric names
+      and dimensions of a resource with azure_monitor_metric_definitions first.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/{{ filters.resource_id.strip('/') }}/providers/Microsoft.Insights/metrics"
+      query:
+        api-version: "2023-10-01"
+        metricnames: "{{ filters.metric | as_list | join(',') }}"
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        interval: >-
+          {{ filters.interval or ('PT1M' if time.step_s <= 60 else 'PT5M' if time.step_s <= 300 else 'PT15M' if time.step_s <= 900 else 'PT30M' if time.step_s <= 1800 else 'PT1H' if time.step_s <= 3600 else 'PT6H' if time.step_s <= 21600 else 'PT12H' if time.step_s <= 43200 else 'P1D') }}
+        aggregation: "{{ filters.aggregation }}"
+        metricnamespace: "{{ filters.metric_namespace }}"
+        $filter: "{{ filters.filter }}"
+        top: "{{ filters.top }}"
+        orderby: "{{ filters.orderby }}"
+        rollupby: "{{ filters.rollupby }}"
+        AutoAdjustTimegrain: "true"
+    filters:
+      - column: resource_id
+        required: true
+        ops: ["=", "in"]
+        max_fan_out: 20
+        description: "Full ARM id of the resource (IN fans out one request per resource), e.g. /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Web/sites/<app>"
+        examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api"]
+      - column: metric
+        required: true
+        ops: ["=", "in"]
+        fan_out: false
+        description: "Metric name(s), exact: e.g. Http5xx, Requests, AverageResponseTime (App Service); Percentage CPU (VM); requests/failed (App Insights); node_cpu_usage_percentage (AKS)"
+        examples: ["Http5xx"]
+      - {column: aggregation, description: "Comma list of average, minimum, maximum, total, count (default: the metric's primary aggregation, average when unset); value = the first one", examples: ["total"]}
+      - {column: interval, description: "Time grain: PT1M, PT5M, PT15M, PT30M, PT1H, PT6H, PT12H, P1D or FULL (default auto, ~300 points; AutoAdjustTimegrain=true picks the closest supported grain)", examples: ["PT1M"]}
+      - {column: metric_namespace, description: "Metric namespace, e.g. Microsoft.Web/sites, microsoft.insights/components, or a custom namespace (azure.applicationinsights)", examples: ["Microsoft.Web/sites"]}
+      - {column: filter, description: "OData dimension filter: Instance eq '*' splits by instance; StatusCode eq '500' or StatusCode eq '503'", examples: ["Instance eq '*'"]}
+      - {column: top, type: BIGINT, description: "Max series per resource when filter splits (API default 10)", examples: ["10"]}
+      - {column: orderby, description: "Aggregation and direction used with top, e.g. 'total desc'", examples: ["total desc"]}
+      - {column: rollupby, description: "Dimension(s) to roll up after filtering (one series instead of one per value)", examples: ["Instance"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, retention: 93d, min_step: 60s, control_lookback: 24h}
+    response:
+      rows_path: "$.value[*]"
+      expand:
+        - {explode: timeseries, as: s}
+        - {explode: "@s.data", as: p}
+      errors:
+        - path: "$.value[*].errorMessage"
+          non_empty: true
+          message: "$.value[*].errorMessage"
+          hint: >-
+            Metrics - List returned HTTP 200 but at least one metric failed (errorCode is not Success, e.g.
+            InvalidSamplingType for an unsupported aggregation, or an unknown dimension): check the metric's
+            supported_aggregations and dimensions in azure_monitor_metric_definitions and fix aggregation / filter
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.timeStamp", transform: auto_time, description: "Start of the time grain (UTC)"}
+      - {name: metric, path: "name.value", description: "Metric name"}
+      - name: value
+        type: DOUBLE
+        expr: "p[(filters.aggregation | string).split(',')[0].strip().lower()] if filters.aggregation else ([p.average, p.total, p.maximum, p.minimum, p.count] | select('number') | first)"
+        description: "The first requested aggregation (without aggregation: whichever the API returned, average first); null when the grain had no data"
+      - {name: average, type: DOUBLE, path: "@p.average"}
+      - {name: minimum, type: DOUBLE, path: "@p.minimum"}
+      - {name: maximum, type: DOUBLE, path: "@p.maximum"}
+      - {name: total, type: DOUBLE, path: "@p.total"}
+      - {name: count, type: DOUBLE, path: "@p.count", description: "Number of samples in the grain"}
+      - name: dimensions
+        type: JSON
+        expr: >-
+          dict([[s.metadatavalues[0].name.value, s.metadatavalues[0].value], [s.metadatavalues[1].name.value, s.metadatavalues[1].value],
+          [s.metadatavalues[2].name.value, s.metadatavalues[2].value], [s.metadatavalues[3].name.value, s.metadatavalues[3].value],
+          [s.metadatavalues[4].name.value, s.metadatavalues[4].value], [s.metadatavalues[5].name.value, s.metadatavalues[5].value]][:(s.metadatavalues or []) | length])
+        description: "Dimension values of the series as {dimension: value} (lower-case dimension names; first 6 dimensions)"
+      - {name: unit, path: unit, description: "Count, Bytes, Seconds, MilliSeconds, Percent, CountPerSecond, ..."}
+      - {name: metric_display_name, path: "name.localizedValue"}
+      - {name: namespace, path: "$.namespace"}
+      - {name: interval_used, path: "$.interval", description: "Grain the API actually used (AutoAdjustTimegrain may change it)"}
+      - {name: resource_region, path: "$.resourceregion"}
+      - {name: resource_id, filter_only: true}
+      - {name: aggregation, filter_only: true}
+      - {name: interval, filter_only: true}
+      - {name: metric_namespace, filter_only: true}
+      - {name: filter, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+      - {name: orderby, filter_only: true}
+      - {name: rollupby, filter_only: true}
+    max_rows: 20000
+    sort_hint: "ascending time within each series; series ordered by orderby when given"
+    pitfalls:
+      - "Without filter you get ONE aggregated series across all dimension values; add filter = '<Dim> eq ''*''' to split, and remember top defaults to 10 series."
+      - "Unsupported aggregation for a metric (e.g. total on a gauge) is a 200 with errorCode InvalidSamplingType - raised as an error; check supported_aggregations."
+      - "Metric names are exact and case-sensitive in practice ('Percentage CPU', 'Http5xx'); an unknown name is HTTP 400 with the list of valid names."
+      - "A grain with no data has a timestamp but no aggregation values (value null). For counters (total/count) null usually means 0; for gauges it means no samples."
+      - "PT1M data over long windows is heavy: windows beyond a few days get coarser grains automatically (interval auto); FULL returns one point for the whole window."
+      - "AKS / managed Prometheus metrics are not here: use the azure_prometheus source (PromQL)."
+    examples:
+      - sql: >-
+          SELECT ts, value AS http_5xx FROM azure_monitor_metrics
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api'
+            AND metric = 'Http5xx' AND aggregation = 'total' AND interval = 'PT1M'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Per-minute HTTP 5xx count of an App Service during the incident.
+      - sql: >-
+          SELECT dimensions->>'instance' AS instance, max(value) AS peak_cpu, arg_max(ts, value) AS peak_at
+          FROM azure_monitor_metrics
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/serverfarms/plan-shop-prod'
+            AND metric = 'CpuPercentage' AND aggregation = 'maximum' AND filter = 'Instance eq ''*'''
+          GROUP BY 1 ORDER BY peak_cpu DESC
+        description: Peak CPU per App Service plan instance (dimension split).
+      - sql: >-
+          SELECT metric, ts, value FROM azure_monitor_metrics
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Sql/servers/sql-shop-prod/databases/orders'
+            AND metric IN ('cpu_percent', 'dtu_consumption_percent', 'deadlock') AND aggregation = 'maximum'
+          ORDER BY metric, ts
+        description: Several metrics of a SQL database in one call.
+    fixtures:
+      - file: metrics.json
+        filters: {resource_id: "/subscriptions/1f3fa6d2-851c-4a91-9087-1a050f3a9c38/resourceGroups/todking/providers/Microsoft.Storage/storageAccounts/tkfileserv/blobServices/default", metric: "BlobCount,BlobCapacity", aggregation: "average,minimum,maximum"}
+        note: "Verbatim 200 response of the official example 'Get Metric for data' (Metrics - List 2023-10-01, GetMetric.json): 2 metrics x 5 tier series x 5 hourly points."
+        expect_rows: 50
+        expect_columns: {ts: "2021-04-20T09:00:00Z", metric: BlobCount, value: 7.0, average: 7.0, maximum: 7.0, unit: Count, dimensions: {not_null: true}, namespace: microsoft.storage/storageaccounts/blobservices}
+      - file: metrics_error.json
+        filters: {resource_id: "/subscriptions/ac41e21f-afd6-4a79-8070-f01eba278f97/resourceGroups/todking/providers/Microsoft.DocumentDb/databaseAccounts/tk-cosmos-mongo", metric: "MongoRequestsCount,MongoRequests", aggregation: average}
+        note: "Verbatim 200 response of the official example 'Get Metric with error' (GetMetricError.json): one metric has errorCode InvalidSamplingType inside a 200 - must fail loudly."
+        expect_error: "Sampling type is not found"
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/metrics/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_subscription_metrics
+    title: One metric across every resource of a type in a region (Metrics - List At Subscription Scope)
+    description: >-
+      Metric values for all resources of one namespace (resource type) in one region of the subscription, in one
+      call (GET /subscriptions/{id}/providers/Microsoft.Insights/metrics?region=..., api-version 2023-10-01). By
+      default the result is split per resource (filter Microsoft.ResourceId eq '*') and the top 25 resources by the
+      chosen aggregation are returned, so 'which VM / app / database spiked' needs no inventory first. Required:
+      metric, metric_namespace (e.g. microsoft.compute/virtualmachines) and region (or AZURE_REGION).
+    kind: timeseries
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.Insights/metrics"
+      query:
+        api-version: "2023-10-01"
+        region: "{{ filters.region or env.AZURE_REGION }}"
+        metricnames: "{{ filters.metric | as_list | join(',') }}"
+        metricnamespace: "{{ filters.metric_namespace }}"
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        interval: >-
+          {{ filters.interval or ('PT1M' if time.step_s <= 60 else 'PT5M' if time.step_s <= 300 else 'PT15M' if time.step_s <= 900 else 'PT30M' if time.step_s <= 1800 else 'PT1H' if time.step_s <= 3600 else 'PT6H' if time.step_s <= 21600 else 'PT12H' if time.step_s <= 43200 else 'P1D') }}
+        aggregation: "{{ filters.aggregation }}"
+        $filter: "{{ filters.filter or \"Microsoft.ResourceId eq '*'\" }}"
+        top: "{{ filters.top or 25 }}"
+        orderby: "{{ filters.orderby or ((((filters.aggregation or 'average') | string).split(',')[0].strip().lower()) ~ ' desc') }}"
+        rollupby: "{{ filters.rollupby }}"
+        AutoAdjustTimegrain: "true"
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], fan_out: false, description: "Metric name(s), exact", examples: ["Percentage CPU"]}
+      - {column: metric_namespace, required: true, description: "Resource type namespace, e.g. microsoft.compute/virtualmachines, microsoft.web/sites, microsoft.sql/servers/databases", examples: ["microsoft.compute/virtualmachines"]}
+      - {column: region, ops: ["=", "in"], description: "Region name, e.g. westeurope (IN fans out one call per region); default AZURE_REGION", examples: ["westeurope"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+      - {column: aggregation, description: "average, minimum, maximum, total, count (comma list; value = first)", examples: ["average"]}
+      - {column: interval, description: "Time grain (default auto)", examples: ["PT5M"]}
+      - {column: filter, description: "OData dimension filter (default Microsoft.ResourceId eq '*' = one series per resource)", examples: ["Microsoft.ResourceId eq '*'"]}
+      - {column: top, type: BIGINT, description: "Max series (default 25)", examples: ["25"]}
+      - {column: orderby, description: "Default '<first aggregation> desc'", examples: ["maximum desc"]}
+      - {column: rollupby, description: "Dimension(s) to roll up", examples: ["LUN"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, retention: 93d, min_step: 60s, control_lookback: 24h}
+    response:
+      rows_path: "$.value[*]"
+      expand:
+        - {explode: timeseries, as: s}
+        - {explode: "@s.data", as: p}
+      errors:
+        - path: "$.value[*].errorMessage"
+          non_empty: true
+          message: "$.value[*].errorMessage"
+          hint: "At least one metric failed inside a 200 (unsupported aggregation or dimension): fix aggregation / filter"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.timeStamp", transform: auto_time}
+      - {name: metric, path: "name.value"}
+      - {name: value, type: DOUBLE, expr: "p[(filters.aggregation | string).split(',')[0].strip().lower()] if filters.aggregation else ([p.average, p.total, p.maximum, p.minimum, p.count] | select('number') | first)"}
+      - {name: average, type: DOUBLE, path: "@p.average"}
+      - {name: minimum, type: DOUBLE, path: "@p.minimum"}
+      - {name: maximum, type: DOUBLE, path: "@p.maximum"}
+      - {name: total, type: DOUBLE, path: "@p.total"}
+      - {name: count, type: DOUBLE, path: "@p.count"}
+      - name: resource_id
+        expr: "s.metadatavalues | selectattr('name.value', 'equalto', 'microsoft.resourceid') | map(attribute='value') | first"
+        description: "ARM id of the resource the series belongs to (from the microsoft.resourceid dimension)"
+      - name: resource_name
+        expr: "(s.metadatavalues | selectattr('name.value', 'equalto', 'microsoft.resourceid') | map(attribute='value') | first | default('', true)).split('/') | last"
+      - name: dimensions
+        type: JSON
+        expr: >-
+          dict([[s.metadatavalues[0].name.value, s.metadatavalues[0].value], [s.metadatavalues[1].name.value, s.metadatavalues[1].value],
+          [s.metadatavalues[2].name.value, s.metadatavalues[2].value], [s.metadatavalues[3].name.value, s.metadatavalues[3].value]][:(s.metadatavalues or []) | length])
+      - {name: unit, path: unit}
+      - {name: namespace, path: "$.namespace"}
+      - {name: interval_used, path: "$.interval"}
+      - {name: region, path: "$.resourceregion"}
+      - {name: metric_namespace, filter_only: true}
+      - {name: subscription_id, filter_only: true}
+      - {name: aggregation, filter_only: true}
+      - {name: interval, filter_only: true}
+      - {name: filter, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+      - {name: orderby, filter_only: true}
+      - {name: rollupby, filter_only: true}
+    max_rows: 20000
+    sort_hint: "series ordered by orderby (default first aggregation desc), ascending time within a series"
+    pitfalls:
+      - "region is mandatory (HTTP 400 'Missing required region params'); resources in other regions are not included - fan out region IN (...)."
+      - "Only the top N series (default 25) come back: a quiet resource being absent is expected, not an outage."
+      - "metric_namespace must be the resource type of the metric (microsoft.compute/virtualmachines), not a resource id."
+    examples:
+      - sql: >-
+          SELECT resource_name, max(value) AS peak_cpu, arg_max(ts, value) AS peak_at FROM azure_monitor_subscription_metrics
+          WHERE metric = 'Percentage CPU' AND metric_namespace = 'microsoft.compute/virtualmachines' AND region = 'westeurope'
+            AND aggregation = 'maximum' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak_cpu DESC LIMIT 10
+        description: The 10 hottest VMs of a region during the incident.
+      - sql: >-
+          SELECT resource_name, sum(value) AS errors_5xx FROM azure_monitor_subscription_metrics
+          WHERE metric = 'Http5xx' AND metric_namespace = 'microsoft.web/sites' AND region IN ('westeurope', 'northeurope') AND aggregation = 'total'
+          GROUP BY 1 ORDER BY errors_5xx DESC
+        description: Which web apps returned 5xx, across two regions.
+    fixtures:
+      - file: subscription_metrics.json
+        filters: {metric: "Data Disk Max Burst IOPS", metric_namespace: microsoft.compute/virtualmachines, region: westus2, aggregation: count}
+        note: "Verbatim 200 response of the official example 'Get subscription level metric data' (Metrics - List At Subscription Scope 2023-10-01, GetMultiResourceMetric.json): 5 VM series x 13 six-hour points."
+        expect_rows: 65
+        expect_columns: {ts: "2021-06-08T19:00:00Z", metric: "Data Disk Max Burst IOPS", value: 72.0, count: 72.0, resource_id: "/subscriptions/92d2a2d8-b514-432d-8cc9-a5f9272630d5/resourceGroups/sas1/providers/Microsoft.Compute/virtualMachines/sas1-dev", resource_name: sas1-dev, region: westus2}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/metrics/list-at-subscription-scope
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_metric_definitions
+    title: Metrics available on a resource (Metric Definitions - List)
+    description: >-
+      The metrics a resource emits (GET {resource_id}/providers/Microsoft.Insights/metricDefinitions, 2023-10-01):
+      one row per metric with its exact name, display name, unit, primary and supported aggregations, dimensions,
+      time grains and retention. Look metrics up here before querying azure_monitor_metrics.
+    kind: entities
+    request:
+      method: GET
+      path: "/{{ filters.resource_id.strip('/') }}/providers/Microsoft.Insights/metricDefinitions"
+      query:
+        api-version: "2023-10-01"
+        metricnamespace: "{{ filters.metric_namespace }}"
+    filters:
+      - {column: resource_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Full ARM id of the resource", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api"]}
+      - {column: metric_namespace, description: "Restrict to one namespace (custom metrics live in their own namespace)", examples: ["Microsoft.Web/sites"]}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: metric, path: "name.value", description: "Exact metric name for azure_monitor_metrics"}
+      - {name: display_name, path: "name.localizedValue"}
+      - {name: description, path: displayDescription}
+      - {name: unit, path: unit}
+      - {name: primary_aggregation, path: primaryAggregationType}
+      - {name: supported_aggregations, type: JSON, path: supportedAggregationTypes}
+      - {name: dimensions, type: JSON, path: dimensions, description: "[{value, localizedValue}] - value is the name for $filter"}
+      - {name: dimension_names, expr: "(_.dimensions or []) | map(attribute='value') | join(', ')"}
+      - {name: is_dimension_required, type: BOOLEAN, path: isDimensionRequired}
+      - {name: time_grains, expr: "(_.metricAvailabilities or []) | map(attribute='timeGrain') | join(', ')"}
+      - {name: retention, path: "metricAvailabilities[0].retention"}
+      - {name: namespace, path: namespace}
+      - {name: category, path: category}
+      - {name: metric_class, path: metricClass}
+      - {name: resource_id, path: resourceId}
+      - {name: metric_namespace, filter_only: true}
+    max_rows: 2000
+    examples:
+      - sql: >-
+          SELECT metric, unit, primary_aggregation, dimension_names FROM azure_monitor_metric_definitions
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api'
+            AND (metric ILIKE '%http%' OR metric ILIKE '%response%')
+        description: HTTP-related metrics of an App Service with their dimensions.
+    fixtures:
+      - file: metric_definitions.json
+        filters: {resource_id: "/subscriptions/07c0b09d-9f69-4e6e-8d05-f59f67299cb2/resourceGroups/Rac46PostSwapRG/providers/Microsoft.Web/sites/alertruleTest", metric_namespace: Microsoft.Web/sites}
+        note: "Verbatim 200 response of the official example 'Get Metric Definitions without filter' (Metric Definitions - List 2023-10-01, GetMetricDefinitions.json)."
+        expect_rows: 16
+        expect_columns: {metric: CpuTime, display_name: "CPU Time", unit: Seconds, primary_aggregation: Total, dimension_names: Instance, time_grains: "PT1M, PT5M, PT15M, PT30M, PT1H, PT6H, PT12H, P1D", retention: P93D}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/metric-definitions/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_metric_namespaces
+    title: Metric namespaces of a resource (platform and custom)
+    description: >-
+      Metric namespaces a resource has (GET {resource_id}/providers/microsoft.insights/metricNamespaces,
+      2017-12-01-preview): the platform namespace plus custom ones (e.g. Application Insights custom metrics in
+      azure.applicationinsights, guest OS metrics). Pass the namespace to azure_monitor_metric_definitions /
+      azure_monitor_metrics as metric_namespace.
+    kind: entities
+    request:
+      method: GET
+      path: "/{{ filters.resource_id.strip('/') }}/providers/microsoft.insights/metricNamespaces"
+      query:
+        api-version: "2017-12-01-preview"
+    filters:
+      - {column: resource_id, required: true, description: "Full ARM id of the resource", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: metric_namespace, path: "properties.metricNamespaceName", description: "Value to pass as metric_namespace"}
+      - {name: name, path: name}
+      - {name: classification, path: classification, description: "Platform | Custom | Qos"}
+      - {name: id, path: id}
+      - {name: resource_id, filter_only: true}
+    max_rows: 500
+    examples:
+      - sql: "SELECT metric_namespace, classification FROM azure_monitor_metric_namespaces WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi'"
+        description: Platform and custom metric namespaces of an Application Insights component.
+    fixtures:
+      - file: metric_namespaces.json
+        filters: {resource_id: "subscriptions/182c901a-129a-4f5d-86e4-cc6b294590a2/resourceGroups/hyr-log/providers/microsoft.insights/components/f1-bill"}
+        note: "Verbatim 200 response of the official example 'Get Metric Namespaces without filter' (Metric Namespaces - List 2017-12-01-preview, GetMetricNamespaces.json)."
+        expect_rows: 2
+        expect_columns: {metric_namespace: Azure.ApplicationInsights, classification: Custom}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/metric-namespaces/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_alerts
+    title: Fired alerts (Alerts Management - Get All)
+    description: >-
+      Alert instances in the subscription (GET /subscriptions/{id}/providers/Microsoft.AlertsManagement/alerts,
+      api-version 2019-03-01): one row per alert with title (alert rule display name), severity (Sev0..Sev4),
+      state (monitor condition Fired / Resolved), alert_state (user state New / Acknowledged / Closed), signal type,
+      monitor service, target resource, the rule (alert_rule), start / resolve times and a portal url. Pushdown
+      filters: state, severity, alert_state, monitor_service, target_resource (full id), target_resource_group,
+      target_resource_type, alert_rule (rule ARM id), smart_group_id; include_context = true adds the monitor
+      service's payload (search query, threshold, result count, metric values) in context. The ts window becomes
+      customTimeRange (max 30 days back).
+    kind: alerts
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.AlertsManagement/alerts"
+      query:
+        api-version: "2019-03-01"
+        targetResource: "{{ filters.target_resource }}"
+        targetResourceType: "{{ filters.target_resource_type }}"
+        targetResourceGroup: "{{ filters.target_resource_group }}"
+        monitorService: "{{ filters.monitor_service }}"
+        monitorCondition: "{{ filters.state }}"
+        severity: "{{ filters.severity }}"
+        alertState: "{{ filters.alert_state }}"
+        alertRule: "{{ filters.alert_rule }}"
+        smartGroupId: "{{ filters.smart_group_id }}"
+        includeContext: "{{ 'true' if filters.include_context else None }}"
+        pageCount: "{{ 25 if filters.include_context else 250 }}"
+        sortBy: startDateTime
+        sortOrder: desc
+        customTimeRange: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+    filters:
+      - {column: state, description: "Monitor condition: Fired | Resolved", examples: ["Fired"]}
+      - {column: severity, ops: ["=", "in"], description: "Sev0 (critical) .. Sev4 (verbose); IN fans out", examples: ["Sev1"]}
+      - {column: alert_state, ops: ["=", "in"], description: "User state: New | Acknowledged | Closed", examples: ["New"]}
+      - {column: monitor_service, ops: ["=", "in"], description: "Platform, Log Analytics, Application Insights, ActivityLog Administrative, ServiceHealth, Resource Health, SmartDetector, VM Insights, ...", examples: ["Platform"]}
+      - {column: target_resource, ops: ["=", "in"], description: "Full ARM id of the target resource (compared case-insensitively)", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.web/sites/checkout-api"]}
+      - {column: target_resource_group, ops: ["=", "in"], description: "Resource group name of the target (case-insensitive)", examples: ["rg-shop-prod"]}
+      - {column: target_resource_type, ops: ["=", "in"], description: "Target resource type, e.g. microsoft.web/sites, virtualmachines, components", examples: ["microsoft.web/sites"]}
+      - {column: alert_rule, ops: ["=", "in"], description: "Alert rule ARM id (as in essentials.alertRule)", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/microsoft.insights/metricAlerts/checkout-api-5xx"]}
+      - {column: smart_group_id, description: "Smart group id (correlated alerts)", examples: ["23d6b2ce-8c54-468f-aff0-sd32aebb7e56"]}
+      - {column: include_context, type: BOOLEAN, description: "true adds context (monitor-service payload); pages shrink to 25 alerts", examples: ["true"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    time: {column: ts, default_lookback: 24h, max_window: 30d, retention: 30d, reapply: false, control_lookback: 7d}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 8}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: id, path: id, description: "Full alert id (/subscriptions/.../providers/Microsoft.AlertsManagement/alerts/<guid>)"}
+      - {name: alert_id, expr: "(_.id or '').split('/') | last", description: "Alert GUID"}
+      - {name: title, path: name, description: "Alert (rule) name"}
+      - {name: severity, path: "properties.essentials.severity"}
+      - {name: state, path: "properties.essentials.monitorCondition", description: "Fired | Resolved (is the condition still true)"}
+      - {name: alert_state, path: "properties.essentials.alertState", description: "New | Acknowledged | Closed (human workflow state)"}
+      - {name: ts, type: TIMESTAMP, path: "properties.essentials.startDateTime", transform: auto_time, description: "When the alert fired"}
+      - {name: resolved_at, type: TIMESTAMP, path: "properties.essentials.monitorConditionResolvedDateTime", transform: auto_time}
+      - {name: last_modified, type: TIMESTAMP, path: "properties.essentials.lastModifiedDateTime", transform: auto_time}
+      - {name: last_modified_by, path: "properties.essentials.lastModifiedUserName"}
+      - {name: signal_type, path: "properties.essentials.signalType", description: "Metric | Log | Unknown"}
+      - {name: monitor_service, path: "properties.essentials.monitorService"}
+      - name: target_resource
+        expr: "filters.target_resource if (filters.target_resource is string and filters.target_resource | lower == (_.properties.essentials.targetResource or '') | lower) else _.properties.essentials.targetResource"
+        description: "Target ARM id (lower-cased by the service)"
+      - {name: target_resource_name, path: "properties.essentials.targetResourceName"}
+      - name: target_resource_group
+        expr: "filters.target_resource_group if (filters.target_resource_group is string and filters.target_resource_group | lower == (_.properties.essentials.targetResourceGroup or '') | lower) else _.properties.essentials.targetResourceGroup"
+      - name: target_resource_type
+        expr: "filters.target_resource_type if (filters.target_resource_type is string and filters.target_resource_type | lower == (_.properties.essentials.targetResourceType or '') | lower) else _.properties.essentials.targetResourceType"
+      - name: alert_rule
+        expr: "filters.alert_rule if (filters.alert_rule is string and filters.alert_rule | lower == (_.properties.essentials.alertRule or '') | lower) else _.properties.essentials.alertRule"
+        description: "Rule that fired: ARM id for metric / log search / activity log alerts (a portal URL for legacy Log Analytics alerts)"
+      - {name: alert_rule_name, expr: "((_.properties.essentials.alertRule or '').split('?')[0].rstrip('/').split('/') | last) or none"}
+      - {name: description, path: "properties.essentials.description"}
+      - {name: smart_group_id, path: "properties.essentials.smartGroupId"}
+      - {name: is_suppressed, type: BOOLEAN, path: "properties.essentials.actionStatus.isSuppressed", description: "Notifications suppressed by an alert processing rule"}
+      - {name: context, type: JSON, path: "properties.context", description: "Monitor-service payload (with include_context = true)"}
+      - {name: url, expr: "'https://portal.azure.com/#view/Microsoft_Azure_Monitoring_Alerts/AlertDetails.ReactView/alertId~/' ~ ((_.id or '') | urlencode | replace('/', '%2F'))"}
+      - {name: include_context, type: BOOLEAN, filter_only: true}
+      - {name: subscription_id, filter_only: true}
+    max_rows: 2000
+    sort_hint: "newest first (sortBy=startDateTime desc)"
+    pitfalls:
+      - "state (monitorCondition) and alert_state are different things: Fired/Resolved is the signal, New/Acknowledged/Closed is what humans did. 'Currently firing' = state = 'Fired'."
+      - "Alerts are kept 30 days; customTimeRange older than that is rejected or empty."
+      - "Alerts from rules in other subscriptions (e.g. a central monitoring subscription) are only visible with subscription_id set to that subscription."
+      - "Stateless log search alerts fire a new alert instance at every evaluation and never resolve on their own; count instances, not 'still Fired'."
+    examples:
+      - sql: >-
+          SELECT ts, title, severity, target_resource_name, monitor_service, url FROM azure_monitor_alerts
+          WHERE state = 'Fired' AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Alerts firing around the incident (other symptoms of the same outage).
+      - sql: >-
+          SELECT title, count(*) AS instances, min(ts) AS first_fired, max(resolved_at) AS last_resolved
+          FROM azure_monitor_alerts WHERE target_resource_group = 'rg-shop-prod'
+          GROUP BY title ORDER BY instances DESC
+        description: Which alert rules fired for one resource group, and how often (flapping check).
+      - sql: >-
+          SELECT ts, title, context FROM azure_monitor_alerts
+          WHERE include_context = true AND monitor_service = 'Log Analytics' ORDER BY ts DESC LIMIT 10
+        description: Recent log search alerts with their query, threshold and result count.
+    fixtures:
+      - file: alerts.json
+        filters: {include_context: true}
+        note: "Verbatim 200 response of the official example 'ListAlerts' (Alerts - Get All, stable 2019-03-01, Alerts_List.json)."
+        expect_rows: 2
+        expect_columns: {title: cpu alert, severity: Sev3, state: Fired, alert_state: Acknowledged, ts: "2018-09-13T15:51:02Z", monitor_service: Application Insights, alert_id: 66114d64-d9d9-478b-95c9-b789d6502100, is_suppressed: false, context: {not_null: true}, url: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/alerts-management/alerts/alerts/get-all?view=rest-alerts-management-alerts-2019-03-01
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_alert
+    title: One alert by id (Alerts Management - Get By Id)
+    description: >-
+      One alert instance with its essentials and context (GET {alert id}, 2019-03-01). alert_id is the full alert
+      id from the notification (/subscriptions/.../providers/Microsoft.AlertsManagement/alerts/<guid>) or just the
+      GUID (looked up in AZURE_SUBSCRIPTION_ID). context holds the monitor-service payload: for log search alerts
+      the query, threshold, result count and search links; for metric alerts the condition and metric values.
+    kind: alerts
+    request:
+      method: GET
+      path: >-
+        {{ filters.alert_id.strip('/') if '/' in filters.alert_id else ('subscriptions/' ~ env.AZURE_SUBSCRIPTION_ID ~ '/providers/Microsoft.AlertsManagement/alerts/' ~ filters.alert_id) }}
+      query:
+        api-version: "2019-03-01"
+    filters:
+      - {column: alert_id, required: true, description: "Full alert id or alert GUID", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/providers/Microsoft.AlertsManagement/alerts/0a1b2c3d-1111-2222-3333-444455556666"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: alert_id, filter_only: true}
+      - {name: title, path: name}
+      - {name: severity, path: "properties.essentials.severity"}
+      - {name: state, path: "properties.essentials.monitorCondition"}
+      - {name: alert_state, path: "properties.essentials.alertState"}
+      - {name: ts, type: TIMESTAMP, path: "properties.essentials.startDateTime", transform: auto_time}
+      - {name: resolved_at, type: TIMESTAMP, path: "properties.essentials.monitorConditionResolvedDateTime", transform: auto_time}
+      - {name: last_modified, type: TIMESTAMP, path: "properties.essentials.lastModifiedDateTime", transform: auto_time}
+      - {name: signal_type, path: "properties.essentials.signalType"}
+      - {name: monitor_service, path: "properties.essentials.monitorService"}
+      - {name: target_resource, path: "properties.essentials.targetResource"}
+      - {name: target_resource_name, path: "properties.essentials.targetResourceName"}
+      - {name: target_resource_group, path: "properties.essentials.targetResourceGroup"}
+      - {name: target_resource_type, path: "properties.essentials.targetResourceType"}
+      - {name: alert_rule, path: "properties.essentials.alertRule"}
+      - {name: description, path: "properties.essentials.description"}
+      - {name: smart_group_id, path: "properties.essentials.smartGroupId"}
+      - {name: context, type: JSON, path: "properties.context"}
+      - {name: url, expr: "'https://portal.azure.com/#view/Microsoft_Azure_Monitoring_Alerts/AlertDetails.ReactView/alertId~/' ~ ((_.id or '') | urlencode | replace('/', '%2F'))"}
+    max_rows: 10
+    examples:
+      - sql: "SELECT title, severity, state, ts, target_resource, alert_rule, context FROM azure_monitor_alert WHERE alert_id = '/subscriptions/11111111-2222-3333-4444-555555555555/providers/Microsoft.AlertsManagement/alerts/0a1b2c3d-1111-2222-3333-444455556666'"
+        description: The alert from the Slack notification, with its condition payload.
+    fixtures:
+      - file: alert.json
+        filters: {alert_id: "/subscriptions/3b540246-808d-4331-99aa-917b808a9166/resourcegroups/servicedeskresourcegroup/providers/microsoft.insights/components/servicedeskappinsight/providers/Microsoft.AlertsManagement/alerts/66114d64-d9d9-478b-95c9-b789d6502100"}
+        note: "Verbatim 200 response of the official example 'GetById' (Alerts - Get By Id, stable 2019-03-01, Alerts_GetById.json)."
+        expect_rows: 1
+        expect_columns: {title: cpu alert, severity: Sev3, state: Fired, target_resource_name: servicedeskappinsight, ts: "2018-09-13T15:51:02Z"}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/alerts-management/alerts/alerts/get-by-id?view=rest-alerts-management-alerts-2019-03-01
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_alert_history
+    title: State changes of one alert (Alerts Management - Get History)
+    description: >-
+      Modification history of one alert instance (GET {alert id}/history, 2019-03-01): AlertCreated, StateChange
+      (New -> Acknowledged -> Closed) and MonitorConditionChange (Fired -> Resolved), with who and when. alert_id
+      is the full alert id (preferred: its scope is the target resource) or the GUID (looked up at subscription
+      scope, which the docs' own example uses).
+    kind: events
+    request:
+      method: GET
+      path: >-
+        {{ (filters.alert_id.strip('/') if '/' in filters.alert_id else ('subscriptions/' ~ env.AZURE_SUBSCRIPTION_ID ~ '/providers/Microsoft.AlertsManagement/alerts/' ~ filters.alert_id)) ~ '/history' }}
+      query:
+        api-version: "2019-03-01"
+    filters:
+      - {column: alert_id, required: true, description: "Full alert id or alert GUID", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/providers/Microsoft.AlertsManagement/alerts/0a1b2c3d-1111-2222-3333-444455556666"]}
+    response:
+      rows_path: "$.properties.modifications[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: modifiedAt, transform: auto_time}
+      - {name: event, path: modificationEvent, description: "AlertCreated | StateChange | MonitorConditionChange (2019-03-01 enum; newer preview versions add severity / action events)"}
+      - {name: old_value, path: oldValue}
+      - {name: new_value, path: newValue}
+      - {name: state, path: newValue, description: "Alias of new_value"}
+      - {name: author, path: modifiedBy}
+      - {name: comments, path: comments}
+      - {name: description, path: description}
+      - {name: title, expr: "_.description or _.modificationEvent"}
+      - {name: alert_id, filter_only: true}
+    max_rows: 500
+    sort_hint: "newest first (as returned)"
+    examples:
+      - sql: "SELECT ts, event, old_value, new_value, author, comments FROM azure_monitor_alert_history WHERE alert_id = '0a1b2c3d-1111-2222-3333-444455556666' ORDER BY ts"
+        description: Who acknowledged / closed the alert and when it resolved.
+    fixtures:
+      - file: alert_history.json
+        filters: {alert_id: 66114d64-d9d9-478b-95c9-b789d6502100}
+        note: "Verbatim 200 response of the official example 'Resolve' (Alerts - Get History, stable 2019-03-01, Alerts_History.json)."
+        expect_rows: 2
+        expect_columns: {ts: "2018-06-13T06:14:15.7378737Z", event: StateChange, old_value: New, new_value: Acknowledged}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/alerts-management/alerts/alerts/get-history?view=rest-alerts-management-alerts-2019-03-01
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_alerts_summary
+    title: Alert counts grouped by severity / state / rule (Alerts Management - Get Summary)
+    description: >-
+      Server-side counts of alert instances in the subscription (GET /subscriptions/{id}/providers/
+      Microsoft.AlertsManagement/alertsSummary, api-version 2019-03-01), grouped by one or two fields (group_by,
+      default 'severity,alertState'; allowed: severity, alertState, monitorCondition, monitorService, signalType,
+      alertRule). One row per (group value, sub-group value) with count; total is the grand total. Same pushdown
+      filters as azure_monitor_alerts (state, severity, alert_state, monitor_service, target_resource,
+      target_resource_group, target_resource_type, alert_rule); the ts window becomes customTimeRange (max 30 days
+      back). Cheapest way to see 'how noisy is it right now' and which rules fire the most (group_by = 'alertRule').
+    kind: alerts
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.AlertsManagement/alertsSummary"
+      query:
+        api-version: "2019-03-01"
+        groupby: "{{ filters.group_by or 'severity,alertState' }}"
+        targetResource: "{{ filters.target_resource }}"
+        targetResourceType: "{{ filters.target_resource_type }}"
+        targetResourceGroup: "{{ filters.target_resource_group }}"
+        monitorService: "{{ filters.monitor_service }}"
+        monitorCondition: "{{ filters.state }}"
+        severity: "{{ filters.severity }}"
+        alertState: "{{ filters.alert_state }}"
+        alertRule: "{{ filters.alert_rule }}"
+        customTimeRange: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+    filters:
+      - {column: group_by, description: "One or two comma-separated fields: severity, alertState, monitorCondition, monitorService, signalType, alertRule (default 'severity,alertState')", examples: ["severity,alertState"]}
+      - {column: state, description: "Monitor condition: Fired | Resolved", examples: ["Fired"]}
+      - {column: severity, ops: ["=", "in"], description: "Sev0 .. Sev4 (IN fans out)", examples: ["Sev1"]}
+      - {column: alert_state, ops: ["=", "in"], description: "New | Acknowledged | Closed", examples: ["New"]}
+      - {column: monitor_service, ops: ["=", "in"], description: "Platform, Log Analytics, Application Insights, ActivityLog Administrative, ServiceHealth, Resource Health, SmartDetector, VM Insights, ...", examples: ["Platform"]}
+      - {column: target_resource, description: "Full ARM id of the target resource", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.web/sites/checkout-api"]}
+      - {column: target_resource_group, description: "Resource group name of the targets", examples: ["rg-shop-prod"]}
+      - {column: target_resource_type, description: "Target resource type, e.g. microsoft.web/sites", examples: ["microsoft.web/sites"]}
+      - {column: alert_rule, description: "Alert rule ARM id", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/microsoft.insights/metricAlerts/checkout-api-5xx"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    time: {column: ts, default_lookback: 24h, max_window: 30d, retention: 30d, reapply: false, control_lookback: 7d}
+    response:
+      rows_path: "$.properties.values[*]"
+      expand:
+        - {explode: values, as: v, keep_empty: true}
+    columns:
+      - {name: group_field, path: "$.properties.groupedby", description: "First group-by field (e.g. severity)"}
+      - {name: group_value, path: name, description: "Value of the first field (e.g. Sev1)"}
+      - {name: group_count, type: BIGINT, path: count, description: "Alerts with this first-field value"}
+      - {name: subgroup_field, path: groupedby, description: "Second group-by field (null with a single field)"}
+      - {name: subgroup_value, path: "@v.name"}
+      - {name: count, type: BIGINT, expr: "v['count'] if v else _['count']", description: "Alerts in this (group, sub-group) cell"}
+      - {name: total, type: BIGINT, path: "$.properties.total", description: "Total alerts matching the filters"}
+      - {name: smart_groups_count, type: BIGINT, path: "$.properties.smartGroupsCount"}
+      - {name: group_by, filter_only: true}
+      - {name: state, filter_only: true}
+      - {name: severity, filter_only: true}
+      - {name: alert_state, filter_only: true}
+      - {name: monitor_service, filter_only: true}
+      - {name: target_resource, filter_only: true}
+      - {name: target_resource_group, filter_only: true}
+      - {name: target_resource_type, filter_only: true}
+      - {name: alert_rule, filter_only: true}
+      - {name: subscription_id, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    max_rows: 2000
+    pitfalls:
+      - "Only the fields listed in group_by are valid; misspelled fields are HTTP 400. Values come back with their API casing (Sev0, New, Fired)."
+      - "Rows with count 0 are included (every alertState is listed even when empty)."
+      - "Get Summary is limited to 50 calls per minute per subscription; do not fan out over many severities - group instead."
+    examples:
+      - sql: >-
+          SELECT group_value AS severity, subgroup_value AS alert_state, count FROM azure_monitor_alerts_summary
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00' AND count > 0
+          ORDER BY severity, alert_state
+        description: How many alerts by severity and user state fired around the incident.
+      - sql: >-
+          SELECT group_value AS alert_rule, group_count AS alerts FROM azure_monitor_alerts_summary
+          WHERE group_by = 'alertRule' AND state = 'Fired' ORDER BY alerts DESC LIMIT 10
+        description: The 10 noisiest alert rules that are still firing.
+    fixtures:
+      - file: alerts_summary.json
+        note: "Verbatim 200 response of the official example 'Summary' (Alerts - Get Summary, 2019-03-01, groupby=severity,alertState): 5 severities x 3 alert states."
+        expect_rows: 15
+        expect_columns: {group_field: severity, group_value: Sev0, group_count: 6517, subgroup_field: alertState, subgroup_value: New, count: 6517, total: 14189, smart_groups_count: 100}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/alerts-management/alerts/alerts/get-summary?view=rest-alerts-management-alerts-2019-03-01
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_metric_alert_rules
+    title: Metric alert rules (Microsoft.Insights/metricAlerts)
+    description: >-
+      Metric alert rule definitions in the subscription (GET /subscriptions/{id}/providers/Microsoft.Insights/
+      metricAlerts, api-version 2018-03-01): one row per rule x criterion with the metric, operator, threshold
+      (static) or sensitivity (dynamic), time aggregation, window, evaluation frequency, scopes, severity (0-4) and
+      whether it is enabled. query is a readable condition ('Average(Percentage CPU) GreaterThan 80'). Look a
+      fired alert's rule up by id (its ARM id, compared case-insensitively) or name.
+    kind: entities
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.Insights/metricAlerts"
+      query:
+        api-version: "2018-03-01"
+    filters:
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "Rule ARM id (matched case-insensitively, filtered after fetch)", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/microsoft.insights/metricAlerts/checkout-api-5xx"]}
+      - {column: name, ops: ["=", "in"], fan_out: false, description: "Rule name (matched case-insensitively, filtered after fetch)", examples: ["checkout-api-5xx"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 10}
+    response:
+      rows_path: "$.value[*]"
+      expand:
+        - {explode: "properties.criteria.allOf", as: c, keep_empty: true}
+    columns:
+      - name: id
+        expr: "filters.id if (filters.id is string and filters.id | lower == (_.id or '') | lower) else _.id"
+      - name: name
+        expr: "filters.name if (filters.name is string and filters.name | lower == ((_.name or (_.id or '').split('/') | last) | lower)) else (_.name or (_.id or '').split('/') | last)"
+      - {name: description, path: "properties.description"}
+      - {name: severity, type: BIGINT, path: "properties.severity", description: "0 critical .. 4 verbose (fired alerts show Sev0..Sev4)"}
+      - {name: enabled, type: BOOLEAN, path: "properties.enabled"}
+      - {name: scopes, type: JSON, path: "properties.scopes"}
+      - {name: evaluation_frequency, path: "properties.evaluationFrequency"}
+      - {name: window_size, path: "properties.windowSize"}
+      - {name: criteria_type, path: "properties.criteria['odata.type']", description: "SingleResource / MultipleResource MultipleMetricCriteria or WebtestLocationAvailabilityCriteria"}
+      - {name: criterion_name, path: "@c.name"}
+      - {name: threshold_type, path: "@c.criterionType", description: "StaticThresholdCriterion | DynamicThresholdCriterion"}
+      - {name: metric_name, path: "@c.metricName"}
+      - {name: metric_namespace, path: "@c.metricNamespace"}
+      - {name: operator, path: "@c.operator"}
+      - {name: threshold, type: DOUBLE, path: "@c.threshold"}
+      - {name: time_aggregation, path: "@c.timeAggregation"}
+      - {name: alert_sensitivity, path: "@c.alertSensitivity", description: "Dynamic thresholds: Low | Medium | High"}
+      - {name: failing_periods, type: JSON, path: "@c.failingPeriods"}
+      - {name: dimensions, type: JSON, path: "@c.dimensions"}
+      - name: query
+        expr: "(c.timeAggregation ~ '(' ~ c.metricName ~ ') ' ~ c.operator ~ ' ' ~ (c.threshold if c.threshold is not none else ('dynamic ' ~ (c.alertSensitivity or '')))) if c else none"
+        description: "Readable condition: Aggregation(metric) operator threshold"
+      - {name: target_resource_type, path: "properties.targetResourceType"}
+      - {name: target_resource_region, path: "properties.targetResourceRegion"}
+      - {name: auto_mitigate, type: BOOLEAN, path: "properties.autoMitigate"}
+      - {name: actions, type: JSON, path: "properties.actions"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: url, expr: "'https://portal.azure.com/#resource' ~ (_.id or '') ~ '/overview'"}
+      - {name: subscription_id, filter_only: true}
+    max_rows: 5000
+    pitfalls:
+      - "Fired alerts carry the rule as an ARM id whose casing can differ from the rule listing (metricAlerts vs metricalerts): id and name compare case-insensitively here, but other SQL comparisons should use lower()."
+      - "Multi-resource rules (scopes = a resource group or subscription) fire one alert per resource; the threshold applies per resource and dimension combination."
+      - "Dynamic-threshold rules have no threshold (null): the boundary is learned; see alert_sensitivity and failing_periods."
+      - "api-version 2018-03-01 is the latest GA. PromQL criteria (managed Prometheus) are documented only in 2024-03-01-preview: such rules may be missing here or come without criteria - Prometheus rule groups are in azure_prometheus."
+    examples:
+      - sql: "SELECT name, query, window_size, evaluation_frequency, severity, enabled, scopes FROM azure_monitor_metric_alert_rules WHERE name = 'checkout-api-5xx'"
+        description: The definition of the metric alert that fired.
+      - sql: "SELECT name, metric_name, threshold, scopes FROM azure_monitor_metric_alert_rules WHERE enabled AND metric_name = 'Http5xx'"
+        description: Every enabled rule watching a given metric.
+    fixtures:
+      - file: metric_alert_rules.json
+        note: "Verbatim 200 response of the official example 'List metric alert rules' (Metric Alerts - List By Subscription, stable 2018-03-01, listMetricAlert.json)."
+        expect_rows: 2
+        expect_columns: {name: highcpu, severity: 3, enabled: true, metric_name: "CustomMetric_\\Processor(_Total)\\% Processor Time", operator: GreaterThan, threshold: 80.5, time_aggregation: Average, window_size: PT15M, query: "Average(CustomMetric_\\Processor(_Total)\\% Processor Time) GreaterThan 80.5"}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/metric-alerts/list-by-subscription
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_log_alert_rules
+    title: Log search alert rules (Microsoft.Insights/scheduledQueryRules)
+    description: >-
+      Log search alert rule definitions (GET /subscriptions/{id}/providers/Microsoft.Insights/scheduledQueryRules,
+      api-version 2023-12-01 GA - a superset of the 2021-08-01 shape the REST reference documents, adding dynamic
+      thresholds and simple log alerts): one row per rule x condition with the KQL query, time aggregation, measure
+      column, operator, threshold (or dynamic sensitivity), failing periods, window, frequency, scopes, severity and
+      enabled flag. Rerun query with azure_log_analytics_query (or azure_log_analytics_resource_query for resource
+      scopes) over the rule's window to see what the rule saw.
+    kind: entities
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.Insights/scheduledQueryRules"
+      query:
+        api-version: "2023-12-01"
+    filters:
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "Rule ARM id (case-insensitive, filtered after fetch)", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/microsoft.insights/scheduledqueryrules/checkout-errors"]}
+      - {column: name, ops: ["=", "in"], fan_out: false, description: "Rule name (case-insensitive, filtered after fetch)", examples: ["checkout-errors"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 10}
+    response:
+      rows_path: "$.value[*]"
+      expand:
+        - {explode: "properties.criteria.allOf", as: c, keep_empty: true}
+    columns:
+      - name: id
+        expr: "filters.id if (filters.id is string and filters.id | lower == (_.id or '') | lower) else _.id"
+      - name: name
+        expr: "filters.name if (filters.name is string and filters.name | lower == (_.name or '') | lower) else _.name"
+      - {name: display_name, path: "properties.displayName"}
+      - {name: description, path: "properties.description"}
+      - {name: kind, path: kind, description: "LogAlert (default) | LogToMetric | SimpleLogAlert"}
+      - {name: severity, type: BIGINT, path: "properties.severity"}
+      - {name: enabled, type: BOOLEAN, path: "properties.enabled"}
+      - {name: scopes, type: JSON, path: "properties.scopes", description: "Workspaces / App Insights / resources the query runs against"}
+      - {name: target_resource_types, type: JSON, path: "properties.targetResourceTypes"}
+      - {name: evaluation_frequency, path: "properties.evaluationFrequency"}
+      - {name: window_size, path: "properties.windowSize"}
+      - {name: override_query_time_range, path: "properties.overrideQueryTimeRange", description: "Query look-back when set (default windowSize x numberOfEvaluationPeriods)"}
+      - {name: query, path: "@c.query", description: "The KQL the rule evaluates"}
+      - {name: time_aggregation, path: "@c.timeAggregation"}
+      - {name: metric_measure_column, path: "@c.metricMeasureColumn"}
+      - {name: resource_id_column, path: "@c.resourceIdColumn"}
+      - {name: operator, path: "@c.operator"}
+      - {name: threshold, type: DOUBLE, path: "@c.threshold", description: "Static threshold (null for dynamic thresholds)"}
+      - {name: criterion_type, path: "@c.criterionType", description: "StaticThresholdCriterion | DynamicThresholdCriterion (null on rules created with older versions = static)"}
+      - {name: alert_sensitivity, path: "@c.alertSensitivity", description: "Dynamic thresholds: Low | Medium | High"}
+      - {name: min_recurrence_count, type: BIGINT, path: "@c.minRecurrenceCount", description: "SimpleLogAlert: minimum result count that fires"}
+      - {name: dimensions, type: JSON, path: "@c.dimensions"}
+      - {name: failing_periods, type: JSON, path: "@c.failingPeriods"}
+      - {name: auto_mitigate, type: BOOLEAN, path: "properties.autoMitigate"}
+      - {name: resolve_configuration, type: JSON, path: "properties.resolveConfiguration", description: "{autoResolved, timeToResolve}"}
+      - {name: mute_actions_duration, path: "properties.muteActionsDuration"}
+      - {name: actions, type: JSON, path: "properties.actions"}
+      - {name: url, expr: "'https://portal.azure.com/#resource' ~ (_.id or '') ~ '/overview'"}
+      - {name: subscription_id, filter_only: true}
+    max_rows: 5000
+    pitfalls:
+      - "The rule's query runs over windowSize (or overrideQueryTimeRange) ending at each evaluation; rerun it over the same window, not the whole incident, to compare with the threshold."
+      - "Rules scoped to a subscription or resource group run resource-centric queries; rerun them with azure_log_analytics_resource_query on a resource in scope."
+      - "Dynamic-threshold log alerts have no threshold (criterion_type = DynamicThresholdCriterion, see alert_sensitivity); SimpleLogAlert rules fire per matching row (min_recurrence_count) and have no aggregation."
+    examples:
+      - sql: "SELECT name, query, time_aggregation, operator, threshold, window_size, evaluation_frequency, scopes FROM azure_monitor_log_alert_rules WHERE name = 'checkout-errors'"
+        description: The KQL and threshold of the log search alert that fired.
+    fixtures:
+      - file: log_alert_rules.json
+        note: "Verbatim 200 response of the official example 'List scheduled query rules by subscription' (Scheduled Query Rules - List By Subscription, 2021-08-01, listScheduledQueryRulesBySubscription.json); the 2023-12-01 resource format (ARM template reference) only adds optional fields, so this shape is what the table must parse."
+        expect_rows: 2
+        expect_columns: {name: perf, severity: 4, enabled: true, query: "Perf | where ObjectName == \"Processor\"", time_aggregation: Average, operator: GreaterThan, threshold: 70.0, window_size: PT10M}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/scheduled-query-rules/list-by-subscription
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_activity_log_alert_rules
+    title: Activity log alert rules (incl. Service Health / Resource Health alerts)
+    description: >-
+      Activity log alert rule definitions (GET /subscriptions/{id}/providers/Microsoft.Insights/activityLogAlerts,
+      api-version 2020-10-01): one row per rule with its scopes, conditions (category, operationName, level,
+      status, resourceType, ...), enabled flag and action groups. Service Health and Resource Health alerts are
+      activity log alert rules with category ServiceHealth / ResourceHealth.
+    kind: entities
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.Insights/activityLogAlerts"
+      query:
+        api-version: "2020-10-01"
+    filters:
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "Rule ARM id (case-insensitive, filtered after fetch)", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/microsoft.insights/activityLogAlerts/servicehealth-west-europe"]}
+      - {column: name, ops: ["=", "in"], fan_out: false, description: "Rule name (case-insensitive, filtered after fetch)", examples: ["servicehealth-west-europe"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 10}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - name: id
+        expr: "filters.id if (filters.id is string and filters.id | lower == (_.id or '') | lower) else _.id"
+      - name: name
+        expr: "filters.name if (filters.name is string and filters.name | lower == (_.name or '') | lower) else _.name"
+      - {name: description, path: "properties.description"}
+      - {name: enabled, type: BOOLEAN, path: "properties.enabled"}
+      - {name: scopes, type: JSON, path: "properties.scopes"}
+      - {name: category, expr: "(_.properties.condition.allOf or []) | selectattr('field', 'equalto', 'category') | map(attribute='equals') | first", description: "Administrative, ServiceHealth, ResourceHealth, Alert, Autoscale, Policy, Recommendation, Security"}
+      - {name: condition, type: JSON, path: "properties.condition", description: "allOf leaf conditions {field, equals | containsAny} and anyOf groups"}
+      - {name: query, path: "properties.condition", transform: json, description: "The condition as JSON text"}
+      - {name: actions, type: JSON, path: "properties.actions"}
+      - {name: url, expr: "'https://portal.azure.com/#resource' ~ (_.id or '') ~ '/overview'"}
+      - {name: subscription_id, filter_only: true}
+    max_rows: 1000
+    examples:
+      - sql: "SELECT name, category, condition, scopes, enabled FROM azure_monitor_activity_log_alert_rules WHERE category IN ('ServiceHealth', 'ResourceHealth')"
+        description: Service Health and Resource Health alert rules.
+    fixtures:
+      - file: activity_log_alert_rules.json
+        note: "Verbatim 200 response of the official example 'Get list of all Activity Log Alert rules under a subscription' (Activity Log Alerts - List By Subscription Id, 2020-10-01)."
+        expect_rows: 2
+        expect_columns: {name: SampleActivityLogAlertRule1, category: Administrative, enabled: true, condition: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/activity-log-alerts/list-by-subscription-id
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_alert_processing_rules
+    title: Alert processing rules (suppression / added action groups)
+    description: >-
+      Alert processing rules of the subscription (GET /subscriptions/{id}/providers/Microsoft.AlertsManagement/
+      actionRules, api-version 2021-08-08): one row per rule with its scopes, conditions (field operator values on
+      Severity, MonitorService, MonitorCondition, TargetResource, AlertRuleId, Description, ...), the action
+      (RemoveAllActionGroups = notifications suppressed, AddActionGroups = extra notifications), the schedule
+      (maintenance windows) and who changed it last. Answers 'why did nobody get paged?' and 'was a suppression or
+      maintenance window active during the incident?' (fired alerts show is_suppressed in azure_monitor_alerts).
+    kind: entities
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.AlertsManagement/actionRules"
+      query:
+        api-version: "2021-08-08"
+    filters:
+      - {column: name, ops: ["=", "in"], fan_out: false, description: "Rule name (case-insensitive, filtered after fetch)", examples: ["DailySuppression"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 10}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: id, path: id}
+      - name: name
+        expr: "filters.name if (filters.name is string and filters.name | lower == (_.name or '') | lower) else _.name"
+      - {name: description, path: "properties.description"}
+      - {name: enabled, type: BOOLEAN, path: "properties.enabled"}
+      - {name: action_type, path: "properties.actions[*].actionType", transform: join, transform_arg: ", ", description: "RemoveAllActionGroups (suppression) | AddActionGroups"}
+      - {name: suppresses, type: BOOLEAN, expr: "'RemoveAllActionGroups' in ((_.properties.actions or []) | map(attribute='actionType') | list)", description: "true when the rule removes all action groups (no notifications) for matching alerts"}
+      - {name: action_group_ids, type: JSON, path: "properties.actions[*].actionGroupIds[*]", description: "Action groups added by AddActionGroups"}
+      - {name: scopes, type: JSON, path: "properties.scopes", description: "Subscriptions / resource groups / resources the rule applies to"}
+      - {name: conditions, type: JSON, path: "properties.conditions", description: "[{field, operator, values}] - all must match"}
+      - name: query
+        expr: "((_.properties.conditions or []) | map('json') | join(' AND ')) or none"
+        description: "All conditions as text ({field, operator, values} AND ...); empty conditions = every alert in scope"
+      - {name: schedule, type: JSON, path: "properties.schedule", description: "{effectiveFrom, effectiveUntil, timeZone, recurrences[{recurrenceType, startTime, endTime, daysOfWeek|daysOfMonth}]}; null = always active"}
+      - {name: effective_from, path: "properties.schedule.effectiveFrom", description: "Local time in time_zone (no offset), not UTC"}
+      - {name: effective_until, path: "properties.schedule.effectiveUntil", description: "Local time in time_zone (no offset), not UTC"}
+      - {name: time_zone, path: "properties.schedule.timeZone"}
+      - {name: author, path: "systemData.lastModifiedBy", description: "Who last modified the rule"}
+      - {name: created_by, path: "systemData.createdBy"}
+      - {name: ts, type: TIMESTAMP, path: "systemData.lastModifiedAt", transform: auto_time, description: "Last modification (UTC)"}
+      - {name: url, expr: "'https://portal.azure.com/#resource' ~ (_.id or '')"}
+      - {name: subscription_id, filter_only: true}
+    max_rows: 1000
+    pitfalls:
+      - "A rule applies only while enabled AND inside its schedule; effective_from / effective_until and recurrences are in the rule's time_zone, not UTC."
+      - "Suppression hides notifications, not alerts: the alerts still fire (azure_monitor_alerts.is_suppressed = true)."
+      - "Rules can be scoped to another subscription's resources only from that subscription; set subscription_id to look there."
+    examples:
+      - sql: "SELECT name, enabled, suppresses, scopes, conditions, schedule, author, ts FROM azure_monitor_alert_processing_rules WHERE suppresses ORDER BY ts DESC"
+        description: Suppression rules (maintenance windows) that could have silenced the incident's alerts.
+      - sql: "SELECT name, action_type, action_group_ids, conditions FROM azure_monitor_alert_processing_rules WHERE enabled AND ts >= TIMESTAMP '2026-09-30 00:00:00'"
+        description: Processing rules changed recently.
+    fixtures:
+      - file: alert_processing_rules.json
+        note: "Verbatim 200 response of the official example 'GetAlertProcessingRulesSubscriptionWide' (Alert Processing Rules - List By Subscription, 2021-08-08, AlertProcessingRules_List_Subscription.json)."
+        expect_rows: 2
+        expect_columns: {name: DailySuppression, enabled: true, action_type: RemoveAllActionGroups, suppresses: true, time_zone: Pacific Standard Time, effective_from: "2018-01-10T22:05:09", author: xyz@microsoft.com, ts: "2018-06-12T22:05:09Z", conditions: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/alerts-management/processing-rules/alert-processing-rules/list-by-subscription?view=rest-alerts-management-processing-rules-2021-08-08
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_autoscale_settings
+    title: Autoscale settings (profiles, capacity limits and scale rules)
+    description: >-
+      Autoscale settings of the subscription (GET /subscriptions/{id}/providers/Microsoft.Insights/autoscalesettings,
+      api-version 2022-10-01): one row per setting x profile x rule with the target resource (VM scale set, App
+      Service plan, ...), enabled flag, min / max / default capacity, the metric trigger (metric, statistic, time
+      aggregation, operator, threshold, window) and the scale action (direction, type, value, cooldown). Answers
+      'was autoscale capped at its maximum?' and 'did a scale-in rule remove capacity?'. Actual scale actions are
+      in azure_monitor_activity_log (category Autoscale).
+    kind: entities
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.Insights/autoscalesettings"
+      query:
+        api-version: "2022-10-01"
+    filters:
+      - {column: name, ops: ["=", "in"], fan_out: false, description: "Autoscale setting name (case-insensitive, filtered after fetch)", examples: ["MySetting"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 10}
+    response:
+      rows_path: "$.value[*]"
+      expand:
+        - {explode: "properties.profiles", as: p, keep_empty: true}
+        - {explode: "@p.rules", as: r, keep_empty: true}
+    columns:
+      - {name: id, path: id}
+      - name: name
+        expr: "filters.name if (filters.name is string and filters.name | lower == (_.name or '') | lower) else _.name"
+      - {name: enabled, type: BOOLEAN, path: "properties.enabled"}
+      - {name: target_resource_id, path: "properties.targetResourceUri", description: "Resource that is scaled (VMSS, App Service plan, ...)"}
+      - {name: target_resource_name, expr: "((_.properties.targetResourceUri or '').rstrip('/').split('/') | last) or none"}
+      - {name: profile, path: "@p.name"}
+      - {name: min_capacity, type: BIGINT, path: "@p.capacity.minimum"}
+      - {name: max_capacity, type: BIGINT, path: "@p.capacity.maximum", description: "Hard ceiling: at max, autoscale cannot add instances"}
+      - {name: default_capacity, type: BIGINT, path: "@p.capacity.default"}
+      - {name: profile_schedule, type: JSON, expr: "p.fixedDate or p.recurrence if p else none", description: "fixedDate {start, end, timeZone} or weekly recurrence; null = default profile"}
+      - {name: metric_name, path: "@r.metricTrigger.metricName"}
+      - {name: metric_resource_id, path: "@r.metricTrigger.metricResourceUri"}
+      - {name: statistic, path: "@r.metricTrigger.statistic", description: "How instances are combined: Average | Min | Max | Sum | Count"}
+      - {name: time_aggregation, path: "@r.metricTrigger.timeAggregation"}
+      - {name: operator, path: "@r.metricTrigger.operator"}
+      - {name: threshold, type: DOUBLE, path: "@r.metricTrigger.threshold"}
+      - {name: time_grain, path: "@r.metricTrigger.timeGrain"}
+      - {name: time_window, path: "@r.metricTrigger.timeWindow"}
+      - {name: direction, path: "@r.scaleAction.direction", description: "Increase | Decrease"}
+      - {name: scale_type, path: "@r.scaleAction.type", description: "ChangeCount | PercentChangeCount | ExactCount | ServiceAllowedNextValue"}
+      - {name: scale_value, path: "@r.scaleAction.value"}
+      - {name: cooldown, path: "@r.scaleAction.cooldown"}
+      - name: query
+        expr: "(r.metricTrigger.timeAggregation ~ '(' ~ r.metricTrigger.metricName ~ ') ' ~ r.metricTrigger.operator ~ ' ' ~ r.metricTrigger.threshold ~ ' over ' ~ r.metricTrigger.timeWindow ~ ' -> ' ~ r.scaleAction.direction ~ ' by ' ~ r.scaleAction.value) if r else none"
+        description: "Readable rule: Aggregation(metric) operator threshold over window -> direction by value"
+      - {name: predictive_mode, path: "properties.predictiveAutoscalePolicy.scaleMode"}
+      - {name: location, path: location}
+      - {name: tags, type: JSON, path: tags}
+      - {name: url, expr: "'https://portal.azure.com/#resource' ~ (_.id or '')"}
+      - {name: subscription_id, filter_only: true}
+    max_rows: 5000
+    pitfalls:
+      - "Capacity values are strings in the API (converted to numbers here); the subscription's core quota can cap scale-out below max_capacity."
+      - "Only one profile is active at a time: a fixedDate profile overrides recurrence profiles, which override the default profile."
+      - "Scale actions (and failures such as quota errors) are logged in azure_monitor_activity_log with category = 'Autoscale'."
+    examples:
+      - sql: "SELECT name, target_resource_name, profile, min_capacity, max_capacity, query, cooldown FROM azure_monitor_autoscale_settings WHERE enabled ORDER BY name, profile"
+        description: Every autoscale rule with its capacity limits.
+      - sql: >-
+          SELECT ts, operation, status, description FROM azure_monitor_activity_log
+          WHERE category = 'Autoscale' AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00' ORDER BY ts
+        description: The scale actions autoscale actually took during the incident (activity log).
+    fixtures:
+      - file: autoscale_settings.json
+        note: "Verbatim 200 response of the official example 'List autoscale settings by subs' (Autoscale Settings - List By Subscription, 2022-10-01, listAutoscaleSettingBySubscription.json): 1 setting x 2 profiles x 2 rules."
+        expect_rows: 4
+        expect_columns: {name: MySetting, enabled: true, target_resource_name: testingsc, profile: adios, min_capacity: 1, max_capacity: 10, metric_name: Percentage CPU, operator: GreaterThan, threshold: 10.0, direction: Increase, cooldown: PT5M, query: "Average(Percentage CPU) GreaterThan 10 over PT5M -> Increase by 1", profile_schedule: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/autoscale-settings/list-by-subscription
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_activity_log
+    title: Activity log (control-plane operations and events)
+    description: >-
+      The subscription's activity log (GET /subscriptions/{id}/providers/Microsoft.Insights/eventtypes/management/
+      values, api-version 2015-04-01): every ARM write / delete / action (deployments, scale, restarts, config and
+      RBAC changes), Service Health, Resource Health, autoscale, alert and policy events. One row per event with
+      ts, operation, status (Started / Succeeded / Failed), level, category, caller (author), resource, resource
+      group, correlation id and properties. The API filter accepts ONE scope besides time: resource_group, resource_id
+      (resourceUri), resource_provider or correlation_id (in that priority); everything else filters in SQL.
+    kind: changes
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.Insights/eventtypes/management/values"
+      query:
+        api-version: "2015-04-01"
+        $filter: >-
+          eventTimestamp ge '{{ time.start | rfc3339 }}' and eventTimestamp le '{{ time.end | rfc3339 }}'
+          {%- if filters.resource_group %} and resourceGroupName eq '{{ filters.resource_group | replace("'", "''") }}'
+          {%- elif filters.resource_id %} and resourceUri eq '{{ filters.resource_id | replace("'", "''") }}'
+          {%- elif filters.resource_provider %} and resourceProvider eq '{{ filters.resource_provider | replace("'", "''") }}'
+          {%- elif filters.correlation_id %} and correlationId eq '{{ filters.correlation_id | replace("'", "''") }}'
+          {%- endif %}
+    filters:
+      - {column: resource_group, description: "Resource group name (case-insensitive)", examples: ["rg-shop-prod"]}
+      - {column: resource_id, description: "Full ARM id of one resource (case-insensitive)", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api"]}
+      - {column: resource_provider, description: "Resource provider namespace, e.g. Microsoft.Web (case-insensitive)", examples: ["Microsoft.Web"]}
+      - {column: correlation_id, description: "Correlation id shared by all events of one operation", examples: ["1e121103-0ba6-4300-ac9d-952bb5d0c80f"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    time: {column: ts, default_lookback: 6h, max_window: 31d, retention: 90d, control_lookback: 3d}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 10}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: eventTimestamp, transform: auto_time, description: "When the service processed the event (UTC)"}
+      - {name: submitted_at, type: TIMESTAMP, path: submissionTimestamp, transform: auto_time, description: "When it became queryable"}
+      - {name: operation, path: "operationName.value", description: "e.g. Microsoft.Web/sites/restart/action, Microsoft.Resources/deployments/write"}
+      - {name: operation_display, path: "operationName.localizedValue"}
+      - {name: status, path: "status.value", description: "Started | Accepted | Succeeded | Failed | Active | Resolved"}
+      - {name: sub_status, path: "subStatus.value", description: "Often the HTTP status (Created, BadRequest, Conflict...)"}
+      - {name: level, path: level, description: "Critical | Error | Warning | Informational | Verbose"}
+      - {name: category, path: "category.value", description: "Administrative, ServiceHealth, ResourceHealth, Alert, Autoscale, Security, Policy, Recommendation"}
+      - {name: author, path: caller, description: "Caller UPN or service principal id"}
+      - name: resource_id
+        expr: "filters.resource_id if (filters.resource_id is string and filters.resource_id | lower == (_.resourceId or _.authorization.scope or '') | lower) else (_.resourceId or _.authorization.scope)"
+        description: "resourceId of the event (falls back to authorization.scope when the event has no resourceId)"
+      - {name: resource_name, expr: "((_.resourceId or _.authorization.scope or '').rstrip('/').split('/') | last) or none", description: "Last segment of the resource id"}
+      - name: resource_group
+        expr: "filters.resource_group if (filters.resource_group is string and filters.resource_group | lower == (_.resourceGroupName or '') | lower) else _.resourceGroupName"
+      - name: resource_provider
+        expr: "filters.resource_provider if (filters.resource_provider is string and filters.resource_provider | lower == (_.resourceProviderName.value or '') | lower) else _.resourceProviderName.value"
+      - {name: resource_type, path: "resourceType.value"}
+      - {name: correlation_id, path: correlationId}
+      - {name: operation_id, path: operationId}
+      - {name: event_data_id, path: eventDataId}
+      - {name: event_name, path: "eventName.value", description: "BeginRequest | EndRequest | ..."}
+      - {name: description, path: description}
+      - {name: http_method, path: "httpRequest.method"}
+      - {name: properties, type: JSON, path: properties, description: "Event details (statusCode, statusMessage with the error, responseBody, ...)"}
+      - {name: title, expr: "(_.operationName.localizedValue or _.operationName.value or '') ~ ' ' ~ (_.status.value or '')"}
+      - {name: id, path: id}
+      - {name: subscription_id, path: subscriptionId}
+    max_rows: 10000
+    sort_hint: "newest first (as returned)"
+    pitfalls:
+      - "Only one scope filter is accepted by the API besides the time range; with resource_group set, resource_id / resource_provider / correlation_id are applied in SQL over the fetched page(s)."
+      - "Each operation logs several events (Started, Accepted, Succeeded / Failed) sharing correlation_id: group by correlation_id and look at the final status; a Failed write's reason is in properties->>'statusMessage'."
+      - "Reads (GET) are not logged; data-plane operations (blob reads, SQL queries) are not in the activity log - they are in resource logs (Log Analytics)."
+      - "Events can take a few minutes to become queryable (submitted_at); the last minutes of a window may be incomplete."
+      - "Busy subscriptions produce thousands of events per hour: narrow with resource_group and a short window, and paginate at most 10 pages."
+    examples:
+      - sql: >-
+          SELECT ts, operation_display, status, author, resource_name FROM azure_monitor_activity_log
+          WHERE resource_group = 'rg-shop-prod' AND category = 'Administrative'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND (operation LIKE '%/write' OR operation LIKE '%/action' OR operation LIKE '%/delete') AND status IN ('Succeeded', 'Failed')
+          ORDER BY ts DESC
+        description: What changed in the resource group before the incident (deployments, config writes, restarts, deletes).
+      - sql: >-
+          SELECT ts, operation, status, properties->>'statusMessage' AS error FROM azure_monitor_activity_log
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api'
+            AND status = 'Failed' ORDER BY ts DESC
+        description: Failed control-plane operations on one app with their error message.
+      - sql: >-
+          SELECT ts, level, title, description FROM azure_monitor_activity_log
+          WHERE category IN ('ServiceHealth', 'ResourceHealth') ORDER BY ts DESC LIMIT 50
+        description: Platform health events delivered through the activity log.
+    fixtures:
+      - file: activity_log.json
+        filters: {resource_group: MSSupportGroup}
+        note: "Verbatim 200 response of the official example 'Get Activity Logs with filter' (Activity Logs - List 2015-04-01, GetActivityLogsFiltered.json)."
+        expect_rows: 1
+        expect_columns: {ts: "2015-01-21T22:14:26.9792776Z", operation: microsoft.support/supporttickets/write, status: Succeeded, level: Informational, author: admin@contoso.com, resource_group: MSSupportGroup, resource_provider: microsoft.support, correlation_id: 1e121103-0ba6-4300-ac9d-952bb5d0c80f}
+      - file: activity_log_selected.json
+        filters: {resource_group: mssupportgroup}
+        note: "Verbatim 200 response of the official example 'Get Activity Logs with filter and select' (GetActivityLogsFilteredAndSelected.json); proves the case-insensitive resource_group filter keeps the row."
+        expect_rows: 1
+        expect_columns: {resource_group: mssupportgroup, author: null, sub_status: null, status: Succeeded}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/monitor/activity-logs/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_resource_graph
+    title: Azure Resource Graph query (KQL over inventory, changes and health)
+    description: >-
+      Run any Resource Graph query (POST /providers/Microsoft.ResourceGraph/resources, api-version 2024-04-01)
+      across the subscription(s) or management group(s): resources, resourcecontainers, resourcechanges,
+      healthresources, servicehealthresources, alertsmanagementresources, advisorresources, policyresources... One
+      row per result object; every output column becomes a SQL column (lower-cased, nested objects flattened
+      with _) and the whole row is in result. Pages of up to 1000 rows follow $skipToken (max 5 pages).
+    kind: generic
+    request:
+      method: POST
+      path: /providers/Microsoft.ResourceGraph/resources
+      query:
+        api-version: "2024-04-01"
+      body:
+        query: "{{ filters.query }}"
+        subscriptions: "{{ (filters.subscription_id | as_list) if filters.subscription_id else (None if filters.management_group else [env.AZURE_SUBSCRIPTION_ID]) }}"
+        managementGroups: "{{ (filters.management_group | as_list) if filters.management_group else None }}"
+        options:
+          resultFormat: objectArray
+          $top: "{{ [limit or 1000, 1000] | min }}"
+    filters:
+      - column: query
+        required: true
+        description: "Resource Graph KQL (see query_languages.azure_resource_graph); project id to allow paging"
+        examples: ["resources | where type =~ 'microsoft.web/sites' | project id, name, location, state = tostring(properties.state)"]
+      - {column: subscription_id, ops: ["=", "in"], fan_out: false, description: "Subscriptions to query (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+      - {column: management_group, ops: ["=", "in"], fan_out: false, description: "Management group ids to query instead of subscriptions", examples: ["mg-production"]}
+    pagination: {type: cursor, cursor_path: "$['$skipToken']", cursor_param: "body.options.$skipToken", max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+      dynamic: "."
+      dynamic_max_columns: 60
+      errors:
+        - path: "$.resultTruncated"
+          equals: "true"
+          message: "$.resultTruncated"
+          hint: "Resource Graph truncated the result (rows dropped, no $skipToken): add | project id, ... so it can page, summarize, or narrow the query"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: type, path: type}
+      - {name: location, path: location}
+      - {name: resource_group, path: resourceGroup}
+      - {name: result, type: JSON, path: ".", description: "The whole result row"}
+      - {name: query, filter_only: true}
+      - {name: subscription_id, filter_only: true}
+      - {name: management_group, filter_only: true}
+    max_rows: 5000
+    pitfalls:
+      - "Results are capped at 1000 rows per page and 5 pages here; a query without an id column cannot be paged and comes back truncated (raised as an error)."
+      - "Resource Graph is eventually consistent (seconds to minutes behind ARM); a resource created or deleted during the incident may not be reflected yet."
+      - "Only subscriptions the app registration can read are searched; results silently exclude others."
+      - "type, location and resourceGroup values are lower-case in Resource Graph for most resources: compare with =~ in KQL."
+    examples:
+      - sql: >-
+          SELECT name, location, result->>'state' AS state FROM azure_monitor_resource_graph
+          WHERE query = 'resources | where type =~ ''microsoft.web/sites'' | project id, name, location, state = tostring(properties.state)'
+        description: All web apps and whether they are running.
+      - sql: >-
+          SELECT result->>'availabilityState' AS state, count(*) AS resources FROM azure_monitor_resource_graph
+          WHERE query = 'healthresources | where type =~ ''microsoft.resourcehealth/availabilitystatuses'' | project id, availabilityState = tostring(properties.availabilityState)'
+          GROUP BY 1
+        description: Resource Health availability across the subscription in one query.
+      - sql: >-
+          SELECT result->>'title' AS title, result->>'status' AS status FROM azure_monitor_resource_graph
+          WHERE query = 'servicehealthresources | where type =~ ''Microsoft.ResourceHealth/events'' | extend status = tostring(properties.Status), title = tostring(properties.Title) | where status == ''Active'' | project id, title, status'
+        description: Active Service Health issues through Resource Graph.
+    fixtures:
+      - file: resource_graph_basic.json
+        filters: {query: "Resources | project id, name, type, location, tags | limit 3"}
+        note: "Verbatim 200 response of the official example 'Basic query' (Resources - Resources 2024-04-01, ResourcesBasicQuery.json)."
+        expect_rows: 3
+        expect_columns: {name: myNetworkInterface, type: microsoft.network/networkinterfaces, location: centralus, tags_tag1: Value1, result: {not_null: true}}
+      - file: resource_graph_first_page.json
+        filters: {query: "Resources | where name contains 'test' | project id, name, type, location"}
+        note: "Verbatim 200 response of the official example 'First page query' (ResourcesFirstPageQuery.json), which carries a $skipToken for the next page."
+        expect_rows: 3
+        expect_columns: {name: yetanothertest_OsDisk_1_f396cbcb625a457bb69fe2abf5975820, type: microsoft.compute/disks}
+      - file: resource_graph_truncated.json
+        filters: {query: "resources | project name, type"}
+        note: "Built strictly from the documented QueryResponse schema (resultTruncated enum 'true' / 'false', no $skipToken when truncated): truncated results must raise, not look complete."
+        expect_error: "truncated"
+    docs_url: https://learn.microsoft.com/en-us/rest/api/azureresourcegraph/resourcegraph/resources/resources
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_resources
+    title: Azure resource inventory (Resource Graph 'resources')
+    description: >-
+      Inventory of Azure resources through Resource Graph: one row per resource with id, name, type (lower-case,
+      e.g. microsoft.web/sites), kind, location, resource group, subscription, sku, tags, provisioning state, power
+      state (VMs) and a portal url. Pushdown filters (case-insensitive): type, resource_group, name (=, IN, LIKE),
+      location, tag ('key=value'), plus a raw kql_filter; include_properties = true adds the full properties JSON.
+    kind: entities
+    request:
+      method: POST
+      path: /providers/Microsoft.ResourceGraph/resources
+      query:
+        api-version: "2024-04-01"
+      body:
+        subscriptions: "{{ (filters.subscription_id | as_list) if filters.subscription_id else [env.AZURE_SUBSCRIPTION_ID] }}"
+        options:
+          resultFormat: objectArray
+          $top: 1000
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          resources
+          {{- sf('type', filters.type, filters.type__op) }}
+          {{- sf('resourceGroup', filters.resource_group, filters.resource_group__op) }}
+          {{- sf('name', filters.name, filters.name__op) }}
+          {{- sf('location', filters.location, filters.location__op) }}
+          {%- if filters.tag %}{% set kv = (filters.tag | string).split('=', 1) %} | where tostring(tags[{{ kv[0] | squote }}]) =~ {{ (kv[1] if kv | length > 1 else '') | squote }}{% endif %}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | project id, name, type, kind, location, resourceGroup, subscriptionId, sku, tags, zones, provisioningState = tostring(properties.provisioningState), powerState = tostring(properties.extended.instanceView.powerState.code){{ ', properties' if filters.include_properties else '' }}
+          | order by type asc, name asc
+    filters:
+      - {column: type, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Resource type, e.g. microsoft.compute/virtualmachines, microsoft.web/sites, microsoft.containerservice/managedclusters", examples: ["microsoft.web/sites"]}
+      - {column: resource_group, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Resource group name", examples: ["rg-shop-prod"]}
+      - {column: name, ops: ["=", "in", "like"], fan_out: false, description: "Resource name; LIKE '%checkout%' becomes contains", examples: ["checkout-api"]}
+      - {column: location, ops: ["=", "in"], fan_out: false, description: "Region, e.g. westeurope", examples: ["westeurope"]}
+      - {column: tag, description: "Tag filter 'key=value' (value compared case-insensitively)", examples: ["env=prod"]}
+      - {column: kql_filter, description: "Extra raw Resource Graph KQL predicate", examples: ["properties.state =~ 'Stopped'"]}
+      - {column: include_properties, type: BOOLEAN, description: "true adds the full properties object", examples: ["true"]}
+      - {column: subscription_id, ops: ["=", "in"], fan_out: false, description: "Subscriptions (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    pagination: {type: cursor, cursor_path: "$['$skipToken']", cursor_param: "body.options.$skipToken", max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+      errors:
+        - {path: "$.resultTruncated", equals: "true", message: "$.resultTruncated", hint: "Resource Graph truncated the inventory: narrow type / resource_group"}
+    columns:
+      - {name: id, path: id}
+      - name: name
+        expr: "filters.name if (filters.name is string and filters.name | lower == (_.name or '') | lower) else _.name"
+      - name: type
+        expr: "filters.type if (filters.type is string and filters.type | lower == (_.type or '') | lower) else _.type"
+      - {name: kind, path: kind}
+      - {name: location, expr: "filters.location if (filters.location is string and filters.location | lower == (_.location or '') | lower) else _.location"}
+      - name: resource_group
+        expr: "filters.resource_group if (filters.resource_group is string and filters.resource_group | lower == (_.resourceGroup or '') | lower) else _.resourceGroup"
+      - {name: subscription_id, path: subscriptionId}
+      - {name: sku, type: JSON, path: sku}
+      - {name: tags, type: JSON, path: tags}
+      - {name: zones, type: JSON, path: zones}
+      - {name: provisioning_state, path: provisioningState}
+      - {name: power_state, path: powerState, description: "VMs: PowerState/running, PowerState/deallocated, ..."}
+      - {name: properties, type: JSON, path: properties, description: "Full properties (include_properties = true)"}
+      - {name: url, expr: "'https://portal.azure.com/#resource' ~ (_.id or '')"}
+      - {name: tag, filter_only: true}
+      - {name: kql_filter, filter_only: true}
+      - {name: include_properties, type: BOOLEAN, filter_only: true}
+    max_rows: 5000
+    sort_hint: "by type, then name"
+    pitfalls:
+      - "power_state is only populated for VMs whose instance view Resource Graph has; empty does not mean stopped."
+      - "Resource Graph lags ARM by seconds to minutes."
+    examples:
+      - sql: "SELECT name, location, provisioning_state, url FROM azure_monitor_resources WHERE type = 'microsoft.web/sites' AND resource_group = 'rg-shop-prod'"
+        description: Web apps in a resource group.
+      - sql: "SELECT name, power_state, resource_group FROM azure_monitor_resources WHERE type = 'microsoft.compute/virtualmachines' AND power_state <> 'PowerState/running'"
+        description: VMs that are not running.
+      - sql: "SELECT type, count(*) AS n FROM azure_monitor_resources WHERE tag = 'env=prod' GROUP BY 1 ORDER BY n DESC"
+        description: What production is made of.
+    fixtures:
+      - file: resource_graph_basic.json
+        filters: {type: microsoft.network/networkinterfaces}
+        note: "Verbatim 200 response of the official example 'Basic query' (ResourcesBasicQuery.json; columns id, name, type, location, tags - the others this table projects are null)."
+        expect_rows: 3
+        expect_columns: {name: myNetworkInterface, type: microsoft.network/networkinterfaces, location: centralus, tags: {not_null: true}, url: "https://portal.azure.com/#resource/subscriptions/cfbbd179-59d2-4052-aa06-9270a38aa9d6/resourceGroups/RG1/providers/Microsoft.Network/networkInterfaces/myNetworkInterface"}
+    docs_url: https://learn.microsoft.com/en-us/azure/governance/resource-graph/samples/starter
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_resource_changes
+    title: Resource changes (Resource Graph change analysis)
+    description: >-
+      Property-level changes to Azure resources from Resource Graph change analysis (resourcechanges, 14 days):
+      one row per change with ts (change time), change type (Create / Update / Delete), target resource id and type,
+      resource group, who changed it (changed_by, changed_by_type, client_type), the RBAC operation, correlation id,
+      the number of changed properties and changes (JSON: {"properties.x": {previousValue, newValue}}). Filters:
+      resource_id, resource_group, resource_type, change_type, changed_by; change_table = resourcecontainerchanges
+      for resource groups / subscriptions, healthresourcechanges for health. The best 'what changed before the
+      incident' source for configuration (SKU, settings, scale, network rules) - complements the activity log.
+    kind: changes
+    request:
+      method: POST
+      path: /providers/Microsoft.ResourceGraph/resources
+      query:
+        api-version: "2024-04-01"
+      body:
+        subscriptions: "{{ (filters.subscription_id | as_list) if filters.subscription_id else [env.AZURE_SUBSCRIPTION_ID] }}"
+        options:
+          resultFormat: objectArray
+          $top: 1000
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          {{ {'resourcecontainerchanges': 'resourcecontainerchanges', 'healthresourcechanges': 'healthresourcechanges'}.get((filters.change_table or '') | lower, 'resourcechanges') }}
+          | extend changeTime = todatetime(properties.changeAttributes.timestamp), targetResourceId = tostring(properties.targetResourceId), targetResourceType = tostring(properties.targetResourceType), changeType = tostring(properties.changeType), changedBy = tostring(properties.changeAttributes.changedBy)
+          | where changeTime between (datetime({{ time.start | rfc3339 }}) .. datetime({{ time.end | rfc3339 }}))
+          {{- sf('resourceGroup', filters.resource_group, filters.resource_group__op) }}
+          {{- sf('targetResourceId', filters.resource_id, filters.resource_id__op) }}
+          {{- sf('targetResourceType', filters.resource_type, filters.resource_type__op) }}
+          {{- sf('changeType', filters.change_type, filters.change_type__op) }}
+          {{- sf('changedBy', filters.changed_by, filters.changed_by__op) }}
+          | project id, changeTime, changeType, targetResourceId, targetResourceType, resourceGroup, subscriptionId, changedBy, changedByType = tostring(properties.changeAttributes.changedByType), clientType = tostring(properties.changeAttributes.clientType), operation = tostring(properties.changeAttributes.operation), correlationId = tostring(properties.changeAttributes.correlationId), changesCount = toint(properties.changeAttributes.changesCount), changes = properties.changes
+          | order by changeTime desc
+    filters:
+      - {column: resource_id, ops: ["=", "in", "like"], fan_out: false, description: "Changed resource ARM id (case-insensitive)", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api"]}
+      - {column: resource_group, ops: ["=", "in", "!="], fan_out: false, description: "Resource group name", examples: ["rg-shop-prod"]}
+      - {column: resource_type, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Changed resource type, e.g. microsoft.web/sites", examples: ["microsoft.web/sites"]}
+      - {column: change_type, ops: ["=", "in", "!="], fan_out: false, description: "Create | Update | Delete", examples: ["Update"]}
+      - {column: changed_by, ops: ["=", "in", "like"], fan_out: false, description: "UPN, app id, System or Unspecified", examples: ["deploy-pipeline@contoso.com"]}
+      - {column: change_table, description: "resourcechanges (default) | resourcecontainerchanges | healthresourcechanges", examples: ["resourcechanges"]}
+      - {column: subscription_id, ops: ["=", "in"], fan_out: false, description: "Subscriptions (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    time: {column: ts, default_lookback: 24h, max_window: 14d, retention: 14d, control_lookback: 3d}
+    pagination: {type: cursor, cursor_path: "$['$skipToken']", cursor_param: "body.options.$skipToken", max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+      errors:
+        - {path: "$.resultTruncated", equals: "true", message: "$.resultTruncated", hint: "Resource Graph truncated the change list: narrow resource_group / resource_type or the window"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: changeTime, transform: auto_time, description: "When the change was detected (UTC)"}
+      - {name: change_type, path: changeType, description: "Create | Update | Delete"}
+      - name: resource_id
+        expr: "filters.resource_id if (filters.resource_id is string and filters.resource_id | lower == (_.targetResourceId or '') | lower) else _.targetResourceId"
+      - {name: resource_name, expr: "((_.targetResourceId or '').rstrip('/').split('/') | last) or none"}
+      - name: resource_type
+        expr: "filters.resource_type if (filters.resource_type is string and filters.resource_type | lower == (_.targetResourceType or '') | lower) else _.targetResourceType"
+      - name: resource_group
+        expr: "filters.resource_group if (filters.resource_group is string and filters.resource_group | lower == (_.resourceGroup or '') | lower) else _.resourceGroup"
+      - {name: subscription_id, path: subscriptionId}
+      - {name: changed_by, path: changedBy, description: "Who made the change (UPN / app id / System / Unspecified)"}
+      - {name: author, path: changedBy}
+      - {name: changed_by_type, path: changedByType, description: "User | Application | System | Unspecified"}
+      - {name: client_type, path: clientType, description: "Azure Portal, Azure CLI, ARM template, ... or the client app id"}
+      - {name: operation, path: operation, description: "RBAC permission used, e.g. microsoft.web/sites/write (use change_type for what happened)"}
+      - {name: correlation_id, path: correlationId, description: "Joins with azure_monitor_activity_log.correlation_id"}
+      - {name: changes_count, type: BIGINT, path: changesCount, description: "0 for Create and Delete"}
+      - {name: changes, type: JSON, path: changes, description: "{'<property path>': {previousValue, newValue, isTruncated}}"}
+      - {name: title, expr: "(_.changeType or '') ~ ' ' ~ (((_.targetResourceId or '').rstrip('/').split('/') | last) or '') ~ ((' (' ~ ((_.changes or {}).keys() | list | join(', '))[:200] ~ ')') if _.changes else '')"}
+      - {name: id, path: id}
+      - {name: url, expr: "'https://portal.azure.com/#resource' ~ (_.targetResourceId or '') ~ '/changes'"}
+      - {name: change_table, filter_only: true}
+    max_rows: 5000
+    sort_hint: "newest first"
+    pitfalls:
+      - "Kept 14 days only; older windows are beyond retention (missing data)."
+      - "Create and Delete records have changes_count 0 and no property diff; Delete has no snapshot."
+      - "New properties introduced by an API version, and tags added without values, are not reported as changes."
+      - "changes keys are full property paths containing dots ('properties.siteConfig.numberOfWorkers'): read them as ONE key, changes->'properties.siteConfig.numberOfWorkers'->>'newValue'; json_keys(changes) lists them. previousValue / newValue are strings ('null' for absent)."
+      - "changed_by can be 'System' (platform background change) or 'Unspecified' (no identity information); correlate with azure_monitor_activity_log on correlation_id for the request details."
+    examples:
+      - sql: >-
+          SELECT ts, change_type, resource_name, changed_by, client_type, changes FROM azure_monitor_resource_changes
+          WHERE resource_group = 'rg-shop-prod' AND ts BETWEEN TIMESTAMP '2026-10-01 06:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Configuration changes in the resource group in the 6 hours before the incident.
+      - sql: >-
+          SELECT ts, json_keys(changes) AS changed_properties, changed_by, client_type, correlation_id FROM azure_monitor_resource_changes
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api'
+            AND change_type = 'Update' ORDER BY ts DESC
+        description: Which properties of one app changed and who changed them.
+      - sql: >-
+          SELECT ts, resource_name, changes->'properties.hardwareProfile.vmSize'->>'previousValue' AS old_size,
+                 changes->'properties.hardwareProfile.vmSize'->>'newValue' AS new_size, changed_by
+          FROM azure_monitor_resource_changes
+          WHERE resource_type = 'microsoft.compute/virtualmachines' AND change_type = 'Update'
+            AND changes->'properties.hardwareProfile.vmSize' IS NOT NULL
+        description: VM resizes (a property path with dots is one JSON key - use changes->'full.path').
+    fixtures:
+      - file: resource_changes.json
+        filters: {resource_group: rg-shop-prod}
+        note: "Built strictly from the documented Resource Graph QueryResponse schema (count, data objectArray, facets, resultTruncated, totalRecords) and the documented change resource properties (targetResourceId, targetResourceType, changeType, changeAttributes {correlationId, changedByType, changesCount, clientType, changedBy, operation, timestamp}, changes {path: {newValue, previousValue}}) as this table's KQL projects them; the docs show the change payload but no projected query response."
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T10:51:07.347Z", change_type: Update, resource_name: checkout-api, resource_group: rg-shop-prod, changed_by: deploy-pipeline@contoso.com, client_type: Azure CLI, changes_count: 2, changes: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/azure/governance/resource-graph/changes/get-resource-changes
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_service_health_events
+    title: Service Health events (Azure outages, maintenance, advisories)
+    description: >-
+      Service Health events affecting the subscription (GET /subscriptions/{id}/providers/Microsoft.ResourceHealth/
+      events, api-version 2025-05-01): one row per event (tracking id) with title, summary, event type
+      (ServiceIssue = outage, PlannedMaintenance, HealthAdvisory, SecurityAdvisory, ...), status (Active / Resolved),
+      level, impacted services and regions, impact start / mitigation and last update (ts). Answers 'is Azure
+      itself broken in our region?'. Optional pushdown: service (else region) as the documented $filter; the other
+      one is matched against the impacted services / regions in SQL. The window start becomes queryStartTime (date
+      granularity, M/D/YYYY; events updated since that day).
+    kind: incidents
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.ResourceHealth/events"
+      query:
+        api-version: "2025-05-01"
+        queryStartTime: "{{ time.start.month }}/{{ time.start.day }}/{{ time.start.year }}"
+        $filter: >-
+          {% if filters.service %}service eq '{{ filters.service | replace("'", "''") }}'{% elif filters.region %}region eq '{{ filters.region | replace("'", "''") }}'{% endif %}
+    filters:
+      - {column: service, description: "Impacted Azure service display name, e.g. 'Virtual Machines', 'App Service', 'SQL Database' (pushed down as $filter service eq '...')", examples: ["Virtual Machines"]}
+      - {column: region, description: "Impacted region display name, e.g. 'West Europe' (pushed down only when service is not given; always matched in SQL)", examples: ["West US"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    time: {column: ts, default_lookback: 3d, max_window: 90d, retention: 90d, reapply: false, control_lookback: 30d}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 5}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: id, path: name, description: "Tracking id (e.g. BC_1-FXZ) - quoted in Azure status communications"}
+      - {name: title, path: "properties.title"}
+      - {name: summary, path: "properties.summary", description: "Summary (HTML)"}
+      - {name: header, path: "properties.header"}
+      - {name: event_type, path: "properties.eventType", description: "ServiceIssue | PlannedMaintenance | HealthAdvisory | SecurityAdvisory | RCA | EmergingIssues | Billing"}
+      - {name: event_source, path: "properties.eventSource", description: "ServiceHealth | ResourceHealth"}
+      - {name: state, path: "properties.status", description: "Active | Resolved"}
+      - {name: severity, path: "properties.eventLevel", description: "Critical | Error | Warning | Informational"}
+      - {name: level, path: "properties.level", description: "Critical | Warning"}
+      - {name: ts, type: TIMESTAMP, path: "properties.lastUpdateTime", transform: auto_time, description: "Last update of the event"}
+      - {name: impact_start, type: TIMESTAMP, path: "properties.impactStartTime", transform: auto_time}
+      - {name: impact_mitigation, type: TIMESTAMP, path: "properties.impactMitigationTime", transform: auto_time}
+      - {name: impacted_services, path: "properties.impact[*].impactedService", transform: join, transform_arg: ", "}
+      - {name: impacted_regions, path: "properties.impact[*].impactedRegions[*].impactedRegion", transform: join, transform_arg: ", "}
+      - {name: impact, type: JSON, path: "properties.impact", description: "Per service and region status and update history"}
+      - {name: event_tags, type: JSON, path: "properties.eventTags", description: "Action Recommended, False Positive, Preliminary PIR, Final PIR"}
+      - {name: is_hir, type: BOOLEAN, path: "properties.isHIR"}
+      - {name: priority, type: BIGINT, path: "properties.priority", description: "0 (highest) .. 23"}
+      - name: service
+        expr: >-
+          filters.service if (filters.service is string and (filters.service | lower) in ((_.properties.impact or []) | map(attribute='impactedService') | map('lower') | list))
+          else ((_.properties.impact or []) | map(attribute='impactedService') | first)
+        description: "The impacted service matching the service filter (case-insensitive), else the first impacted service"
+      - name: region
+        expr: >-
+          filters.region if (filters.region is string and (filters.region | lower) in ((_.properties.impact or []) | map(attribute='impactedRegions') | map('default', [], true) | sum(start=[]) | map(attribute='impactedRegion') | map('lower') | list))
+          else ((_.properties.impact or []) | map(attribute='impactedRegions') | map('default', [], true) | sum(start=[]) | map(attribute='impactedRegion') | first)
+        description: "The impacted region matching the region filter (case-insensitive), else the first impacted region"
+      - {name: subscription_id, filter_only: true}
+    max_rows: 2000
+    sort_hint: "as returned (highest priority first)"
+    pitfalls:
+      - "queryStartTime has day granularity and filters on lastUpdateTime: an outage that started earlier but is still updated is included; the ts predicate is not re-applied (use impact_start / impact_mitigation to test overlap with the incident)."
+      - "Only events affecting the queried subscription's services and regions are returned; an empty result for one subscription does not clear other subscriptions."
+      - "service / region use display names ('Virtual Machines', 'West Europe'), not resource types or region codes (westeurope); when unsure, leave them out and use impacted_services / impacted_regions ILIKE in SQL."
+      - "The documented $filter example combines service and region with 'or'; this table pushes down only one of them (service first) and matches the other in SQL, so service AND region means both."
+      - "Sensitive events (isEventSensitive, e.g. security advisories) have their summary withheld here; the portal or the fetchEventDetails endpoint with elevated access shows it."
+    examples:
+      - sql: >-
+          SELECT id, title, state, event_type, impacted_services, impacted_regions, impact_start, impact_mitigation
+          FROM azure_monitor_service_health_events
+          WHERE event_type = 'ServiceIssue' AND impact_start <= TIMESTAMP '2026-10-01 12:00:00'
+            AND (impact_mitigation IS NULL OR impact_mitigation >= TIMESTAMP '2026-10-01 11:00:00')
+        description: Azure outages overlapping the incident window.
+      - sql: "SELECT id, title, impacted_regions FROM azure_monitor_service_health_events WHERE state = 'Active' AND impacted_regions ILIKE '%West Europe%'"
+        description: Anything currently active in our region.
+    fixtures:
+      - file: service_health_events.json
+        note: "Verbatim 200 response of the official example 'ListEventsBySubscriptionId' (Events - List By Subscription Id 2025-05-01, Events_ListBySubscriptionId.json)."
+        expect_rows: 1
+        expect_columns: {id: BC_1-FXZ, title: "ACTIVE: Virtual machines in West US", event_type: ServiceIssue, state: Active, impacted_services: Virtual Machines, impacted_regions: West US, impact_start: "2025-05-12T14:45:48.1203530Z", ts: "2025-05-13T15:43:48.1203530Z", service: Virtual Machines, region: West US}
+      - file: service_health_events.json
+        filters: {service: virtual machines, region: west us}
+        note: "Same verbatim example; proves service / region match case-insensitively (the SQL predicate service = 'virtual machines' keeps the row)."
+        expect_rows: 1
+        expect_columns: {service: virtual machines, region: west us}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/resourcehealth/events/list-by-subscription-id
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_service_health_impacted_resources
+    title: Our resources impacted by one Service Health event
+    description: >-
+      The subscription's resources that Azure lists as impacted by one Service Health event (GET /subscriptions/
+      {id}/providers/Microsoft.ResourceHealth/events/{trackingId}/impactedResources, api-version 2025-05-01): one
+      row per resource with its ARM id, type, region and extra info. event_id (the tracking id, e.g. BC_1-FXZ,
+      from azure_monitor_service_health_events.id) is required; region (code, e.g. westus) is pushed down as
+      $filter targetRegion eq '...'. Confirms whether an Azure outage actually touched the incident's resources.
+    kind: entities
+    request:
+      method: GET
+      path: "/subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}/providers/Microsoft.ResourceHealth/events/{{ filters.event_id | urlencode }}/impactedResources"
+      query:
+        api-version: "2025-05-01"
+        $filter: "{% if filters.region %}targetRegion eq '{{ filters.region | replace(\"'\", \"''\") }}'{% endif %}"
+    filters:
+      - {column: event_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Service Health tracking id (azure_monitor_service_health_events.id)", examples: ["BC_1-FXZ"]}
+      - {column: region, description: "Region code of the impacted resources, e.g. westus, westeurope", examples: ["westus"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 10}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: resource_id, path: "properties.targetResourceId", description: "ARM id of the impacted resource (null for non-ARM impacts, see info)"}
+      - {name: resource_name, expr: "((_.properties.targetResourceId or '').rstrip('/').split('/') | last) or none"}
+      - name: resource_group
+        expr: "(_.properties.targetResourceId[(_.properties.targetResourceId | lower).find('/resourcegroups/') + 16:].split('/')[0]) if '/resourcegroups/' in (_.properties.targetResourceId or '') | lower else none"
+        description: "Resource group parsed from the ARM id (any casing of /resourceGroups/)"
+      - {name: resource_type, path: "properties.targetResourceType"}
+      - {name: region, path: "properties.targetRegion"}
+      - {name: info, type: JSON, path: "properties.info", description: "[{key, value}] extra details (e.g. container group, application id)"}
+      - {name: id, path: name, description: "Impacted-resource record id"}
+      - {name: event_id, expr: "(_.id or '').split('/events/')[1].split('/')[0] if '/events/' in (_.id or '') else none", description: "Tracking id of the event"}
+      - {name: url, expr: "('https://portal.azure.com/#resource' ~ _.properties.targetResourceId) if _.properties.targetResourceId else none"}
+      - {name: subscription_id, filter_only: true}
+    max_rows: 5000
+    pitfalls:
+      - "Only resources Azure could attribute are listed; an empty list does not prove the outage missed you (check azure_monitor_resource_health_history for the resource)."
+      - "region here is the region code (westus), unlike the display names (West US) on azure_monitor_service_health_events."
+    examples:
+      - sql: >-
+          SELECT e.id, e.title, i.resource_name, i.resource_type, i.region
+          FROM azure_monitor_service_health_events e JOIN azure_monitor_service_health_impacted_resources i ON i.event_id = e.id
+          WHERE e.event_type = 'ServiceIssue' AND i.event_id = 'BC_1-FXZ'
+        description: Which of our resources an Azure outage impacted.
+      - sql: "SELECT resource_name, resource_group, resource_type FROM azure_monitor_service_health_impacted_resources WHERE event_id = 'BC_1-FXZ' AND resource_group = 'rg-shop-prod'"
+        description: Was the incident's resource group among the impacted resources?
+    fixtures:
+      - file: service_health_impacted_resources.json
+        filters: {event_id: BC_1-FXZ}
+        note: "Verbatim 200 response of the official example 'ListImpactedResourcesBySubscriptionId' (Impacted Resources - List By Subscription Id And Event Id, 2025-05-01); the second record has only info (no ARM id)."
+        expect_rows: 3
+        expect_columns: {resource_id: "/subscriptions/4970d23e-ed41-4670-9c19-02a1d2808dd9/resourceGroups/TEST/providers/Microsoft.Compute/virtualMachines/testvm", resource_name: testvm, resource_group: TEST, resource_type: Microsoft.Compute/VirtualMachines, region: westus, event_id: BC_1-FXZ}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/resourcehealth/impacted-resources/list-by-subscription-id-and-event-id
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_resource_health
+    title: Current Resource Health of every resource (Availability Statuses)
+    description: >-
+      Current Resource Health availability of all resources in the subscription, or one resource group (GET
+      .../providers/Microsoft.ResourceHealth/availabilityStatuses, api-version 2025-05-01): one row per resource with
+      state (Available / Unavailable / Degraded / Unknown), title, summary, reason type (Unplanned, Planned,
+      UserInitiated, ...), whether the platform or the customer caused it, since when (ts = occuredTime), resolution
+      ETA and recently resolved incidents. Filter resource_group to narrow; state etc. filter in SQL.
+    kind: entities
+    request:
+      method: GET
+      path: >-
+        /subscriptions/{{ filters.subscription_id or env.AZURE_SUBSCRIPTION_ID }}{{ ('/resourceGroups/' ~ filters.resource_group) if filters.resource_group else '' }}/providers/Microsoft.ResourceHealth/availabilityStatuses
+      query:
+        api-version: "2025-05-01"
+        $expand: "{{ 'recommendedactions' if filters.include_actions else None }}"
+    filters:
+      - {column: resource_group, description: "Resource group name (Availability Statuses - List By Resource Group)", examples: ["rg-shop-prod"]}
+      - {column: include_actions, type: BOOLEAN, description: "true expands recommended actions", examples: ["true"]}
+      - {column: subscription_id, ops: ["=", "in"], description: "Subscription GUID (default AZURE_SUBSCRIPTION_ID)", examples: ["11111111-2222-3333-4444-555555555555"]}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 10}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: resource_id, expr: "(_.id or '').split('/providers/Microsoft.ResourceHealth/')[0]", description: "ARM id of the resource"}
+      - {name: resource_name, expr: "((_.id or '').split('/providers/Microsoft.ResourceHealth/')[0].rstrip('/').split('/') | last) or none"}
+      - {name: state, path: "properties.availabilityState", description: "Available | Unavailable | Degraded | Unknown"}
+      - {name: title, path: "properties.title"}
+      - {name: summary, path: "properties.summary"}
+      - {name: detailed_status, path: "properties.detailedStatus"}
+      - {name: reason_type, path: "properties.reasonType", description: "Unplanned, Planned, UserInitiated, ..."}
+      - {name: reason_chronicity, path: "properties.reasonChronicity", description: "Transient | Persistent"}
+      - {name: context, path: "properties.context", description: "Platform Initiated | Customer Initiated"}
+      - {name: category, path: "properties.category", description: "Planned | Unplanned (when platform initiated)"}
+      - {name: ts, type: TIMESTAMP, path: "properties.occuredTime", transform: auto_time, description: "When the current state started (API field occuredTime)"}
+      - {name: reported_at, type: TIMESTAMP, path: "properties.reportedTime", transform: auto_time}
+      - {name: root_cause_attributed_at, type: TIMESTAMP, path: "properties.rootCauseAttributionTime", transform: auto_time}
+      - {name: resolution_eta, type: TIMESTAMP, path: "properties.resolutionETA", transform: auto_time}
+      - {name: health_event_type, path: "properties.healthEventType"}
+      - {name: health_event_cause, path: "properties.healthEventCause", description: "PlatformInitiated | UserInitiated ..."}
+      - {name: health_event_category, path: "properties.healthEventCategory"}
+      - {name: health_event_id, path: "properties.healthEventId"}
+      - {name: recently_resolved, type: JSON, path: "properties.recentlyResolved", description: "{unavailableOccuredTime, resolvedTime, unavailableSummary}"}
+      - {name: service_impacting_events, type: JSON, path: "properties.serviceImpactingEvents"}
+      - {name: recommended_actions, type: JSON, path: "properties.recommendedActions"}
+      - {name: location, path: location}
+      - {name: resource_group, filter_only: true}
+      - {name: include_actions, type: BOOLEAN, filter_only: true}
+      - {name: subscription_id, filter_only: true}
+    max_rows: 10000
+    pitfalls:
+      - "Only resource types that Resource Health supports appear (VMs, App Service, SQL, storage, AKS, ...)."
+      - "The API spells the field 'occuredTime' (sic); ts is when the CURRENT state began, not the last check (reported_at)."
+      - "Available with recently_resolved set means the resource WAS unavailable recently - check recently_resolved->>'unavailableOccuredTime'."
+    examples:
+      - sql: "SELECT resource_name, state, title, reason_type, context, ts FROM azure_monitor_resource_health WHERE state <> 'Available' ORDER BY ts DESC"
+        description: Resources currently unhealthy and since when.
+      - sql: "SELECT resource_name, recently_resolved->>'unavailableOccuredTime' AS down_at, recently_resolved->>'resolvedTime' AS up_at FROM azure_monitor_resource_health WHERE resource_group = 'rg-shop-prod' AND recently_resolved IS NOT NULL"
+        description: Resources that recently recovered from an outage.
+    fixtures:
+      - file: resource_health.json
+        note: "Verbatim 200 response of the official example 'ListHealthBySubscriptionId' (Availability Statuses - List By Subscription Id 2025-05-01)."
+        expect_rows: 2
+        expect_columns: {resource_name: virtualMachineName, state: Available, title: Available, reason_type: Unplanned, ts: "2016-03-29T09:12:00Z", recently_resolved: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/resourcehealth/availability-statuses/list-by-subscription-id
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_monitor_resource_health_history
+    title: Resource Health history of one resource
+    description: >-
+      Historical availability transitions and impacting events of one resource (GET {resource_id}/providers/
+      Microsoft.ResourceHealth/availabilityStatuses, api-version 2025-05-01): one row per state period with state,
+      title, summary, reason, ts (when it began) and any service-impacting Azure incident linked to it. resource_id
+      is required. Answers 'was this VM / app / database down, and was it Azure's fault?'.
+    kind: events
+    request:
+      method: GET
+      path: "/{{ filters.resource_id.strip('/') }}/providers/Microsoft.ResourceHealth/availabilityStatuses"
+      query:
+        api-version: "2025-05-01"
+    filters:
+      - {column: resource_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Full ARM id of the resource", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Compute/virtualMachines/web-vm-01"]}
+    pagination: {type: next_url, next_url_path: "$.nextLink", max_pages: 5}
+    response:
+      rows_path: "$.value[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "properties.occuredTime", transform: auto_time, description: "When this state began"}
+      - {name: state, path: "properties.availabilityState"}
+      - {name: title, path: "properties.title"}
+      - {name: summary, path: "properties.summary"}
+      - {name: detailed_status, path: "properties.detailedStatus"}
+      - {name: reason_type, path: "properties.reasonType"}
+      - {name: reason_chronicity, path: "properties.reasonChronicity"}
+      - {name: context, path: "properties.context"}
+      - {name: category, path: "properties.category"}
+      - {name: root_cause_attributed_at, type: TIMESTAMP, path: "properties.rootCauseAttributionTime", transform: auto_time}
+      - {name: resolution_eta, type: TIMESTAMP, path: "properties.resolutionETA", transform: auto_time}
+      - {name: service_impacting_events, type: JSON, path: "properties.serviceImpactingEvents", description: "Linked Azure incidents [{eventStartTime, status, incidentProperties {title, service, region, incidentType}}]"}
+      - {name: azure_incident, path: "properties.serviceImpactingEvents[0].incidentProperties.title", description: "Title of the first linked Azure incident"}
+      - {name: name, path: name}
+      - {name: resource_id, filter_only: true}
+    max_rows: 2000
+    sort_hint: "current state first, then older transitions"
+    pitfalls:
+      - "History covers a limited period (typically the last weeks); older outages are not listed."
+      - "A row with no state (availability_state null) describes an availability-impacting event rather than a state."
+    examples:
+      - sql: >-
+          SELECT ts, state, title, reason_type, context, azure_incident FROM azure_monitor_resource_health_history
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Compute/virtualMachines/web-vm-01'
+          ORDER BY ts DESC
+        description: Was the VM unavailable, and was an Azure incident attributed?
+    fixtures:
+      - file: resource_health_history.json
+        filters: {resource_id: "/subscriptions/4abcdefgh-ijkl-mnop-qrstuvwxyz/resourceGroups/rhctestenv/providers/Microsoft.ClassicCompute/virtualMachines/rhctestenvV1PI"}
+        note: "Verbatim 200 response of the official example 'GetHealthHistoryByResource' (Availability Statuses - List 2025-05-01, AvailabilityStatuses_List.json)."
+        expect_rows: 2
+        expect_columns: {ts: "2016-03-29T09:12:00Z", state: Unavailable, reason_type: Unplanned, azure_incident: "Virtual Machines - West Europe [West Europe]"}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/resourcehealth/availability-statuses/list
+
+roles:
+  metrics:
+    table: azure_monitor_metrics
+    columns: {ts: ts, value: value, metric: metric, labels: dimensions}
+    notes: "Platform metrics of one resource: resource_id + metric are required (azure_monitor_metric_definitions lists the names); azure_monitor_subscription_metrics ranks all resources of a type in a region."
+  active_alerts:
+    table: azure_monitor_alerts
+    filters: {state: Fired}
+    columns: {id: id, name: title, title: title, state: state, ts: ts, severity: severity, labels: target_resource, url: url, query: alert_rule}
+  alert_history:
+    table: azure_monitor_alerts
+    filters:
+      alert_rule: "{{ rule_id if (rule_id and '/' in rule_id) else '' }}"
+    columns: {ts: ts, name: title, title: title, state: state, severity: severity}
+    notes: "Alert instances of the rule over the window (Fired/Resolved times); azure_monitor_alert_history has the state changes of one instance by alert_id."
+  alert_rules:
+    - table: azure_monitor_metric_alert_rules
+      columns: {id: id, name: name, query: query, threshold: threshold, url: url}
+      notes: "Metric alerts: threshold, operator, time_aggregation, window_size describe the rule."
+    - table: azure_monitor_log_alert_rules
+      query_language: kql
+      columns: {id: id, name: name, query: query, threshold: threshold, url: url}
+      notes: "Log search alerts: query is KQL - rerun it with azure_log_analytics_query."
+    - table: azure_monitor_activity_log_alert_rules
+      columns: {id: id, name: name, query: query, url: url}
+      notes: "Activity log / Service Health / Resource Health alert rules."
+  change_events:
+    - table: azure_monitor_resource_changes
+      columns: {ts: ts, service: resource_name, title: title, author: changed_by, url: url, type: change_type}
+      notes: "Property-level config changes (14 days)."
+    - table: azure_monitor_activity_log
+      columns: {ts: ts, service: resource_name, title: title, author: author, type: category}
+      notes: "Control-plane operations (deployments, restarts, scale, RBAC); filter category = 'Administrative' and status in SQL."
+  hosts:
+    table: azure_monitor_resources
+    filters: {type: microsoft.compute/virtualmachines}
+    columns: {host: name, health: power_state, id: id, url: url}
+  services:
+    table: azure_monitor_resources
+    filters: {type: "{{ ['microsoft.web/sites', 'microsoft.containerservice/managedclusters', 'microsoft.app/containerapps'] }}"}
+    columns: {service: name, id: id, url: url, type: type}
+    notes: "App Service / Functions apps, AKS clusters and Container Apps."

@@ -1,0 +1,4 @@
+[
+  "get /api",
+  "post /api/orders"
+]

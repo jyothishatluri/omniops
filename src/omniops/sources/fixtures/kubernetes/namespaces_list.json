@@ -1,0 +1,64 @@
+{
+ "kind": "NamespaceList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "batch",
+    "uid": "ns0000000-0000-4000-8000-000000000000",
+    "creationTimestamp": "2026-10-01T08:00:00Z",
+    "labels": {
+     "kubernetes.io/metadata.name": "batch"
+    }
+   },
+   "spec": {
+    "finalizers": [
+     "kubernetes"
+    ]
+   },
+   "status": {
+    "phase": "Active"
+   }
+  },
+  {
+   "metadata": {
+    "name": "datastore",
+    "uid": "ns1000000-0000-4000-8000-000000000000",
+    "creationTimestamp": "2026-10-01T08:00:00Z",
+    "labels": {
+     "kubernetes.io/metadata.name": "datastore"
+    }
+   },
+   "spec": {
+    "finalizers": [
+     "kubernetes"
+    ]
+   },
+   "status": {
+    "phase": "Active"
+   }
+  },
+  {
+   "metadata": {
+    "name": "shop",
+    "uid": "ns2000000-0000-4000-8000-000000000000",
+    "creationTimestamp": "2026-10-01T08:00:00Z",
+    "labels": {
+     "kubernetes.io/metadata.name": "shop"
+    }
+   },
+   "spec": {
+    "finalizers": [
+     "kubernetes"
+    ]
+   },
+   "status": {
+    "phase": "Active"
+   }
+  }
+ ]
+}

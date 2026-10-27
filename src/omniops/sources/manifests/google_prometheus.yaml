@@ -1,0 +1,219 @@
+# Google Cloud Managed Service for Prometheus (GMP), queried through the Cloud Monitoring API's
+# Prometheus HTTP API (also serves Cloud Monitoring system metrics via PromQL). Extends
+# templates/prometheus.yaml; rules, alerts and targets are not part of this API and are dropped.
+# Docs: https://cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui
+#       https://cloud.google.com/monitoring/api/ref_v3/rest/v1/projects.location.prometheus.api.v1
+source: google_prometheus
+display_name: Google Cloud Managed Service for Prometheus
+vendor: Google Cloud
+extends: prometheus
+description: >-
+  Google Managed Prometheus / Cloud Monitoring PromQL API for a metrics scope: range and instant queries,
+  series, labels, label values, metadata and exemplars (OAuth2 / service account).
+docs_url: https://cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui
+categories: [metrics]
+base_url: "https://monitoring.googleapis.com/v1/projects/{{ env.GMP_PROJECT_ID }}/location/global/prometheus"
+env:
+  - {name: GMP_PROJECT_ID, description: "Scoping project of the metrics scope (data from every project in the scope is visible)"}
+  - {name: GMP_CREDENTIALS_FILE, description: "Optional service-account JSON key path; Application Default Credentials otherwise (needs roles/monitoring.viewer)"}
+required_env: [GMP_PROJECT_ID]
+auth:
+  type: gcp_service_account
+  scope: https://www.googleapis.com/auth/monitoring.read
+  credentials_file: "{{ env.GMP_CREDENTIALS_FILE }}"
+rate_limit:
+  concurrency: 4
+  notes: "Cloud Monitoring API read quotas apply per project (time-series queries per minute); 429 RESOURCE_EXHAUSTED when exceeded."
+retention:
+  metrics: "24 months (Monarch)"
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error: fix the expression; do not retry unchanged"}
+  - {path: "$.error.message", non_empty: true, message: "$.error.message", hint: "Google API error (auth, quota or unsupported parameter)"}
+query_languages:
+  promql: >-
+    PromQL (evaluated by Monarch). Selectors use braces: metric{label="value"}. rate()/increase() need a
+    range vector [5m]. Aggregate with sum by (label) (...). GMP series carry project_id, location, cluster,
+    namespace, job and instance labels. Cloud Monitoring system metrics are queryable too: replace the first
+    '/' with ':' and other special characters with '_' (kubernetes.io/container/cpu/core_usage_time ->
+    kubernetes_io:container_cpu_core_usage_time) and add monitored_resource="k8s_container" to disambiguate.
+pitfalls:
+  - "An unknown metric or label returns 0 series, not an error: list metric names first (label = '__name__'), then filter."
+  - "/api/v1/label/<name>/values only works for __name__, or when match is an exact __name__ matcher (e.g. {__name__=\"up\"}); otherwise it errors/returns nothing."
+  - "/api/v1/series needs match[] and does not support regex matching on __name__; it is GET only."
+  - "There is no rules / alerts / targets API here: managed rule evaluation and Cloud Monitoring alerting policies live elsewhere."
+  - "The project in the URL must be the scoping project of the metrics scope; data from projects outside the scope is silently absent."
+drop_tables: [google_prometheus_alerts, google_prometheus_rules, google_prometheus_targets]
+tables:
+  - name: google_prometheus_query_range
+    description: >-
+      Evaluate PromQL over a time range (projects.location.prometheus.api.v1.query_range). One row per (series,
+      timestamp). Filter on query (required) and ts; optional step (s).
+    examples:
+      - sql: >-
+          SELECT labels->>'namespace' AS namespace, max(value) AS peak, arg_max(ts, value) AS peak_at
+          FROM google_prometheus_query_range
+          WHERE query = 'sum by (namespace) (rate(http_requests_total{code=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per namespace over an hour.
+      - sql: >-
+          SELECT ts, labels->>'container_name' AS container, value FROM google_prometheus_query_range
+          WHERE query = 'sum by (container_name) (rate(kubernetes_io:container_cpu_core_usage_time{monitored_resource="k8s_container",namespace_name="checkout"}[5m]))'
+            AND ts >= TIMESTAMP '2026-10-01 10:00:00' AND ts < TIMESTAMP '2026-10-01 12:00:00'
+        description: GKE system metric (container CPU) through PromQL.
+    tests:
+      - {sql: "SELECT count(*) AS n FROM google_prometheus_query_range WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_range.json
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+        note: "GMP docs show only an instant example; range shape from the Prometheus HTTP API docs range example (GMP: 'supports the upstream Prometheus HTTP API')."
+      - file: query_error.json
+        filters: {query: 'up{job=}'}
+        expect_error: "parse error"
+        note: "Built strictly from the documented Prometheus API error envelope (status=error, errorType, error); proves the 2xx error rule fires when a proxy/gateway answers 200 with an error body. Message text illustrative."
+    ui_link: null
+    docs_url: https://cloud.google.com/monitoring/api/ref_v3/rest/v1/projects.location.prometheus.api.v1/query_range
+
+  - name: google_prometheus_query
+    description: Evaluate PromQL at one instant (projects.location.prometheus.api.v1.query; evaluation time = upper bound of ts). One row per series.
+    examples:
+      - sql: "SELECT labels->>'cluster' AS cluster, labels->>'instance' AS instance FROM google_prometheus_query WHERE query = 'up == 0'"
+        description: Targets that are down, with their cluster.
+    tests:
+      - {sql: "SELECT value FROM google_prometheus_query WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_vector.json
+        filters: {query: up}
+        expect_rows: 1
+        expect_columns: {value: 1.0, metric: up, ts: "2021-10-22T03:27:19Z"}
+        note: "GMP 'Query using the Prometheus API' doc example response for query=up."
+    docs_url: https://cloud.google.com/monitoring/api/ref_v3/rest/v1/projects.location.prometheus.api.v1/query
+
+  - name: google_prometheus_series
+    description: >-
+      Label sets of series matching a selector (projects.location.prometheus.api.v1.series, GET only). match is
+      required and must not use a regex on __name__.
+    request:
+      method: GET
+      path: /api/v1/series
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    fixtures:
+      - file: series.json
+        filters: {match: up}
+        expect_rows: 3
+        expect_columns: {metric: up}
+        note: "Prometheus HTTP API docs series example (GMP: /api/v1/series supported with GET)."
+    examples:
+      - sql: "SELECT DISTINCT labels->>'cluster' AS cluster, labels->>'namespace' AS namespace FROM google_prometheus_series WHERE match = 'up'"
+    docs_url: https://cloud.google.com/monitoring/api/ref_v3/rest/v1/projects.location.prometheus.api.v1/series
+
+  - name: google_prometheus_label_values
+    description: >-
+      Values of one label (projects.location.prometheus.api.v1.label.values). Only works for label = '__name__'
+      (all metric names) or with match set to an exact __name__ matcher such as {__name__="http_requests_total"}.
+    filters:
+      - {column: label, required: true, description: "Label name; '__name__' lists metric names", examples: [__name__]}
+      - {column: match, description: "Required unless label = '__name__': exact metric selector, e.g. {__name__=\"up\"}", examples: ['{__name__="http_requests_total"}']}
+    fixtures:
+      - file: label_values.json
+        filters: {label: code, match: '{__name__="http_requests_total"}'}
+        expect_rows: 2
+        expect_columns: {value: "200"}
+        note: "Prometheus HTTP API docs label-values example (GMP: partially supported endpoint)."
+    examples:
+      - sql: "SELECT value AS metric FROM google_prometheus_label_values WHERE label = '__name__' AND value LIKE 'http_%'"
+        description: Find metric names.
+      - sql: "SELECT value AS namespace FROM google_prometheus_label_values WHERE label = 'namespace' AND match = '{__name__=\"up\"}'"
+        description: Namespaces that report the up metric.
+    docs_url: https://cloud.google.com/monitoring/api/ref_v3/rest/v1/projects.location.prometheus.api.v1.label/values
+
+  - name: google_prometheus_metric_metadata
+    description: Type / help / unit per metric (projects.location.prometheus.api.v1.metadata.list).
+    fixtures:
+      - file: metadata.json
+        expect_rows: 3
+        expect_columns: {metric: cortex_ring_tokens, type: gauge}
+        note: "Prometheus HTTP API docs metadata example (GMP: /api/v1/metadata fully supported)."
+    examples:
+      - sql: "SELECT metric, type, help FROM google_prometheus_metric_metadata WHERE metric = 'http_requests_total'"
+    docs_url: https://cloud.google.com/monitoring/api/ref_v3/rest/v1/projects.location.prometheus.api.v1.metadata/list
+
+  - name: google_prometheus_labels
+    title: Label names
+    description: Label names (projects.location.prometheus.api.v1.labels), optionally scoped by a selector.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/labels
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: match, description: "Optional series selector", examples: ['http_requests_total']}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT label FROM google_prometheus_labels WHERE match = 'http_requests_total'"
+    fixtures:
+      - file: labels.json
+        expect_rows: 21
+        expect_columns: {label: __name__}
+        note: "Prometheus HTTP API docs label-names example (GMP: /api/v1/labels fully supported)."
+    docs_url: https://cloud.google.com/monitoring/api/ref_v3/rest/v1/projects.location.prometheus.api.v1/labels
+
+  - name: google_prometheus_exemplars
+    title: Exemplars (metric -> trace links)
+    description: >-
+      Exemplars of series selected by a PromQL expression (projects.location.prometheus.api.v1.query_exemplars):
+      one row per exemplar with trace_id. Only histogram metrics carry exemplars in GMP.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/v1/query_exemplars
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression (histogram metric)", examples: ['http_request_duration_seconds_bucket{service="checkout"}']}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.data[*]"
+      expand:
+        - {explode: exemplars, as: e}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@e.timestamp", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "@e.value"}
+      - {name: trace_id, expr: "e.labels.trace_id or e.labels.traceID or e.labels.traceId"}
+      - {name: metric, path: "seriesLabels.__name__"}
+      - {name: service, expr: "_.seriesLabels.service or _.seriesLabels.service_name or _.seriesLabels.job"}
+      - {name: labels, type: JSON, path: seriesLabels}
+      - {name: exemplar_labels, type: JSON, path: "@e.labels"}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "GMP ingests exemplars only on histogram metrics; counters never return exemplars."
+    examples:
+      - sql: >-
+          SELECT ts, value, trace_id FROM google_prometheus_exemplars
+          WHERE query = 'http_request_duration_seconds_bucket{service="checkout"}' ORDER BY value DESC LIMIT 10
+        description: Traces behind the slowest checkout requests (Cloud Trace ids).
+    fixtures:
+      - file: exemplars.json
+        filters: {query: test_exemplar_metric_total}
+        expect_rows: 3
+        expect_columns: {trace_id: EpTxMJ40fUus7aGY, value: 6.0}
+        note: "Prometheus HTTP API docs exemplars example (GMP: /api/v1/query_exemplars fully supported)."
+    docs_url: https://cloud.google.com/monitoring/api/ref_v3/rest/v1/projects.location.prometheus.api.v1/query_exemplars
+roles:
+  metrics: {table: google_prometheus_query_range, query_language: promql}

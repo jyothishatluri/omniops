@@ -1,0 +1,59 @@
+{
+  "errorGroupStats": [
+    {
+      "group": {
+        "name": "projects/my-project/groups/CNSgkpnppqKCUw",
+        "groupId": "CNSgkpnppqKCUw",
+        "trackingIssues": [{"url": "https://issues.example.com/PAY-1234"}],
+        "resolutionStatus": "OPEN"
+      },
+      "count": "1240",
+      "affectedUsersCount": "87",
+      "timedCounts": [
+        {"count": "40", "startTime": "2026-10-20T13:58:00Z", "endTime": "2026-10-20T13:59:00Z"},
+        {"count": "610", "startTime": "2026-10-20T14:01:00Z", "endTime": "2026-10-20T14:02:00Z"},
+        {"count": "590", "startTime": "2026-10-20T14:02:00Z", "endTime": "2026-10-20T14:03:00Z"}
+      ],
+      "firstSeenTime": "2026-10-20T13:58:40Z",
+      "lastSeenTime": "2026-10-20T14:02:59Z",
+      "affectedServices": [
+        {"service": "checkout", "version": "checkout-00042-xyz", "resourceType": "cloud_run_revision"}
+      ],
+      "numAffectedServices": 1,
+      "representative": {
+        "eventTime": "2026-10-20T14:02:05.123Z",
+        "serviceContext": {"service": "checkout", "version": "checkout-00042-xyz", "resourceType": "cloud_run_revision"},
+        "message": "java.lang.NullPointerException: cart is null\n\tat com.example.cart.CartService.reserve(CartService.java:88)\n\tat com.example.api.CheckoutController.post(CheckoutController.java:41)",
+        "context": {
+          "httpRequest": {"method": "POST", "url": "https://shop.example.com/api/checkout", "userAgent": "Mozilla/5.0", "responseStatusCode": 500, "remoteIp": "203.0.113.10"},
+          "reportLocation": {"filePath": "CartService.java", "lineNumber": 88, "functionName": "com.example.cart.CartService.reserve"}
+        }
+      }
+    },
+    {
+      "group": {
+        "name": "projects/my-project/groups/CJ7f0eT8xsGW2QE",
+        "groupId": "CJ7f0eT8xsGW2QE",
+        "resolutionStatus": "ACKNOWLEDGED"
+      },
+      "count": "12",
+      "affectedUsersCount": "0",
+      "timedCounts": [
+        {"count": "12", "startTime": "2026-10-20T13:10:00Z", "endTime": "2026-10-20T13:11:00Z"}
+      ],
+      "firstSeenTime": "2026-09-02T08:00:01Z",
+      "lastSeenTime": "2026-10-20T13:10:44Z",
+      "affectedServices": [
+        {"service": "checkout", "version": "checkout-00041-abc", "resourceType": "cloud_run_revision"}
+      ],
+      "numAffectedServices": 1,
+      "representative": {
+        "eventTime": "2026-10-20T13:10:44Z",
+        "serviceContext": {"service": "checkout", "version": "checkout-00041-abc"},
+        "message": "redis.exceptions.TimeoutError: Timeout reading from socket\nTraceback (most recent call last):\n  File \"/app/cache.py\", line 31, in get"
+      }
+    }
+  ],
+  "nextPageToken": "",
+  "timeRangeBegin": "2026-10-20T08:03:00Z"
+}

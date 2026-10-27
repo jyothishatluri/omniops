@@ -1,0 +1,37 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {
+              "timestamp": 1759322460512,
+              "message": "Payment request failed: java.net.SocketTimeoutException: Read timed out after 2000ms",
+              "level": "ERROR",
+              "entity.guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "entity.name": "checkout-service",
+              "hostname": "ip-10-0-3-17.ec2.internal",
+              "trace.id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span.id": "a2fb4a1d1a96d312",
+              "logtype": "application"
+            },
+            {
+              "timestamp": 1759322401007,
+              "message": "connection pool exhausted (max=50)",
+              "log.level": "warn",
+              "service.name": "checkout-service",
+              "host": "checkout-7f9c6b-2xk4p",
+              "trace.id": "0af7651916cd43dd8448eb211c80319c"
+            }
+          ],
+          "metadata": {
+            "eventTypes": ["Log"],
+            "facets": null,
+            "messages": [],
+            "timeWindow": {"begin": 1759321800000, "end": 1759323600000, "since": "1759321800000", "until": "1759323600000"}
+          }
+        }
+      }
+    }
+  }
+}

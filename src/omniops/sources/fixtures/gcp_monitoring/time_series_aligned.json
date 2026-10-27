@@ -1,0 +1,25 @@
+{
+  "timeSeries": [
+    {
+      "metric": {"labels": {"instance_name": "your-first-instance"}, "type": "compute.googleapis.com/instance/cpu/utilization"},
+      "points": [
+        {"interval": {"startTime": "2024-03-01T00:20:00.000Z", "endTime": "2024-03-01T00:20:00.000Z"}, "value": {"doubleValue": 0.06688481346044381}},
+        {"interval": {"startTime": "2024-03-01T00:10:00.000Z", "endTime": "2024-03-01T00:10:00.000Z"}, "value": {"doubleValue": 0.06786652821310177}}
+      ]
+    },
+    {
+      "metric": {"labels": {"instance_name": "your-second-instance"}, "type": "compute.googleapis.com/instance/cpu/utilization"},
+      "points": [
+        {"interval": {"startTime": "2024-03-01T00:20:00.000Z", "endTime": "2024-03-01T00:20:00.000Z"}, "value": {"doubleValue": 0.04144239874207415}},
+        {"interval": {"startTime": "2024-03-01T00:10:00.000Z", "endTime": "2024-03-01T00:10:00.000Z"}, "value": {"doubleValue": 0.04045793689050091}}
+      ]
+    },
+    {
+      "metric": {"labels": {"instance_name": "your-third-instance"}, "type": "compute.googleapis.com/instance/cpu/utilization"},
+      "points": [
+        {"interval": {"startTime": "2024-03-01T00:20:00.000Z", "endTime": "2024-03-01T00:20:00.000Z"}, "value": {"doubleValue": 0.029650046587339607}},
+        {"interval": {"startTime": "2024-03-01T00:10:00.000Z", "endTime": "2024-03-01T00:10:00.000Z"}, "value": {"doubleValue": 0.03053874224715402}}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+[
+ {
+  "id": "d29d9df3-9125-4441-912c-70b05f86f973",
+  "status": {
+   "state": "active"
+  },
+  "updatedAt": "2021-10-22T19:32:11.763Z",
+  "comment": "hello-world",
+  "createdBy": "test-person",
+  "endsAt": "2023-07-24T01:05:36.000Z",
+  "matchers": [
+   {
+    "isEqual": true,
+    "isRegex": true,
+    "name": "job",
+    "value": "hello"
+   }
+  ],
+  "startsAt": "2021-10-22T19:32:11.763Z"
+ }
+]

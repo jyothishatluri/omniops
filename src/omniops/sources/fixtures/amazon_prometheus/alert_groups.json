@@ -1,0 +1,33 @@
+[
+ {
+  "alerts": [
+   {
+    "annotations": {
+     "summary": "this is a test alert used for demo purposes"
+    },
+    "endsAt": "2021-10-21T22:07:31.501Z",
+    "fingerprint": "375eab7b59892505",
+    "receivers": [
+     {
+      "name": "sns-0"
+     }
+    ],
+    "startsAt": "2021-10-21T22:02:31.501Z",
+    "status": {
+     "inhibitedBy": [],
+     "silencedBy": [],
+     "state": "unprocessed"
+    },
+    "updatedAt": "2021-10-21T22:02:31.501Z",
+    "generatorURL": "https://www.amazon.com/",
+    "labels": {
+     "alertname": "test-alert"
+    }
+   }
+  ],
+  "labels": {},
+  "receiver": {
+   "name": "sns-0"
+  }
+ }
+]

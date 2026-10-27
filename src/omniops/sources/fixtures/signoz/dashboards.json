@@ -1,0 +1,11 @@
+{
+  "status": "success",
+  "data": {
+    "dashboards": [
+      {"id": "019a1f6e-2c4b-7d1e-9a43-5f0b8c1d2e3f", "orgId": "0196f794-ff30-7bee-a5f4-ef5ad3157100", "name": "checkout-overview", "spec": {"display": {"name": "Checkout overview", "description": "RED metrics and dependencies of the checkout service"}}, "tags": [{"key": "team", "value": "payments"}], "source": "user", "schemaVersion": "v6", "legacy": false, "locked": false, "image": "", "createdAt": "2025-03-02T10:00:00Z", "createdBy": "alice@signoz.io", "updatedAt": "2026-09-28T08:30:00Z", "updatedBy": "bob@signoz.io"}
+    ],
+    "tags": [{"key": "team", "value": "payments"}],
+    "reservedKeywords": ["name", "created_by", "updated_by"],
+    "total": 1
+  }
+}

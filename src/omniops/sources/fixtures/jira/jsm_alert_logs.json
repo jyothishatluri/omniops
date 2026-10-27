@@ -1,0 +1,1 @@
+{"values":[{"logTime":"2024-01-05T07:06:47.958Z","logType":"system","log":"Assigning owner team [Dream] to alert because it is the only team on the alert and alert is not created via team integration.","owner":"system"}],"links":{"next":"/v1/alerts/4513b7ea-3b91-438f-b7e4-e3e54af9147c/logs?after=1492000072838_1492000072838234593"}}

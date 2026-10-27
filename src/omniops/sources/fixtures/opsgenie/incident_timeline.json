@@ -1,0 +1,53 @@
+{
+ "data": {
+  "entries": [
+   {
+    "id": "4a9alp7-b5d2-4ecb-b82c-e3b5286829cf",
+    "group": "custom",
+    "type": "CustomUserEntry",
+    "eventTime": "2019-01-30T16:55:00Z",
+    "hidden": false,
+    "actor": {
+     "name": "API",
+     "type": "api"
+    },
+    "description": {
+     "name": "sample incident timeline entry 1",
+     "type": "plain_text"
+    },
+    "lastEdit": {
+     "editTime": "2019-01-30T16:55:00Z",
+     "actor": {
+      "name": "API",
+      "type": "api"
+     }
+    }
+   },
+   {
+    "id": "3a9alp7-b5d2-4ecb-b82c-e3b5286829cf",
+    "group": "incident",
+    "type": "CustomUserEntry",
+    "eventTime": "2019-01-29T16:55:00Z",
+    "hidden": false,
+    "actor": {
+     "name": "API",
+     "type": "api"
+    },
+    "description": {
+     "name": "sample incident timeline entry 2",
+     "type": "plain_text"
+    },
+    "lastEdit": {
+     "editTime": "2019-01-29T16:55:00Z",
+     "actor": {
+      "name": "API",
+      "type": "api"
+     }
+    }
+   }
+  ],
+  "nextOffset": "3a9alp7-b5d2-4ecb-b82c-e3b5286829cf"
+ },
+ "took": 0.853,
+ "requestId": "f9d1f3f3-4da5-4cba-b1e1-ece0alp0ebdf"
+}

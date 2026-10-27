@@ -1,0 +1,20 @@
+{
+  "_shards": {
+    "total": 2,
+    "successful": 2,
+    "failed": 0
+  },
+  "data_stream_count": 1,
+  "backing_indices": 1,
+  "total_store_size": "16.8kb",
+  "total_store_size_bytes": 17304,
+  "data_streams": [
+    {
+      "data_stream": "logs-app",
+      "backing_indices": 1,
+      "store_size": "16.8kb",
+      "store_size_bytes": 17304,
+      "maximum_timestamp": 1750673100000
+    }
+  ]
+}

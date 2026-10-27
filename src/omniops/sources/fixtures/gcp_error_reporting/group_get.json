@@ -1,0 +1,8 @@
+{
+  "name": "projects/my-project/groups/CNSgkpnppqKCUw",
+  "groupId": "CNSgkpnppqKCUw",
+  "trackingIssues": [
+    {"url": "https://issues.example.com/PAY-1234"}
+  ],
+  "resolutionStatus": "ACKNOWLEDGED"
+}

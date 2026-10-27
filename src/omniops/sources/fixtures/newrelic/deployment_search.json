@@ -1,0 +1,27 @@
+{
+  "data": {
+    "actor": {
+      "entity": {
+        "guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+        "name": "checkout-service",
+        "deploymentSearch": {
+          "results": [
+            {
+              "version": "1.2.3",
+              "entityGuid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "timestamp": 1759321800000,
+              "changelog": "https://github.com/example/checkout/releases/tag/v1.2.3",
+              "commit": "3f2c1a9",
+              "deepLink": "https://github.com/example/checkout/actions/runs/1",
+              "deploymentId": "4b6a3c2e-9d1f-4b8e-8a7c-2e5f6a1b9c0d",
+              "description": "Roll out retry budget change",
+              "deploymentType": "ROLLING",
+              "groupId": "release-2026-10-01",
+              "user": "ci-bot"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

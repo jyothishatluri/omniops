@@ -1,0 +1,52 @@
+{
+ "alerts": [
+  {
+   "alert_id": "01J9ZK3Q5W8R7T6Y5U4I3O2P1A",
+   "firing_status": "FIRING",
+   "severity": "CRITICAL",
+   "mute_status": "NOT_MUTED",
+   "triggered_at": "2026-10-01T11:52:00Z",
+   "signal": {
+    "service": "checkout"
+   },
+   "monitor_labels": {
+    "team": "payments",
+    "priority": "sev-1"
+   },
+   "monitor_slug": "checkout-error-rate",
+   "monitor_name": "Checkout error rate",
+   "collection_slug": "checkout",
+   "notification_policy_slug": "payments-oncall",
+   "notifier_slugs": [
+    "slack-payments"
+   ],
+   "external_connections": [],
+   "alert_title": "Checkout error rate critical for service=checkout"
+  },
+  {
+   "alert_id": "01J9ZJ0000AAAAAAAAAAAAAAAA",
+   "firing_status": "RESOLVED",
+   "severity": "WARN",
+   "mute_status": "NOT_MUTED",
+   "triggered_at": "2026-10-01T10:05:00Z",
+   "resolved_at": "2026-10-01T10:20:00Z",
+   "signal": {
+    "service": "cart"
+   },
+   "monitor_labels": {
+    "team": "payments"
+   },
+   "monitor_slug": "cart-latency",
+   "monitor_name": "Cart p99 latency",
+   "collection_slug": "cart",
+   "notification_policy_slug": "payments-oncall",
+   "notifier_slugs": [],
+   "external_connections": [],
+   "alert_title": "Cart p99 latency warn for service=cart"
+  }
+ ],
+ "total_count": "2",
+ "page": {
+  "next_token": ""
+ }
+}

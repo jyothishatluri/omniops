@@ -1,0 +1,576 @@
+# Grafana Mimir, Grafana Enterprise Metrics and Grafana Cloud Metrics (Mimir-backed).
+# Extends templates/prometheus.yaml: the query-frontend serves the Prometheus HTTP API under
+# <prometheus-http-prefix> (default /prometheus), plus Mimir-only cardinality / active-series APIs,
+# the ruler (/api/v1/rules, /api/v1/alerts) and the multi-tenant Alertmanager (API v2).
+# Docs: https://grafana.com/docs/mimir/latest/references/http-api/
+#       https://grafana.com/docs/grafana-cloud/send-data/metrics/metrics-prometheus/query-http-api/
+source: mimir
+display_name: Grafana Mimir / Grafana Cloud Metrics
+vendor: Grafana Labs
+extends: prometheus
+description: >-
+  Grafana Mimir (self-hosted, GEM or Grafana Cloud Metrics): PromQL range/instant queries, series, labels,
+  metadata, exemplars, cardinality, ruler rules/alerts and Alertmanager alerts/silences, per tenant.
+docs_url: https://grafana.com/docs/mimir/latest/references/http-api/
+categories: [metrics, alerts]
+base_url: "{{ env.MIMIR_URL.rstrip('/') }}{{ env.MIMIR_PROMETHEUS_PREFIX }}"
+env:
+  - name: MIMIR_URL
+    description: >-
+      Root URL of the Mimir gateway / query-frontend without any path, e.g. http://mimir-nginx.mimir.svc:80.
+      Grafana Cloud: the Prometheus host from the stack's Prometheus 'Details' page, e.g.
+      https://prometheus-prod-13-prod-us-east-0.grafana.net
+  - name: MIMIR_PROMETHEUS_PREFIX
+    description: "Mimir -http.prometheus-http-prefix. Default /prometheus (also correct for Grafana Cloud's Mimir-style URL)."
+    default: /prometheus
+  - name: MIMIR_ALERTMANAGER_PREFIX
+    description: "Mimir -http.alertmanager-http-prefix (default /alertmanager), appended to MIMIR_URL"
+    default: /alertmanager
+  - name: MIMIR_ALERTMANAGER_URL
+    description: "Optional full Alertmanager root if it is not MIMIR_URL + prefix (e.g. a separate Grafana Cloud alertmanager host)"
+  - name: MIMIR_TENANT_ID
+    description: >-
+      Tenant sent as X-Scope-OrgID (required when -auth.multitenancy-enabled=true; omit for Grafana Cloud).
+      Use 'tenant-a|tenant-b' for cross-tenant queries when tenant federation is enabled.
+  - name: MIMIR_USERNAME
+    description: "Basic-auth user. Grafana Cloud: the metrics instance ID (the 'User' on the Prometheus Details page)"
+  - name: MIMIR_PASSWORD
+    description: "Basic-auth password. Grafana Cloud: a Cloud access policy token with the metrics:read scope (glc_...)"
+    secret: true
+  - name: MIMIR_TOKEN
+    description: "Optional bearer token (GEM access token or an auth proxy). Ignored when MIMIR_USERNAME is set."
+    secret: true
+required_env: [MIMIR_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Basic ' ~ ((env.MIMIR_USERNAME ~ ':' ~ env.MIMIR_PASSWORD) | b64)) if env.MIMIR_USERNAME
+      else (('Bearer ' ~ env.MIMIR_TOKEN) if env.MIMIR_TOKEN else None) }}
+    X-Scope-OrgID: "{{ env.MIMIR_TENANT_ID or None }}"
+rate_limit:
+  concurrency: 6
+  notes: >-
+    Per-tenant read limits (max fetched series/chunks per query, -query-frontend.max-total-query-length,
+    -querier.max-query-lookback, max queriers per tenant) return 4xx/422 'limit' errors rather than 429. Grafana
+    Cloud applies plan limits per stack and returns 429 when exceeded.
+retention:
+  metrics: "per tenant: -compactor.blocks-retention-period (default 0 = keep forever); Grafana Cloud: 13 months on paid plans, 14 days on Free"
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL or limit error: fix the expression or narrow the range; do not retry unchanged"}
+ui_base_url: null
+query_languages:
+  promql: >-
+    PromQL (Mimir runs the Prometheus engine, or its streaming engine with identical semantics). Selectors use
+    braces: metric{label="value"}. rate()/increase() need a range vector [5m]. Aggregate with sum by (label)
+    (...). Histograms: histogram_quantile(0.95, sum by (le) (rate(x_bucket[5m]))); native histograms:
+    histogram_quantile(0.95, sum(rate(x[5m]))). Instant tables need vector results; wrap scalars with vector().
+pitfalls:
+  - "An unknown metric or label returns 0 series, not an error: list label values first (mimir_label_values), then filter."
+  - "Without X-Scope-OrgID on a multi-tenant Mimir every request fails with 401 'no org id'; a wrong tenant silently returns 0 series."
+  - "Grafana Cloud only accepts basic auth (instance ID : access-policy token with metrics:read); a bearer token returns 401."
+  - "Grafana Cloud does not expose every Mimir endpoint on the metrics host: the ruler (mimir_rules, mimir_alerts) and Alertmanager tables may answer 404 there; Grafana-managed rules live behind the stack URL (/api/prometheus/<datasource-uid>/api/v1/rules, a different credential) and are not covered here."
+  - "A gap in a series can be ingestion limits (discarded samples: per-tenant rate / series limits, out-of-order samples), not an outage. Check the tenant's cortex_discarded_samples_total / grafanacloud usage metrics before concluding a target was down."
+  - "Range queries are capped at ~11,000 points per series; the engine auto-sizes step to ~300 points. Very long ranges may hit -query-frontend.max-total-query-length (422)."
+  - "The query-frontend caches results (split by day, aligned when -query-frontend.align-queries-with-step); the newest ~10m (-query-frontend.max-cache-freshness) is always recomputed, so 'stale data' is rarely the cache."
+drop_tables: [mimir_targets]
+tables:
+  - name: mimir_query_range
+    description: >-
+      Evaluate a PromQL expression over a time range through the Mimir query-frontend
+      (<prefix>/api/v1/query_range). One row per (series, timestamp). Filter on query (required) and ts; optional
+      step (seconds). Warnings / info annotations (e.g. 'metric might not be a counter') are in the warnings column.
+    request:
+      method: GET
+      path: /api/v1/query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s, description: "Sample timestamp (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value (NaN/Inf preserved)"}
+      - {name: metric, path: "metric.__name__", description: "Metric name when the expression keeps it"}
+      - {name: labels, type: JSON, path: metric, description: "All series labels as JSON; use labels->>'job'"}
+      - {name: warnings, type: JSON, path: "$.warnings", description: "Response-level PromQL warnings (same on every row); non-null means the result may be incomplete or misleading"}
+      - {name: infos, type: JSON, path: "$.infos", description: "Info-level PromQL annotations (e.g. 'metric might not be a counter, name does not end in _total')"}
+      - {name: query, filter_only: true, description: "The PromQL expression"}
+      - {name: step, type: BIGINT, filter_only: true, description: "Step in seconds"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    pitfalls:
+      - "Use rate()/increase() on counters; raw counter values only ever go up."
+      - "Group with sum by (...) in PromQL before fetching; it is far cheaper than grouping millions of points in SQL."
+      - "Per-tenant max fetched series/chunks limits fail the whole query (422 'the query exceeded the maximum number of series'); add label filters instead of retrying."
+    examples:
+      - sql: >-
+          SELECT labels->>'job' AS job, max(value) AS peak, arg_max(ts, value) AS peak_at
+          FROM mimir_query_range
+          WHERE query = 'sum by (job) (rate(http_requests_total{code=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per job over an hour, and when it peaked.
+      - sql: >-
+          SELECT ts, value FROM mimir_query_range
+          WHERE query = 'histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{service="checkout"}[5m])))'
+            AND ts >= TIMESTAMP '2026-10-01 10:00:00' AND ts < TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: p99 latency of one service around an incident.
+    tests:
+      - {sql: "SELECT count(*) AS n FROM mimir_query_range WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_range.json
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+        note: "Prometheus HTTP API docs range-query example (Mimir docs: 'compatible with the Prometheus range query endpoint')."
+      - file: query_error.json
+        filters: {query: 'up{job=}'}
+        expect_error: "parse error"
+        note: "Built strictly from the documented Prometheus API error envelope (status=error, errorType, error); proves the 2xx error rule fires when a proxy/gateway answers 200 with an error body. Message text illustrative."
+    ui_link: null
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#range-query
+
+  - name: mimir_query
+    description: >-
+      Evaluate a PromQL expression at one instant (<prefix>/api/v1/query; ts upper bound = evaluation time,
+      default the analysis window end). One row per series.
+    request:
+      method: GET
+      path: /api/v1/query
+      query:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | epoch_s }}"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: warnings, type: JSON, path: "$.warnings", description: "Response-level PromQL warnings"}
+      - {name: infos, type: JSON, path: "$.infos", description: "Info-level PromQL annotations"}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT labels->>'instance' AS instance, labels->>'job' AS job FROM mimir_query WHERE query = 'up == 0'"
+        description: Targets that are down at the anchor time.
+      - sql: >-
+          SELECT labels->>'service' AS service, value AS error_ratio FROM mimir_query
+          WHERE query = 'sum by (service) (rate(http_requests_total{code=~"5.."}[5m])) / sum by (service) (rate(http_requests_total[5m])) > 0.01'
+          ORDER BY value DESC
+        description: Services with more than 1% errors right now.
+    tests:
+      - {sql: "SELECT value FROM mimir_query WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_vector.json
+        filters: {query: up}
+        expect_rows: 2
+        expect_columns: {value: 1.0, metric: up, ts: "2015-07-01T20:10:51Z"}
+        note: "Prometheus HTTP API docs instant-query example (Mimir docs: compatible with the Prometheus instant query endpoint)."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#instant-query
+
+  - name: mimir_series
+    description: >-
+      Label sets of series matching a selector in a time range (<prefix>/api/v1/series). Cheap discovery before
+      querying; times are approximate (block granularity).
+    fixtures:
+      - file: series.json
+        filters: {match: up}
+        expect_rows: 3
+        expect_columns: {metric: up}
+        note: "Prometheus HTTP API docs series example (Mimir docs link to it)."
+    examples:
+      - sql: "SELECT DISTINCT labels->>'job' AS job FROM mimir_series WHERE match = 'up'"
+        description: Which jobs exist.
+      - sql: "SELECT labels->>'pod' AS pod FROM mimir_series WHERE match = 'kube_pod_info{namespace=\"checkout\"}'"
+        description: Pods known in a namespace.
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#get-series-by-label-matchers
+
+  - name: mimir_label_values
+    description: >-
+      Values of one label (e.g. job, namespace, service) for the tenant (<prefix>/api/v1/label/{name}/values) -
+      use before filtering to confirm a value exists. May be served from the query results cache.
+    fixtures:
+      - file: label_values.json
+        filters: {label: code}
+        expect_rows: 2
+        expect_columns: {value: "200"}
+        note: "Prometheus HTTP API docs label-values example (Mimir docs link to it)."
+    examples:
+      - sql: "SELECT value AS service FROM mimir_label_values WHERE label = 'service' AND match = 'http_requests_total'"
+        description: Services that emit http_requests_total.
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#get-label-values
+
+  - name: mimir_metric_metadata
+    description: Type (counter/gauge/histogram), help and unit per metric, from metadata sent with remote write (<prefix>/api/v1/metadata).
+    pitfalls:
+      - "Mimir only knows metadata that the sender included in remote-write requests (served from ingesters); metrics written without metadata are simply absent."
+    fixtures:
+      - file: metadata.json
+        expect_rows: 3
+        expect_columns: {metric: cortex_ring_tokens, type: gauge}
+        note: "Prometheus HTTP API docs metadata example (Mimir docs: 'Prometheus-compatible metric metadata endpoint')."
+    examples:
+      - sql: "SELECT metric, type, help, unit FROM mimir_metric_metadata WHERE metric = 'http_requests_total'"
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#get-metric-metadata
+
+  - name: mimir_alerts
+    title: Ruler active alerts
+    description: >-
+      Alerts currently pending or firing as evaluated by the Mimir ruler for this tenant (<prefix>/api/v1/alerts).
+      For notification state (silenced / inhibited / receivers) use mimir_alertmanager_alerts.
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: my-alert, state: firing, value: 1.0, active_at: {not_null: true}}
+        note: "Prometheus HTTP API docs alerts example (Mimir docs: 'Prometheus-compatible rules endpoint to list all active alerts')."
+    examples:
+      - sql: "SELECT alertname, state, active_at, severity, labels FROM mimir_alerts WHERE state = 'firing' ORDER BY active_at"
+        description: Firing alerts, oldest first.
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#list-prometheus-alerts
+
+  - name: mimir_rules
+    title: Ruler alerting and recording rules
+    description: >-
+      Rules loaded in the Mimir ruler for this tenant (<prefix>/api/v1/rules), one row per rule with its PromQL
+      (the threshold is part of it), for-duration, health, last error and evaluation timing. Push down rule_name,
+      group_name, file (ruler namespace) and type to keep responses small.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/rules
+      query:
+        type: "{{ 'alert' if filters.type == 'alerting' else ('record' if filters.type == 'recording' else None) }}"
+        "rule_name[]": "{{ filters.rule_name }}"
+        "rule_group[]": "{{ filters.group_name }}"
+        "file[]": "{{ filters.file }}"
+        exclude_alerts: "{{ filters.exclude_alerts }}"
+        group_limit: 200
+    filters:
+      - {column: type, description: "alerting | recording (sent to the API as type=alert|record)", examples: [alerting]}
+      - {column: rule_name, ops: ["=", "in"], fan_out: false, description: "Exact rule name(s); for alerting rules this is the alertname", examples: [HighRequestLatency]}
+      - {column: group_name, ops: ["=", "in"], fan_out: false, description: "Exact rule group name(s)"}
+      - {column: file, ops: ["=", "in"], fan_out: false, description: "Ruler namespace(s) (Mimir's equivalent of a rule file)"}
+      - {column: exclude_alerts, type: BOOLEAN, description: "true = omit the active alerts attached to each rule (smaller response)"}
+    pagination: {type: cursor, cursor_path: "$.data.groupNextToken", cursor_param: query.group_next_token, max_pages: 10}
+    response:
+      rows_path: "$.data.groups[*]"
+      expand:
+        - {explode: rules, as: r}
+    columns:
+      - {name: group_name, path: name}
+      - {name: file, path: file, description: "Ruler namespace"}
+      - {name: group_interval_s, type: DOUBLE, path: interval}
+      - {name: rule_name, path: "@r.name"}
+      - {name: type, path: "@r.type", description: "alerting | recording"}
+      - {name: query, path: "@r.query", description: "PromQL expression (threshold is part of it)"}
+      - {name: duration_s, type: DOUBLE, path: "@r.duration", description: "for: duration in seconds"}
+      - {name: keep_firing_for_s, type: DOUBLE, path: "@r.keepFiringFor"}
+      - {name: state, path: "@r.state", description: "inactive | pending | firing (alerting rules)"}
+      - {name: health, path: "@r.health", description: "ok | err | unknown"}
+      - {name: last_error, path: "@r.lastError"}
+      - {name: last_evaluation, type: TIMESTAMP, path: "@r.lastEvaluation"}
+      - {name: evaluation_time_s, type: DOUBLE, path: "@r.evaluationTime"}
+      - {name: severity, path: "@r.labels.severity"}
+      - {name: labels, type: JSON, path: "@r.labels"}
+      - {name: annotations, type: JSON, path: "@r.annotations"}
+      - {name: active_alerts, type: JSON, path: "@r.alerts"}
+      - {name: exclude_alerts, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "Returns 422 when both alerting and recording evaluation are disabled for the tenant; 'warnings' when only one is."
+      - "health = err with a last_error means the rule is NOT evaluating: an alert that 'never fired' may simply be broken."
+    examples:
+      - sql: "SELECT rule_name, query, duration_s, state, health, last_error FROM mimir_rules WHERE rule_name = 'HighRequestLatency'"
+        description: Look up the alert rule that fired, with its full expression and health.
+      - sql: "SELECT group_name, rule_name, last_error FROM mimir_rules WHERE type = 'alerting' AND health <> 'ok'"
+        description: Alert rules that are failing to evaluate.
+    fixtures:
+      - file: rules.json
+        expect_rows: 2
+        expect_columns: {rule_name: HighRequestLatency, type: alerting, duration_s: 600.0, group_name: example, health: ok}
+        note: "Prometheus HTTP API docs rules example (Mimir docs: Prometheus-compatible rules endpoint)."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#list-prometheus-rules
+
+  - name: mimir_labels
+    title: Label names
+    description: Label names present in the tenant's series (<prefix>/api/v1/labels), optionally scoped by a selector.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/labels
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        limit: "{{ limit }}"
+    filters:
+      - {column: match, description: "Optional series selector to scope label names", examples: ['http_requests_total']}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: ".", description: "Label name"}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT label FROM mimir_labels WHERE match = 'http_requests_total' ORDER BY label"
+        description: Which labels http_requests_total carries (to pick a group-by).
+    fixtures:
+      - file: labels.json
+        expect_rows: 21
+        expect_columns: {label: __name__}
+        note: "Prometheus HTTP API docs label-names example (Mimir docs: #get-label-names links to it)."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#get-label-names
+
+  - name: mimir_exemplars
+    title: Exemplars (metric -> trace links)
+    description: >-
+      Exemplars of the series selected by a PromQL expression in a time range (<prefix>/api/v1/query_exemplars):
+      one row per exemplar with trace_id, value and timestamp. Use it to jump from a latency or error spike to
+      concrete traces. Returns no rows unless exemplar storage is enabled for the tenant.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/v1/query_exemplars
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression; exemplars of the selected series are returned", examples: ['http_request_duration_seconds_bucket{service="checkout"}']}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.data[*]"
+      expand:
+        - {explode: exemplars, as: e}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@e.timestamp", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "@e.value"}
+      - {name: trace_id, expr: "e.labels.trace_id or e.labels.traceID or e.labels.traceId"}
+      - {name: span_id, expr: "e.labels.span_id or e.labels.spanID or e.labels.spanId"}
+      - {name: metric, path: "seriesLabels.__name__"}
+      - {name: service, expr: "_.seriesLabels.service or _.seriesLabels.service_name or _.seriesLabels.job"}
+      - {name: labels, type: JSON, path: seriesLabels, description: "Series labels"}
+      - {name: exemplar_labels, type: JSON, path: "@e.labels"}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Exemplar storage is off by default in Mimir (-ingester.max-global-exemplars-per-user = 0): empty means 'not stored', not 'no slow requests'."
+      - "Exemplars live only in ingesters (recent data); older ranges return nothing."
+    examples:
+      - sql: >-
+          SELECT ts, value AS latency_s, trace_id FROM mimir_exemplars
+          WHERE query = 'http_request_duration_seconds_bucket{service="checkout"}'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:50:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY value DESC LIMIT 10
+        description: Traces behind the slowest checkout requests during the spike.
+    fixtures:
+      - file: exemplars.json
+        filters: {query: test_exemplar_metric_total}
+        expect_rows: 3
+        expect_columns: {trace_id: EpTxMJ40fUus7aGY, value: 6.0, service: bar, ts: "2020-09-14T15:22:25Z"}
+        note: "Prometheus HTTP API docs exemplars example (Mimir docs: compatible with the Prometheus exemplar query endpoint)."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#exemplar-query
+
+  - name: mimir_active_series
+    title: Active series by selector
+    description: >-
+      Label sets of series that received samples recently (-ingester.active-series-metrics-idle-timeout) matching a
+      selector (<prefix>/api/v1/cardinality/active_series). Use it to see whether a target is still sending data
+      right now, or what a cardinality spike consists of. Disabled unless -querier.cardinality-analysis-enabled.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/cardinality/active_series
+      query:
+        selector: "{{ filters.selector }}"
+    filters:
+      - {column: selector, required: true, description: "PromQL series selector (mandatory)", examples: ['up{job="checkout"}']}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: metric, path: "__name__"}
+      - {name: labels, type: JSON, path: ".", description: "Series labels"}
+      - {name: selector, filter_only: true}
+    pitfalls:
+      - "Disabled by default (404/400) unless -querier.cardinality-analysis-enabled; not cached; can be expensive for broad selectors."
+    examples:
+      - sql: "SELECT labels->>'instance' AS instance FROM mimir_active_series WHERE selector = 'up{job=\"checkout\"}'"
+        description: Which checkout instances are still reporting.
+    fixtures:
+      - file: active_series.json
+        filters: {selector: up}
+        expect_rows: 3
+        expect_columns: {metric: up}
+        note: "Mimir HTTP API docs 'Get active series by selector' example response."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#get-active-series-by-selector
+
+  - name: mimir_cardinality_label_names
+    title: Label-name cardinality
+    description: >-
+      Distinct value counts per label name across ingesters (<prefix>/api/v1/cardinality/label_names), sorted by
+      label_values_count desc. Find the label that exploded (cardinality incidents, ingestion limits).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/cardinality/label_names
+      query:
+        selector: "{{ filters.selector }}"
+        count_method: "{{ filters.count_method }}"
+        limit: "{{ [limit or 100, 500] | min }}"
+    filters:
+      - {column: selector, description: "Optional PromQL selector to restrict the analysed series", examples: ['{job="checkout"}']}
+      - {column: count_method, description: "inmemory (default: open TSDB heads) | active (series with a recent sample)", examples: [active]}
+    response:
+      rows_path: "$.cardinality[*]"
+    columns:
+      - {name: label_name, path: label_name}
+      - {name: label_values_count, type: BIGINT, path: label_values_count}
+      - {name: label_names_count, type: BIGINT, path: "$.label_names_count", description: "Total label names (same on every row)"}
+      - {name: label_values_count_total, type: BIGINT, path: "$.label_values_count_total", description: "Total label values (same on every row)"}
+      - {name: selector, filter_only: true}
+      - {name: count_method, filter_only: true}
+    pitfalls:
+      - "Disabled unless -querier.cardinality-analysis-enabled; limit is capped at 500 (default 20)."
+      - "inmemory counts can change abruptly when ingesters cut a block; use count_method = 'active' to compare over time."
+    examples:
+      - sql: "SELECT label_name, label_values_count FROM mimir_cardinality_label_names WHERE count_method = 'active' ORDER BY label_values_count DESC LIMIT 10"
+        description: Highest-cardinality labels right now.
+    fixtures:
+      - file: cardinality_label_names.json
+        expect_rows: 3
+        expect_columns: {label_name: pod, label_values_count: 3000, label_names_count: 3}
+        note: "Built strictly from the Mimir docs 'Label names cardinality' response schema (the docs give no example)."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#label-names-cardinality
+
+  - name: mimir_cardinality_label_values
+    title: Series count per label value
+    description: >-
+      For each requested label name, the series count per value (<prefix>/api/v1/cardinality/label_values),
+      sorted by series_count desc. One row per (label_name, label_value).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/cardinality/label_values
+      query:
+        "label_names[]": "{{ filters.label_name }}"
+        selector: "{{ filters.selector }}"
+        count_method: "{{ filters.count_method }}"
+        limit: "{{ [limit or 100, 500] | min }}"
+    filters:
+      - {column: label_name, required: true, ops: ["=", "in"], fan_out: false, description: "Label name(s) to break down (label_names[])", examples: [job]}
+      - {column: selector, description: "Optional PromQL selector", examples: ['{namespace="checkout"}']}
+      - {column: count_method, description: "inmemory | active"}
+    response:
+      rows_path: "$.labels[*]"
+      expand:
+        - {explode: cardinality, as: c}
+    columns:
+      - {name: label_name, path: label_name}
+      - {name: label_value, path: "@c.label_value"}
+      - {name: series_count, type: BIGINT, path: "@c.series_count"}
+      - {name: label_values_count, type: BIGINT, path: label_values_count}
+      - {name: label_series_count, type: BIGINT, path: series_count, description: "Series having this label at all"}
+      - {name: series_count_total, type: BIGINT, path: "$.series_count_total"}
+      - {name: selector, filter_only: true}
+      - {name: count_method, filter_only: true}
+    examples:
+      - sql: "SELECT label_value AS job, series_count FROM mimir_cardinality_label_values WHERE label_name = 'job' ORDER BY series_count DESC LIMIT 10"
+        description: Which jobs own the most series (cardinality spike source).
+    fixtures:
+      - file: cardinality_label_values.json
+        filters: {label_name: job}
+        expect_rows: 2
+        expect_columns: {label_name: job, label_value: checkout, series_count: 8000, series_count_total: 120000}
+        note: "Built strictly from the Mimir docs 'Label values cardinality' response schema (the docs give no example)."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#label-values-cardinality
+
+  - name: mimir_alertmanager_alerts
+    title: Alertmanager alerts (notification view)
+    description: >-
+      Alerts held by the tenant's Mimir Alertmanager (Alertmanager API v2 GET /api/v2/alerts under
+      <alertmanager-http-prefix>): state active | suppressed | unprocessed, silenced_by / inhibited_by and the
+      receivers it routed to. Answers 'was anyone notified, and was it silenced?'.
+    kind: alerts
+    request:
+      method: GET
+      url: "{{ (env.MIMIR_ALERTMANAGER_URL or (env.MIMIR_URL.rstrip('/') ~ env.MIMIR_ALERTMANAGER_PREFIX)).rstrip('/') }}/api/v2/alerts"
+      query:
+        filter: "{{ filters.matcher }}"
+        receiver: "{{ filters.receiver }}"
+    filters:
+      - {column: matcher, ops: ["=", "in"], fan_out: false, description: "Alertmanager label matcher(s), AND-ed, e.g. alertname=\"HighErrorRate\" or service=~\"checkout|cart\"", examples: ['alertname="HighErrorRate"']}
+      - {column: receiver, description: "Regex on receiver name", examples: [slack-oncall]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: alertname, path: "labels.alertname"}
+      - {name: state, path: "status.state", description: "active | suppressed (silenced or inhibited) | unprocessed"}
+      - {name: severity, path: "labels.severity"}
+      - {name: service, path: "labels.service"}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: summary, expr: "_.annotations.summary or _.annotations.description or _.annotations.message"}
+      - {name: receivers, path: "receivers[*].name", transform: join, transform_arg: ",", description: "Receiver names (comma-separated)"}
+      - {name: silenced_by, type: JSON, path: "status.silencedBy"}
+      - {name: inhibited_by, type: JSON, path: "status.inhibitedBy"}
+      - {name: fingerprint, path: fingerprint}
+      - {name: url, path: generatorURL, description: "Link back to the rule's expression"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+      - {name: matcher, filter_only: true}
+      - {name: receiver, filter_only: true}
+    pitfalls:
+      - "The Alertmanager only sees alerts the ruler (or Grafana) sent it; an alert can be firing in mimir_alerts but absent here if the ruler's alertmanager URL is misconfigured."
+      - "ends_at of an active alert is a moving resolve-timeout, not when it ended."
+    examples:
+      - sql: "SELECT alertname, state, receivers, silenced_by, starts_at FROM mimir_alertmanager_alerts WHERE matcher = 'service=\"checkout\"'"
+        description: Was the checkout alert routed, silenced or inhibited?
+    fixtures:
+      - file: alertmanager_alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: CheckoutHighErrorRate, state: active, receivers: slack-oncall, starts_at: "2026-10-01T11:52:00Z"}
+        note: "Built strictly from the Alertmanager API v2 OpenAPI gettableAlerts schema (Mimir docs: Alertmanager API under <alertmanager-http-prefix>)."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#alertmanager-api
+
+  - name: mimir_silences
+    title: Alertmanager silences
+    description: "Silences in the tenant's Mimir Alertmanager (GET /api/v2/silences): who muted what, until when."
+    kind: entities
+    request:
+      method: GET
+      url: "{{ (env.MIMIR_ALERTMANAGER_URL or (env.MIMIR_URL.rstrip('/') ~ env.MIMIR_ALERTMANAGER_PREFIX)).rstrip('/') }}/api/v2/silences"
+      query:
+        filter: "{{ filters.matcher }}"
+    filters:
+      - {column: matcher, ops: ["=", "in"], fan_out: false, description: "Label matcher(s) the silence must match", examples: ['service="checkout"']}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: state, path: "status.state", description: "active | pending | expired"}
+      - {name: created_by, path: createdBy}
+      - {name: comment, path: comment}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: matchers, type: JSON, path: matchers}
+      - {name: matcher, filter_only: true}
+    examples:
+      - sql: "SELECT created_by, comment, starts_at, ends_at, matchers FROM mimir_silences WHERE state = 'active'"
+        description: Active silences that could have hidden the incident's alerts.
+    fixtures:
+      - file: silences.json
+        expect_rows: 1
+        expect_columns: {state: active, created_by: oncall, ends_at: "2026-10-01T13:00:00Z"}
+        note: "Built strictly from the Alertmanager API v2 OpenAPI gettableSilences schema."
+    docs_url: https://grafana.com/docs/mimir/latest/references/http-api/#alertmanager-api
+roles:
+  metrics: {table: mimir_query_range, query_language: promql}
+  active_alerts:
+    - table: mimir_alerts
+      columns: {name: alertname, state: state, ts: active_at, labels: labels, severity: severity}
+    - table: mimir_alertmanager_alerts
+      columns: {name: alertname, state: state, ts: starts_at, labels: labels, severity: severity, service: service}
+      notes: "Notification view: silenced / inhibited / receivers."
+  alert_rules:
+    table: mimir_rules
+    columns: {name: rule_name, query: query, state: state, severity: severity}

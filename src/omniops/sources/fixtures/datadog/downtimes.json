@@ -1,0 +1,126 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "canceled": "2020-01-02T03:04:05.282979+0000",
+        "created": "2020-01-02T03:04:05.282979+0000",
+        "display_timezone": "America/New_York",
+        "message": "Message about the downtime",
+        "modified": "2020-01-02T03:04:05.282979+0000",
+        "monitor_identifier": {
+          "monitor_id": 123
+        },
+        "mute_first_recovery_notification": false,
+        "notify_end_states": [
+          "alert",
+          "warn"
+        ],
+        "notify_end_types": [
+          "canceled",
+          "expired"
+        ],
+        "run_as": [
+          {
+            "principals": [
+              {
+                "id": "00000000-0000-1234-0000-000000000000",
+                "type": "user"
+              }
+            ]
+          }
+        ],
+        "schedule": {
+          "current_downtime": {
+            "end": "2020-01-02T03:04:00.000Z",
+            "start": "2020-01-02T03:04:00.000Z"
+          },
+          "recurrences": [
+            {
+              "duration": "123d",
+              "rrule": "FREQ=MONTHLY;BYSETPOS=3;BYDAY=WE;INTERVAL=1",
+              "start": "2020-01-02T03:04"
+            }
+          ],
+          "timezone": "America/New_York"
+        },
+        "scope": "env:(staging OR prod) AND datacenter:us-east-1",
+        "status": "active"
+      },
+      "id": "00000000-0000-1234-0000-000000000000",
+      "relationships": {
+        "created_by": {
+          "data": {
+            "id": "00000000-0000-1234-0000-000000000000",
+            "type": "users"
+          }
+        },
+        "monitor": {
+          "data": {
+            "id": "12345",
+            "type": "monitors"
+          }
+        }
+      },
+      "type": "downtime"
+    }
+  ],
+  "included": [
+    {
+      "attributes": {
+        "created_at": "2019-09-19T10:00:00.000Z",
+        "disabled": false,
+        "email": "string",
+        "handle": "string",
+        "icon": "string",
+        "last_login_time": "2019-09-19T10:00:00.000Z",
+        "mfa_enabled": false,
+        "modified_at": "2019-09-19T10:00:00.000Z",
+        "name": "string",
+        "service_account": false,
+        "status": "string",
+        "title": "string",
+        "uuid": "string",
+        "verified": false
+      },
+      "id": "string",
+      "relationships": {
+        "org": {
+          "data": {
+            "id": "00000000-0000-beef-0000-000000000000",
+            "type": "orgs"
+          }
+        },
+        "other_orgs": {
+          "data": [
+            {
+              "id": "00000000-0000-beef-0000-000000000000",
+              "type": "orgs"
+            }
+          ]
+        },
+        "other_users": {
+          "data": [
+            {
+              "id": "00000000-0000-0000-2345-000000000000",
+              "type": "users"
+            }
+          ]
+        },
+        "roles": {
+          "data": [
+            {
+              "id": "3653d3c6-0c75-11ea-ad28-fb5701eabc7d",
+              "type": "roles"
+            }
+          ]
+        }
+      },
+      "type": "users"
+    }
+  ],
+  "meta": {
+    "page": {
+      "total_filtered_count": "integer"
+    }
+  }
+}

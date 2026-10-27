@@ -1,0 +1,24 @@
+{
+ "totalCount": 144,
+ "pageSize": 3,
+ "nextPageKey": "AQAAAGQBAAAAZA==",
+ "eventTypeInfos": [
+  {
+   "type": "APPLICATION_UNEXPECTED_LOW_LOAD",
+   "displayName": "Application low traffic",
+   "severityLevel": "AVAILABILITY",
+   "description": "Unexpected low traffic"
+  },
+  {
+   "type": "MOBILE_APP_CRASH_RATE_INCREASED",
+   "displayName": "Mobile app crash rate increase",
+   "severityLevel": "ERROR"
+  },
+  {
+   "type": "APPLICATION_SLOWDOWN",
+   "displayName": "Application slowdown",
+   "severityLevel": "PERFORMANCE",
+   "description": "User action duration degradation"
+  }
+ ]
+}

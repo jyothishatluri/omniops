@@ -1,0 +1,34 @@
+{
+ "status": "success",
+ "data": {
+  "sidecar": [
+   {
+    "name": "prometheus-0.thanos-sidecar:10901",
+    "lastCheck": "2026-10-01T11:59:55.123Z",
+    "lastError": null,
+    "labelSets": [
+     {
+      "cluster": "prod-eu",
+      "replica": "0"
+     }
+    ],
+    "minTime": 1790812800000,
+    "maxTime": 9223372036854775807
+   }
+  ],
+  "store": [
+   {
+    "name": "thanos-store:10901",
+    "lastCheck": "2026-10-01T11:59:50.001Z",
+    "lastError": "rpc error: code = Unavailable desc = connection refused",
+    "labelSets": [
+     {
+      "cluster": "prod-eu"
+     }
+    ],
+    "minTime": 1767225600000,
+    "maxTime": 1790812800000
+   }
+  ]
+ }
+}

@@ -1,0 +1,12 @@
+{
+  "status": "success",
+  "data": {
+    "type": "list",
+    "endTimeBeforeRetention": false,
+    "total": 2,
+    "records": [
+      {"hostName": "checkout-1.ec2.internal", "status": "active", "cpu": 91.4, "memory": 63.2, "wait": 4.1, "diskUsage": 71.5, "load15": 3.8, "activeHostCount": 0, "inactiveHostCount": 0, "meta": {"host.name": "checkout-1.ec2.internal", "os.type": "linux", "deployment.environment": "production"}},
+      {"hostName": "search-2.ec2.internal", "status": "inactive", "cpu": -1, "memory": -1, "wait": -1, "diskUsage": -1, "load15": -1, "activeHostCount": 0, "inactiveHostCount": 0, "meta": {"host.name": "search-2.ec2.internal", "os.type": "linux", "deployment.environment": "production"}}
+    ]
+  }
+}

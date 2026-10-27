@@ -1,0 +1,206 @@
+{
+ "totalCount": 33,
+ "pageSize": 33,
+ "types": [
+  {
+   "type": "APPLICATION",
+   "properties": [
+    {
+     "id": "applicationType",
+     "type": "Enum"
+    },
+    {
+     "id": "conditionalName",
+     "type": "String"
+    },
+    {
+     "id": "customizedName",
+     "type": "String"
+    }
+   ],
+   "tags": "List",
+   "managementZones": "List",
+   "fromRelationships": [
+    {
+     "id": "calls",
+     "toTypes": [
+      "SERVICE"
+     ]
+    }
+   ],
+   "toRelationships": []
+  },
+  {
+   "type": "HOST",
+   "properties": [
+    {
+     "id": "ipAddresses",
+     "type": "List"
+    },
+    {
+     "id": "osType",
+     "type": "Enum"
+    },
+    {
+     "id": "osVersion",
+     "type": "String"
+    }
+   ],
+   "tags": "List",
+   "managementZones": "List",
+   "fromRelationships": [
+    {
+     "id": "runsOn",
+     "toTypes": [
+      "EC2_INSTANCE",
+      "VIRTUALMACHINE",
+      "AZURE_VM",
+      "OPENSTACK_VM",
+      "GOOGLE_COMPUTE_ENGINE",
+      "HYPERVISOR"
+     ]
+    },
+    {
+     "id": "runsOnResource",
+     "toTypes": [
+      "CUSTOM_DEVICE"
+     ]
+    },
+    {
+     "id": "isInstanceOf",
+     "toTypes": [
+      "HOST_GROUP"
+     ]
+    },
+    {
+     "id": "isNetworkClientOfHost",
+     "toTypes": [
+      "HOST",
+      "CUSTOM_DEVICE"
+     ]
+    },
+    {
+     "id": "candidateTalksWith",
+     "toTypes": [
+      "CUSTOM_DEVICE",
+      "PROCESS_GROUP_INSTANCE"
+     ]
+    }
+   ],
+   "toRelationships": [
+    {
+     "id": "isProcessOf",
+     "fromTypes": [
+      "PROCESS_GROUP_INSTANCE"
+     ]
+    },
+    {
+     "id": "runsOn",
+     "fromTypes": [
+      "OPENSTACK_VM",
+      "PROCESS_GROUP"
+     ]
+    },
+    {
+     "id": "isSiteOf",
+     "fromTypes": [
+      "GEOLOC_SITE",
+      "VMWARE_DATACENTER"
+     ]
+    },
+    {
+     "id": "talksWithCandidate",
+     "fromTypes": [
+      "CUSTOM_DEVICE",
+      "PROCESS_GROUP_INSTANCE"
+     ]
+    },
+    {
+     "id": "isNetworkClientOfHost",
+     "fromTypes": [
+      "CUSTOM_DEVICE",
+      "HOST"
+     ]
+    },
+    {
+     "id": "isDiskOf",
+     "fromTypes": [
+      "DISK"
+     ]
+    },
+    {
+     "id": "runsOnHost",
+     "fromTypes": [
+      "SERVICE"
+     ]
+    },
+    {
+     "id": "isContainerGroupInstanceOfHost",
+     "fromTypes": [
+      "CONTAINER_GROUP_INSTANCE"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "SERVICE",
+   "properties": [
+    {
+     "id": "mainServiceSoftwareTech",
+     "type": "Map"
+    },
+    {
+     "id": "port",
+     "type": "Number"
+    },
+    {
+     "id": "serviceType",
+     "type": "Enum"
+    }
+   ],
+   "tags": "List",
+   "managementZones": "List",
+   "fromRelationships": [
+    {
+     "id": "runsOn",
+     "toTypes": [
+      "CUSTOM_DEVICE_GROUP",
+      "PROCESS_GROUP"
+     ]
+    },
+    {
+     "id": "runsOnProcessGroupInstance",
+     "toTypes": [
+      "CUSTOM_DEVICE",
+      "PROCESS_GROUP_INSTANCE"
+     ]
+    },
+    {
+     "id": "runsOnHost",
+     "toTypes": [
+      "CUSTOM_DEVICE",
+      "HOST"
+     ]
+    },
+    {
+     "id": "calls",
+     "toTypes": [
+      "SERVICE"
+     ]
+    }
+   ],
+   "toRelationships": [
+    {
+     "id": "calls",
+     "fromTypes": [
+      "MOBILE_APPLICATION",
+      "CUSTOM_APPLICATION",
+      "HTTP_CHECK",
+      "APPLICATION",
+      "SERVICE"
+     ]
+    }
+   ]
+  }
+ ]
+}

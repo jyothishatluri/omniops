@@ -1,0 +1,873 @@
+# Grafana Loki HTTP API. Reusable template: self-hosted Loki (single- or multi-tenant), Grafana
+# Enterprise Logs, Grafana Cloud Logs, and Loki reached through Grafana's datasource proxy all
+# expose these paths and payloads unchanged.
+# Docs: https://grafana.com/docs/loki/latest/reference/loki-http-api/
+# Verified against the docs source for Loki v3.7.9 (docs/sources/reference/loki-http-api.md) and,
+# where the docs give only a schema, against the v3.7.9 JSON writers (pkg/util/marshal).
+source: loki
+display_name: Grafana Loki
+vendor: Grafana Labs
+description: Loki log API - LogQL log search, LogQL metric queries, labels, streams, log volume, patterns, detected fields, ruler rules/alerts.
+docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/
+categories: [logs, metrics, alerts]
+base_url: "{{ env.LOKI_URL }}"
+env:
+  - {name: LOKI_URL, description: "Loki base URL without /loki/api/v1, e.g. http://loki:3100"}
+required_env: [LOKI_URL]
+rate_limit:
+  concurrency: 4
+  notes: >-
+    Loki has no request-rate limit on reads by default; the limits are per query: query_timeout 1m,
+    max_entries_limit_per_query 5000, max_query_series 500, max_query_length 30d1h,
+    max_streams_matchers_per_query 1000 (Loki v3.7 defaults; Grafana Cloud may differ).
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "LogQL/API error reported in a 2xx body: fix the query, do not retry unchanged"}
+query_languages:
+  logql: >-
+    LogQL. Every query starts with a stream selector over indexed labels: {service_name="checkout",
+    namespace=~"prod-.*"} (at least one matcher must be non-empty; {} and {a=~".*"} are rejected).
+    Then an optional pipeline: line filters |= "text", != "text", |~ "regex", !~ "regex"
+    (case-insensitive: |~ "(?i)timeout"); parsers | json, | logfmt, | pattern "<ip> - <_> <status>",
+    | regexp "(?P<status>\\d{3})"; label filters after parsing | status >= 500, | level="error",
+    | duration > 2s; | line_format (Go template over the labels). Metric queries wrap a log query with a range:
+    count_over_time({...} |= "error" [5m]), rate(...), bytes_over_time(...), and aggregate with
+    sum by (service_name) (...), topk(5, ...). Numeric fields need unwrap:
+    quantile_over_time(0.99, {...} | json | unwrap duration_ms [5m]) by (service_name).
+    OmniOps replaces the placeholders $__auto / $__interval with the query step and $__range with
+    the whole window, so count_over_time({...}[$__auto]) gives non-overlapping buckets that sum to
+    the true total.
+pitfalls:
+  - "Timestamps on the wire are nanosecond Unix epochs; the engine converts SQL ts bounds for you - never put times inside LogQL."
+  - "An unknown label, label value or field returns 0 rows, not an error. Confirm names with the *_labels / *_label_values (or *_series) tables of the same source before concluding that logs are absent."
+  - "Loki 3.x adds service_name to every stream at ingest (from service, app, application, name, container, component, workload, job ... else 'unknown_service'). On Loki 2.x there is no service_name: select by job/app instead."
+  - "Structured metadata (detected_level, trace_id from OTLP, ...) and labels extracted by | json / | logfmt are merged into the returned stream labels, so the same stream can come back split into many label sets."
+  - "Log queries return at most max_entries_limit_per_query lines (default 5000) and there is no cursor: when the row count equals the requested limit the result is truncated - narrow the window or the selector instead of trusting counts from raw lines. Use metric queries (count_over_time) for counts."
+  - "Metric queries fail with 'maximum of series (500) reached' when the result has too many label sets: aggregate with sum by (...) in LogQL."
+  - "Queries are limited to 30d1h of range and 1m of execution by default; long windows over broad selectors time out (HTTP 504/503) - that is not a schema problem, narrow the window or the selector."
+  - "Retention is deployment-specific (Loki default keeps logs forever unless retention_period is set; Grafana Cloud keeps 14 days on free and 30 days on paid stacks unless extended). An empty old window may simply be past retention."
+  - "Freshly ingested lines can lag a few seconds; backdated lines become queryable only after their chunks are flushed. An empty last minute is not proof that logging stopped."
+tables:
+  - name: loki_logs
+    title: Log lines (LogQL log query)
+    description: >-
+      Raw log lines from GET /loki/api/v1/query_range with a LogQL log query (streams result).
+      One row per log line. Filter with query (a full LogQL log query) or service (builds
+      {service_name="..."}); optionally level (pushed down as a label filter on level or
+      detected_level, case-insensitive), message LIKE '%text%' (pushed down as a case-insensitive
+      |~ line filter) and direction. Time bounds on ts are sent as nanoseconds. Pages of 2000
+      lines (a plain SELECT ... LIMIT n asks for n, max 5000), newest first; the engine pages
+      backwards by moving end to the oldest timestamp returned, up to 10000 lines. Use for error
+      messages, stack traces, request ids and trace ids around an incident; use the
+      *_query_range table of the same source for counts.
+    kind: logs
+    request:
+      method: GET
+      path: /loki/api/v1/query_range
+      query:
+        query: >-
+          {{ (filters.query if filters.query else ('{service_name="' ~ (filters.service | label_escape) ~ '"}'))
+          ~ ((' |~ "(?i)' ~ ((filters.message.strip('%').split('%') | map('regex_escape') | join('.*')) | replace('_', '.') | label_escape) ~ '"') if filters.message else '')
+          ~ ((' | level=~"(?i)' ~ (filters.level | regex_escape | label_escape) ~ '" or detected_level=~"(?i)' ~ (filters.level | regex_escape | label_escape) ~ '"') if filters.level else '') }}
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        limit: "{{ [limit or 2000, 5000] | min }}"
+        direction: "{{ filters.direction or 'backward' }}"
+        interval: "{{ filters.interval }}"
+    filters:
+      - column: query
+        description: >-
+          Full LogQL log query (stream selector + optional pipeline). Must be a log query, not a
+          metric query. Put service/namespace matchers inside the selector.
+        examples: ['{service_name="payment-service"} |= "error" | json']
+      - column: service
+        ops: ["=", "in"]
+        description: "Service name; when query is absent builds the selector {service_name=\"<service>\"} (Loki 3.x label)."
+        examples: [payment-service]
+      - column: level
+        ops: ["=", "in"]
+        description: "Log level (error, warn, info...). Pushed down as | level=~\"(?i)<v>\" or detected_level=~\"(?i)<v>\"."
+        examples: [error]
+      - column: message
+        ops: [like]
+        description: "LIKE pattern on the log line; pushed down as a case-insensitive regex line filter (% -> .*, _ -> .)."
+        examples: ['%connection refused%']
+      - column: direction
+        description: "backward (default, newest lines first) or forward (oldest first - use to find the FIRST error after a deploy)."
+        examples: [backward]
+      - column: interval
+        description: "Optional sampling interval for log lines (duration such as 30s): returns at most one line per interval. Rarely needed."
+    require_one_of: [[query, service]]
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    pagination:
+      type: time_cursor
+      cursor_path: "$.data.result[*].values[*][0]"
+      cursor_param: query.end
+      time_direction: backward
+      page_size: 2000
+      max_pages: 5
+    response:
+      rows_path: "$.data.result[*]"
+      errors:
+        - {path: "$.data.resultType", equals: "matrix", message: "$.data.resultType", hint: "this is a metric query - use the *_query_range (or *_query) table of the same source for count_over_time/rate/sum"}
+      expand:
+        - {explode: values, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ns, description: "Log line timestamp (UTC; sent by Loki as a nanosecond epoch string)"}
+      - {name: message, path: "@p[1]", description: "The raw log line"}
+      - {name: service, expr: "_.stream.service_name or _.stream.service or _.stream.app or _.stream.application or _.stream.job", description: "service_name label (falls back to service/app/application/job)"}
+      - {name: level, expr: "_.stream.level or _.stream.detected_level or _.stream.severity or _.stream.lvl", description: "level label, else detected_level structured metadata (Loki 3.x)"}
+      - {name: env, expr: "_.stream.env or _.stream.environment or _.stream.deployment_environment", description: "Environment label if present"}
+      - {name: host, expr: "_.stream.host or _.stream.hostname or _.stream.node_name or _.stream.k8s_node_name", description: "Host / node label if present"}
+      - {name: namespace, expr: "_.stream.namespace or _.stream.k8s_namespace_name", description: "Kubernetes namespace label if present"}
+      - {name: pod, expr: "_.stream.pod or _.stream.k8s_pod_name or _.stream.pod_name", description: "Kubernetes pod label if present"}
+      - {name: container, expr: "_.stream.container or _.stream.k8s_container_name or _.stream.container_name", description: "Container label if present"}
+      - name: trace_id
+        expr: >-
+          _.stream.trace_id or _.stream.traceID or _.stream.traceId
+          or ((p[1].split('"trace_id":', 1)[1].lstrip()[1:].split('"')[0])
+              if (p[1] is string and '"trace_id":' in p[1] and p[1].split('"trace_id":', 1)[1].lstrip()[:1] == '"') else None)
+          or ((p[1].split('"traceId":', 1)[1].lstrip()[1:].split('"')[0])
+              if (p[1] is string and '"traceId":' in p[1] and p[1].split('"traceId":', 1)[1].lstrip()[:1] == '"') else None)
+          or ((p[1].split('trace_id=', 1)[1].split(' ')[0] | trim('"'))
+              if (p[1] is string and 'trace_id=' in p[1]) else None)
+        description: >-
+          trace_id label / structured metadata / | json or | logfmt field; else read from the raw
+          line ("trace_id": "..." or "traceId": "..." in JSON lines, trace_id=... in logfmt lines)
+      - {name: status_code, type: BIGINT, expr: "_.stream.status or _.stream.status_code or _.stream.http_status_code", description: "HTTP status, only when the query extracts it (| json / | logfmt) or it is a label"}
+      - {name: duration_ms, type: DOUBLE, expr: "_.stream.duration_ms", description: "duration_ms field, only when the query extracts it (| json / | logfmt)"}
+      - {name: labels, type: JSON, path: stream, description: "All stream labels + structured metadata + parsed labels as JSON; use labels->>'filename'"}
+      - {name: ts_ns, path: "@p[0]", description: "Exact nanosecond timestamp string (for dedup / precise ordering)"}
+      - {name: query, filter_only: true, description: "LogQL log query"}
+      - {name: direction, filter_only: true}
+      - {name: interval, filter_only: true}
+    max_rows: 10000
+    sort_hint: "Rows come grouped by stream; inside a stream newest first (direction=backward). Always ORDER BY ts."
+    pitfalls:
+      - "A LIMIT is pushed down as Loki's limit only for plain SELECT ... LIMIT n (no ORDER BY / GROUP BY); with direction=backward you get the NEWEST lines. For the earliest lines add direction = 'forward' (forward is not paged: one page of up to 2000 lines from the window start)."
+      - "Paging is backwards by timestamp (Loki has no cursor; end is exclusive): lines sharing the exact nanosecond of a page boundary can be skipped. When the result notes say pages were cut off, the window holds more than 10000 lines - narrow it or use a metric query for counts."
+      - "Fields inside JSON/logfmt lines (status, duration_ms, user ids) are NOT labels until you add | json or | logfmt to the query; after that they appear in labels and the status_code / duration_ms columns. trace_id is also read from the raw line."
+      - "service builds {service_name=...}; if you pass query as well, the query wins - put the service matcher inside it."
+      - "level is pushed down case-insensitively but compared exactly in SQL; use lower(level) when grouping."
+    examples:
+      - sql: >-
+          SELECT ts, service, level, message FROM loki_logs
+          WHERE service = 'payment-service' AND level = 'error'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 50
+        description: Newest error lines of one service in the incident window.
+      - sql: >-
+          SELECT trace_id, count(*) AS errors, min(ts) AS first_seen, any_value(message) AS sample
+          FROM loki_logs
+          WHERE query = '{service_name="api-gateway"} | json | level="error"'
+          GROUP BY trace_id ORDER BY errors DESC LIMIT 20
+        description: Error lines grouped by trace id (fields extracted with | json) to pick traces to open.
+      - sql: >-
+          SELECT ts, message FROM loki_logs
+          WHERE service = 'order-service' AND message LIKE '%timeout%' AND direction = 'forward'
+          ORDER BY ts LIMIT 5
+        description: First timeout lines in the window (forward direction), e.g. right after a deploy.
+      - sql: >-
+          SELECT status_code, count(*) AS lines, avg(duration_ms) AS avg_ms, any_value(trace_id) AS sample_trace
+          FROM loki_logs
+          WHERE query = '{service_name="payment-service"} | json | status >= 500'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY status_code ORDER BY lines DESC
+        description: 5xx lines of a JSON-logging service by status code, with latency and a trace id to open.
+    fixtures:
+      - file: query_range_streams.json
+        filters: {query: '{job="varlogs"}'}
+        expect_rows: 2
+        expect_columns: {ts: "2019-09-23T19:21:37Z", message: foo, service: varlogs, level: info, ts_ns: "1569266497240578000", trace_id: null}
+        note: "Verbatim from the Loki HTTP API docs, 'Query logs within a range of time' streams example (stats elided as in the docs)."
+      - file: query_range_streams_json_lines.json
+        filters: {service: payment-service}
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:42:31Z", service: payment-service, level: error, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, status_code: null, message: {not_null: true}}
+        note: >-
+          Built strictly from the documented <stream value> schema of 'Query logs within a range of
+          time' (stream labels + [<ns epoch string>, <line>] pairs); the lines are JSON / logfmt
+          application logs (o11y-bench style: labels job/service/level, trace_id inside the line,
+          Loki 3.x service_name added at ingest). Values are illustrative.
+      - file: query_range_streams_parsed.json
+        filters: {query: '{service_name="payment-service"} | json'}
+        expect_rows: 1
+        expect_columns: {status_code: 503, duration_ms: 1840.5, trace_id: 0af7651916cd43dd8448eb211c80319c, level: error}
+        note: >-
+          Same documented <stream value> schema; a | json query returns the extracted fields merged
+          into the stream labels (status, duration_ms, trace_id). Values are illustrative.
+      - file: query_range_matrix.json
+        filters: {query: 'sum(rate({job="varlogs"}[10m])) by (level)'}
+        expect_error: "metric query"
+        note: "Docs matrix example sent to the log table: the resultType error rule must fire instead of returning wrong rows."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-logs-within-a-range-of-time
+
+  - name: loki_query_range
+    title: LogQL metric query over time
+    description: >-
+      Evaluate a LogQL metric query (count_over_time, rate, bytes_over_time, quantile_over_time
+      with unwrap, sum by ...) over the ts range via GET /loki/api/v1/query_range (matrix result).
+      One row per (series, step). Filter on query (required) and ts; optional step (seconds,
+      default auto ~300 points). $__auto/$__interval in the query are replaced by the step and
+      $__range by the window, so count_over_time({...}[$__auto]) buckets sum to the real total.
+    kind: timeseries
+    request:
+      method: GET
+      path: /loki/api/v1/query_range
+      query:
+        query: >-
+          {{ filters.query
+             | replace('$__auto', ((filters.step ~ 's') if filters.step else (time.step_s | prom_duration)))
+             | replace('$__interval', ((filters.step ~ 's') if filters.step else (time.step_s | prom_duration)))
+             | replace('$__range', (time.range_s | prom_duration)) }}
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+    filters:
+      - column: query
+        required: true
+        description: "LogQL metric query (must return a matrix)"
+        examples: ['sum by (service_name) (count_over_time({service_name=~".+"} | level="error" [$__auto]))']
+      - {column: step, type: BIGINT, description: "Resolution step in seconds (default: auto, ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.data.result[*]"
+      errors:
+        - {path: "$.data.resultType", equals: "streams", message: "$.data.resultType", hint: "this is a log query - use the *_logs table of the same source, or wrap it in count_over_time(...[$__auto])"}
+      expand:
+        - {explode: values, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s, description: "Step timestamp (UTC; seconds epoch in matrix results)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value"}
+      - {name: service, expr: "_.metric.service_name or _.metric.service or _.metric.app or _.metric.job", description: "service label of the series, if the query kept it"}
+      - {name: level, expr: "_.metric.level or _.metric.detected_level", description: "level label of the series, if the query kept it"}
+      - {name: labels, type: JSON, path: metric, description: "Series labels as JSON; use labels->>'service_name'"}
+      - {name: query, filter_only: true, description: "LogQL metric query"}
+      - {name: step, type: BIGINT, filter_only: true, description: "Step in seconds"}
+    pitfalls:
+      - "Steps with no matching lines are ABSENT, not 0: a series that stops is not proof the errors stopped unless you check the window end; compare with a baseline window."
+      - "count_over_time(...[5m]) with a 15s step counts every line 20 times when you SUM the series in SQL; use [$__auto] so range == step."
+      - "Keep label cardinality low (sum by (service_name, level)); more than 500 series is an error."
+      - "Points sit on start + k*step, so the last one can equal the window end: use BETWEEN or <= for the upper bound."
+    examples:
+      - sql: >-
+          SELECT service, sum(value) AS error_lines, max(value) AS peak_per_step, arg_max(ts, value) AS peak_at
+          FROM loki_query_range
+          WHERE query = 'sum by (service_name) (count_over_time({service_name=~".+"} | level="error" [$__auto]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY service ORDER BY error_lines DESC
+        description: Which services logged the most errors during the incident, and when each peaked.
+        verified: false
+      - sql: >-
+          SELECT ts, value FROM loki_query_range
+          WHERE query = 'sum(rate({service_name="payment-service"} |= "timeout" [$__auto]))'
+          ORDER BY ts
+        description: Timeout lines per second for one service over the analysis window.
+    fixtures:
+      - file: query_range_matrix.json
+        filters: {query: 'sum(rate({job="varlogs"}[10m])) by (level)'}
+        expect_rows: 6
+        expect_columns: {ts: "2020-05-07T22:07:01Z", value: 137.95, level: info}
+        note: "Verbatim from the Loki HTTP API docs, 'Query logs within a range of time' matrix example (stats elided as in the docs)."
+      - file: query_range_streams.json
+        filters: {query: '{job="varlogs"}'}
+        expect_error: "log query"
+        note: "Docs streams example sent to the metric table: the resultType error rule must fire instead of returning log lines as samples."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-logs-within-a-range-of-time
+
+  - name: loki_query
+    title: LogQL metric query at one instant
+    description: >-
+      Evaluate a LogQL metric query at a single instant via GET /loki/api/v1/query (vector result;
+      log queries are rejected with HTTP 400). One row per series. The evaluation time is the end
+      of the ts range (returned as eval_time; ts itself is only a pushdown column, so strict
+      bounds such as ts < X are safe); $__range in the query is replaced by the whole ts window, so
+      sum by (service_name) (count_over_time({...}[$__range])) gives totals for the window.
+    kind: timeseries
+    request:
+      method: GET
+      path: /loki/api/v1/query
+      query:
+        query: "{{ filters.query | replace('$__range', (time.range_s | prom_duration)) | replace('$__auto', (time.range_s | prom_duration)) | replace('$__interval', (time.range_s | prom_duration)) }}"
+        time: "{{ time.end | epoch_ns }}"
+    filters:
+      - column: query
+        required: true
+        description: "LogQL metric query returning an instant vector"
+        examples: ['topk(10, sum by (service_name) (count_over_time({service_name=~".+"} |~ "(?i)error" [$__range])))']
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.data.result[*]"
+    columns:
+      - {name: eval_time, type: TIMESTAMP, path: "value[0]", transform: epoch_s, description: "Evaluation instant (= end of the ts window)"}
+      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: service, expr: "_.metric.service_name or _.metric.service or _.metric.app or _.metric.job"}
+      - {name: level, expr: "_.metric.level or _.metric.detected_level"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: query, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window for $__range; the evaluation instant is its end (see eval_time)"}
+    pitfalls:
+      - "Only metric queries work here; a log query returns HTTP 400 - use the *_logs table of the same source."
+      - "The instant is the END of the ts range: put the incident window as the ts bounds and use [$__range]."
+    examples:
+      - sql: >-
+          SELECT service, value AS error_lines FROM loki_query
+          WHERE query = 'sum by (service_name) (count_over_time({service_name=~".+"} | level="error" [$__range]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY error_lines DESC
+        description: Error-line totals per service over the incident window.
+    fixtures:
+      - file: query_vector.json
+        filters: {query: 'sum(rate({job="varlogs"}[10m])) by (level)'}
+        expect_rows: 3
+        expect_columns: {eval_time: "2020-05-07T22:07:01Z", value: 1267.1266666666666}
+        note: "Verbatim from the Loki HTTP API docs, 'Query logs at a single point in time' example (stats elided as in the docs)."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-logs-at-a-single-point-in-time
+
+  - name: loki_labels
+    title: Label names
+    description: >-
+      Known label names in the window (GET /loki/api/v1/labels), optionally scoped to the streams
+      of a selector. Use first to learn the label vocabulary (service_name vs app vs job).
+    kind: entities
+    request:
+      method: GET
+      path: /loki/api/v1/labels
+      query:
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        query: "{{ filters.query }}"
+    filters:
+      - {column: query, description: "Optional stream selector to scope the label names", examples: ['{service_name="webapp"}']}
+    time: {column: ts, default_lookback: 6h, max_window: 30d}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: ".", description: "Label name"}
+      - {name: query, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Loki may answer for a larger span than requested; structured metadata keys are not label names (see the *_detected_fields table)."
+    examples:
+      - sql: "SELECT label FROM loki_labels ORDER BY label"
+        description: Which stream labels exist (is there service_name? namespace? cluster?).
+    tests:
+      - {sql: "SELECT label FROM loki_labels", min_rows: 1}
+    fixtures:
+      - file: labels.json
+        expect_rows: 3
+        expect_columns: {label: foo}
+        note: "Verbatim from the Loki HTTP API docs, 'Query labels' example."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-labels
+
+  - name: loki_label_values
+    title: Values of one label
+    description: >-
+      Known values of one label in the window (GET /loki/api/v1/label/<name>/values), optionally
+      scoped by a stream selector. Use before filtering to confirm a service/namespace exists.
+    kind: entities
+    request:
+      method: GET
+      path: "/loki/api/v1/label/{{ filters.label }}/values"
+      query:
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        query: "{{ filters.query }}"
+    filters:
+      - {column: label, required: true, description: "Label name, e.g. service_name, namespace, job", examples: [service_name]}
+      - {column: query, description: "Optional stream selector to scope the values", examples: ['{namespace="prod"}']}
+    time: {column: ts, default_lookback: 6h, max_window: 30d}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: value, path: ".", description: "Label value"}
+      - {name: label, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value AS service FROM loki_label_values WHERE label = 'service_name' ORDER BY 1"
+        description: Which services send logs (exact spelling for later filters).
+    fixtures:
+      - file: label_values.json
+        filters: {label: foo}
+        expect_rows: 3
+        expect_columns: {value: cat, label: foo}
+        note: "Verbatim from the Loki HTTP API docs, 'Query label values' example."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-label-values
+
+  - name: loki_series
+    title: Log streams matching a selector
+    description: >-
+      Unique label sets (streams) matching a selector in the window (GET /loki/api/v1/series,
+      match[] repeated). Cheap discovery of which pods/containers/files a service logs from.
+    kind: entities
+    request:
+      method: GET
+      path: /loki/api/v1/series
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+    filters:
+      - {column: match, required: true, ops: ["=", "in"], description: "Stream selector, e.g. {service_name=\"webapp\"}", examples: ['{service_name="webapp"}']}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: service, expr: "_.service_name or _.service or _.app or _.application or _.job"}
+      - {name: namespace, expr: "_.namespace or _.k8s_namespace_name"}
+      - {name: pod, expr: "_.pod or _.k8s_pod_name or _.pod_name or _.statefulset_kubernetes_io_pod_name"}
+      - {name: container, expr: "_.container or _.container_name or _.k8s_container_name"}
+      - {name: host, expr: "_.host or _.hostname or _.node_name or _.k8s_node_name"}
+      - {name: labels, type: JSON, path: ".", description: "All labels of the stream; labels->>'job', labels->>'filename' ..."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT DISTINCT namespace, pod, container FROM loki_series WHERE match = '{service_name=\"payment-service\"}'"
+        description: Which pods/containers a service logs from.
+    fixtures:
+      - file: series.json
+        filters: {match: '{app="loki"}'}
+        expect_rows: 3
+        expect_columns: {service: loki, namespace: default, container: loki, pod: loki-stack-0}
+        note: "Verbatim from the Loki HTTP API docs, 'Query streams' example."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-streams
+
+  - name: loki_index_stats
+    title: Index statistics for a selector
+    description: >-
+      Approximate number of streams, chunks, entries (lines) and bytes a selector covers in the
+      window (GET /loki/api/v1/index/stats). One row. Cheap 'is there any data at all?' check.
+    kind: generic
+    request:
+      method: GET
+      path: /loki/api/v1/index/stats
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+    filters:
+      - {column: query, required: true, ops: ["=", "in"], description: "Stream selector (matchers only)", examples: ['{service_name="webapp"}']}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: streams, type: BIGINT}
+      - {name: chunks, type: BIGINT}
+      - {name: entries, type: BIGINT, description: "Log lines (approximate)"}
+      - {name: bytes, type: BIGINT}
+      - {name: query, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Approximation: excludes data still in ingesters (the most recent minutes to hours) and may double count streams spanning schema periods. Never use it as the error count."
+    examples:
+      - sql: "SELECT entries, bytes, streams FROM loki_index_stats WHERE query = '{service_name=\"payment-service\"}'"
+        description: Rough log volume behind a selector before running a heavy query.
+    fixtures:
+      - file: index_stats.json
+        filters: {query: '{job="foo"}'}
+        expect_rows: 1
+        expect_columns: {streams: 100, chunks: 1000, entries: 5000, bytes: 100000}
+        note: "Verbatim from the Loki HTTP API docs, 'Query log statistics' response."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-log-statistics
+
+  - name: loki_volume
+    title: Log volume by label set
+    description: >-
+      Bytes ingested per label set over the window (GET /loki/api/v1/index/volume, vector result),
+      top N by volume. Aggregates by the labels named in the selector, or by target_labels.
+      Use to find which service/namespace suddenly logs much more (or stopped logging).
+    kind: generic
+    request:
+      method: GET
+      path: /loki/api/v1/index/volume
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        limit: "{{ [limit or 100, 1000] | min }}"
+        targetLabels: "{{ filters.target_labels }}"
+        aggregateBy: "{{ filters.aggregate_by }}"
+    filters:
+      - {column: query, required: true, description: "Stream selector; labels matched here are the aggregation keys", examples: ['{service_name=~".+"}']}
+      - {column: target_labels, description: "Comma-separated labels to aggregate into (e.g. service_name,namespace)", examples: ['service_name']}
+      - {column: aggregate_by, description: "series (default: label-value pairs) or labels (label names only, value '')", examples: [series]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.data.result[*]"
+    columns:
+      - {name: service, expr: "_.metric.service_name or _.metric.service or _.metric.app or _.metric.job"}
+      - {name: bytes, type: BIGINT, path: "value[1]", description: "Bytes over the whole window"}
+      - {name: labels, type: JSON, path: metric, description: "Aggregation labels"}
+      - {name: query, filter_only: true}
+      - {name: target_labels, filter_only: true}
+      - {name: aggregate_by, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Volume is in BYTES, not lines. Requires volume_enabled (default true)."
+      - "Index based: recent data still in ingesters may be missing."
+    examples:
+      - sql: >-
+          SELECT service, bytes / 1e6 AS mb FROM loki_volume
+          WHERE query = '{service_name=~".+"}' AND target_labels = 'service_name'
+          ORDER BY bytes DESC LIMIT 10
+        description: Top log producers by service in the window.
+    fixtures:
+      - file: volume.json
+        filters: {query: '{service_name=~".+"}'}
+        expect_rows: 2
+        expect_columns: {service: api-gateway, bytes: 1048576}
+        note: >-
+          The docs give no example body, only 'Prometheus style vector response'; built strictly from
+          the documented vector schema (same as the /query example) as produced by Loki v3.7.9
+          pkg/querier/queryrange/volume.go ToPrometheusResponse. Values are illustrative.
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-log-volume
+
+  - name: loki_volume_range
+    title: Log volume over time
+    description: >-
+      Bytes ingested per label set per step (GET /loki/api/v1/index/volume_range). One row per
+      (label set, step). Spot when a service's log volume jumped or dropped to zero.
+    kind: timeseries
+    request:
+      method: GET
+      path: /loki/api/v1/index/volume_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+        limit: "{{ [limit or 100, 1000] | min }}"
+        targetLabels: "{{ filters.target_labels }}"
+        aggregateBy: "{{ filters.aggregate_by }}"
+    filters:
+      - {column: query, required: true, description: "Stream selector", examples: ['{service_name=~".+"}']}
+      - {column: target_labels, description: "Comma-separated labels to aggregate into", examples: ['service_name']}
+      - {column: aggregate_by, description: "series (default) or labels"}
+      - {column: step, type: BIGINT, description: "Step in seconds (default auto)"}
+    time: {column: ts, default_lookback: 6h, max_window: 30d, target_points: 120, min_step: 1m}
+    response:
+      rows_path: "$.data.result[*]"
+      expand:
+        - {explode: values, as: p, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "p[0] if p else _['value'][0]", transform: epoch_s, description: "Step timestamp"}
+      - {name: bytes, type: BIGINT, expr: "p[1] if p else _['value'][1]", description: "Bytes in this step"}
+      - {name: service, expr: "_.metric.service_name or _.metric.service or _.metric.app or _.metric.job"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: query, filter_only: true}
+      - {name: target_labels, filter_only: true}
+      - {name: aggregate_by, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Loki answers with a vector instead of a matrix when every series has a single sample; the table handles both."
+      - "ts is the END of each step bucket (bytes for the period ending at ts); the last bucket is stamped exactly at the window end, so use BETWEEN or <= for the upper bound."
+      - "Steps without data are absent (not 0)."
+    examples:
+      - sql: >-
+          SELECT service, ts, bytes FROM loki_volume_range
+          WHERE query = '{service_name=~".+"}' AND target_labels = 'service_name'
+            AND ts >= TIMESTAMP '2026-10-01 06:00:00' AND ts < TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY service, ts
+        description: Per-service log volume over six hours (look for a jump or a stop).
+    fixtures:
+      - file: volume_range.json
+        filters: {query: '{service_name=~".+"}'}
+        expect_rows: 4
+        expect_columns: {ts: "2024-03-30T23:00:00Z", bytes: 524288, service: api-gateway}
+        note: >-
+          The docs give no example body, only 'Prometheus style matrix response'; built strictly from
+          the documented matrix schema (same as the /query_range matrix example) as produced by Loki
+          v3.7.9 ToPrometheusResponse. Values are illustrative.
+      - file: volume.json
+        filters: {query: '{service_name=~".+"}'}
+        expect_rows: 2
+        expect_columns: {ts: "2024-03-30T23:03:40Z", bytes: 1048576}
+        note: "Single-sample case: volume_range returns a vector when every series has one sample (Loki v3.7.9 toPrometheusData)."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#query-log-volume
+
+  - name: loki_patterns
+    title: Detected log patterns
+    description: >-
+      Log line patterns (templates with <_> placeholders) detected by the pattern ingester for a
+      selector, with the number of matching lines per step (GET /loki/api/v1/patterns). One row
+      per (pattern, step). The fastest way to see WHICH kinds of lines spiked - SUM(value) by
+      pattern, compare incident vs baseline windows. Patterns can be pasted into LogQL as
+      | pattern "...". Requires pattern_ingester.enabled.
+    kind: timeseries
+    request:
+      method: GET
+      path: /loki/api/v1/patterns
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+    filters:
+      - {column: query, required: true, ops: ["=", "in"], description: "Stream selector (matchers only, no pipeline)", examples: ['{service_name="payment-service"}']}
+      - {column: step, type: BIGINT, description: "Step between samples in seconds (default auto, ~60 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, target_points: 60, min_step: 10s}
+    response:
+      rows_path: "$.data[*]"
+      expand:
+        - {explode: samples, as: s}
+    columns:
+      - {name: pattern, path: pattern, description: "Line template; <_> marks variable parts"}
+      - {name: level, path: level, description: "Detected level of the pattern (Loki 3.4+; absent in older versions)"}
+      - {name: ts, type: TIMESTAMP, path: "@s[0]", transform: epoch_s, description: "Step timestamp (seconds epoch)"}
+      - {name: value, type: BIGINT, path: "@s[1]", description: "Lines matching the pattern in this step"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "HTTP 404 with an empty body means the pattern ingester is disabled (pattern_ingester.enabled defaults to false) - fall back to the *_logs table grouped by message."
+      - "The pattern ingester keeps patterns for pattern_ingester.retain_for (default 3h) unless pattern persistence is enabled (limits pattern_persistence_enabled); older windows return nothing - that is not absence of logs."
+      - "Sample timestamps are aligned to step boundaries, so the first bucket can start slightly before the requested window."
+    examples:
+      - sql: >-
+          SELECT pattern, level, sum(value) AS lines FROM loki_patterns
+          WHERE query = '{service_name="payment-service"}'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY pattern, level ORDER BY lines DESC LIMIT 15
+        description: Dominant log patterns of a service during the incident.
+    fixtures:
+      - file: patterns.json
+        filters: {query: '{app="loki"}'}
+        expect_rows: 6
+        expect_columns: {ts: "2024-03-30T22:54:20Z", value: 1, level: null}
+        note: "Verbatim from the Loki HTTP API docs, 'Patterns detection' example (no level field there)."
+      - file: patterns_level.json
+        filters: {query: '{app="loki"}'}
+        expect_rows: 2
+        expect_columns: {level: error, value: 3}
+        note: >-
+          Shape of Loki v3.7.9 pkg/util/marshal WriteQueryPatternsResponseJSON, which also writes
+          "level" per pattern (not shown in the docs example); pattern text taken from the docs example.
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#patterns-detection
+
+  - name: loki_detected_fields
+    title: Fields detected in log lines
+    description: >-
+      Fields Loki detects in the lines of a selector (json/logfmt keys and structured metadata),
+      with inferred type, estimated cardinality and parser (GET /loki/api/v1/detected_fields).
+      Use to learn which keys exist (status? duration? trace_id?) before writing | json filters.
+    kind: entities
+    request:
+      method: GET
+      path: /loki/api/v1/detected_fields
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        line_limit: "{{ filters.line_limit }}"
+        limit: "{{ limit }}"
+    filters:
+      - {column: query, required: true, description: "Stream selector", examples: ['{service_name="api-gateway"}']}
+      - {column: line_limit, type: BIGINT, description: "Lines scanned per shard (default 100); raise for rare fields"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.fields[*]"
+    columns:
+      - {name: field, path: label, description: "Field name (use it in | json / | logfmt label filters)"}
+      - {name: type, path: type, description: "string, int, float, boolean, duration, bytes"}
+      - {name: cardinality, type: BIGINT, path: cardinality, description: "Estimated distinct values"}
+      - {name: parsers, path: parsers, transform: join, transform_arg: ",", description: "Parsers that found it (json, logfmt; empty = structured metadata)"}
+      - {name: json_path, path: jsonPath, transform: join, transform_arg: ".", description: "Original JSON path when flattened"}
+      - {name: query, filter_only: true}
+      - {name: line_limit, type: BIGINT, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Sampled: only line_limit lines per shard are scanned, so rare fields can be missing."
+      - "Available in Loki 3.x; older versions return 404."
+    examples:
+      - sql: "SELECT field, type, cardinality, parsers FROM loki_detected_fields WHERE query = '{service_name=\"api-gateway\"}' ORDER BY cardinality DESC"
+        description: Which fields the service's log lines carry.
+    fixtures:
+      - file: detected_fields.json
+        filters: {query: '{app="myapp"}'}
+        expect_rows: 3
+        expect_columns: {field: level, type: string, cardinality: 3, parsers: logfmt}
+        note: "Verbatim from the Loki HTTP API docs, 'Detected fields' example."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#detected-fields
+
+  - name: loki_detected_field_values
+    title: Values of a detected field
+    description: >-
+      Values observed for one detected field (e.g. status, level, route) in the lines of a
+      selector (GET /loki/api/v1/detected_field/<name>/values).
+    kind: entities
+    request:
+      method: GET
+      path: "/loki/api/v1/detected_field/{{ filters.field }}/values"
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_ns }}"
+        end: "{{ time.end | epoch_ns }}"
+        line_limit: "{{ filters.line_limit }}"
+        limit: "{{ limit }}"
+    filters:
+      - {column: field, required: true, description: "Detected field name", examples: [level]}
+      - {column: query, required: true, description: "Stream selector", examples: ['{service_name="api-gateway"}']}
+      - {column: line_limit, type: BIGINT, description: "Lines scanned per shard (default 100)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.values[*]"
+    columns:
+      - {name: value, path: "."}
+      - {name: field, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: line_limit, type: BIGINT, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value FROM loki_detected_field_values WHERE field = 'status' AND query = '{service_name=\"api-gateway\"}'"
+        description: Which HTTP status values appear in a service's logs.
+    fixtures:
+      - file: detected_field_values.json
+        filters: {field: level, query: '{app="myapp"}'}
+        expect_rows: 4
+        expect_columns: {value: debug, field: level}
+        note: "Verbatim from the Loki HTTP API docs, 'Detected field values' example."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#detected-field-values
+
+  - name: loki_rules
+    title: Loki ruler rules (LogQL alerting/recording)
+    description: >-
+      Log-based alerting and recording rules loaded in the Loki ruler, with their LogQL, for:
+      duration, health and firing alerts (GET /prometheus/api/v1/rules, Prometheus format).
+      Look up the rule behind a log-based alert.
+    kind: entities
+    request:
+      method: GET
+      path: /prometheus/api/v1/rules
+      query:
+        type: "{{ filters.type }}"
+        rule_name: "{{ filters.rule_name }}"
+        rule_group: "{{ filters.group_name }}"
+        file: "{{ filters.file }}"
+      accept_status: [404]
+    filters:
+      - {column: type, description: "alert | record (sent as type=alert|record)", examples: [alert]}
+      - {column: rule_name, ops: ["=", "in"], description: "Rule (alert) name (sent as rule_name)", examples: [HighErrorRate]}
+      - {column: group_name, ops: ["=", "in"], description: "Rule group name (sent as rule_group)"}
+      - {column: file, ops: ["=", "in"], description: "Ruler namespace (sent as file)"}
+    response:
+      rows_path: "$.data.groups[*]"
+      expand:
+        - {explode: rules, as: r}
+    columns:
+      - {name: group_name, path: name}
+      - {name: file, path: file, description: "Ruler namespace (Prometheus 'rule file')"}
+      - {name: interval_s, type: DOUBLE, path: interval, description: "Group evaluation interval in seconds"}
+      - {name: rule_name, path: "@r.name"}
+      - {name: type, path: "@r.type", description: "alerting | recording"}
+      - {name: query, path: "@r.query", description: "LogQL expression (threshold included)"}
+      - {name: duration_s, type: DOUBLE, path: "@r.duration", description: "for: duration in seconds"}
+      - {name: state, path: "@r.state", description: "inactive | pending | firing"}
+      - {name: health, path: "@r.health"}
+      - {name: last_error, path: "@r.lastError"}
+      - {name: severity, path: "@r.labels.severity"}
+      - {name: labels, type: JSON, path: "@r.labels"}
+      - {name: annotations, type: JSON, path: "@r.annotations"}
+      - {name: active_alerts, type: JSON, path: "@r.alerts"}
+      - {name: last_evaluation, type: TIMESTAMP, path: "@r.lastEvaluation", description: "Last evaluation time of the rule"}
+    pitfalls:
+      - "A 404 (ruler not running) is returned as 0 rows; most deployments keep alert rules in Grafana or Prometheus, not the Loki ruler."
+      - "Loki's type filter uses alert|record but rows say alerting|recording; rule_name / rule_group / file are exact names (no regex)."
+    examples:
+      - sql: "SELECT rule_name, query, duration_s, state, health FROM loki_rules WHERE type = 'alert' ORDER BY state DESC"
+        description: Log-based alert rules and which are firing.
+    fixtures:
+      - file: rules.json
+        expect_rows: 2
+        expect_columns: {rule_name: HighRequestLatency, type: alerting, duration_s: 600, severity: page, file: /rules.yaml, interval_s: 60, group_name: example}
+        note: >-
+          Loki's docs define this endpoint as Prometheus-compatible and link to the Prometheus /rules
+          docs; body is the Prometheus HTTP API docs example verbatim (Loki v3.7.9 pkg/ruler/base/api.go
+          emits the same field names).
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#list-rules
+
+  - name: loki_alerts
+    title: Loki ruler active alerts
+    description: Alerts currently pending or firing from Loki ruler (LogQL) rules (GET /prometheus/api/v1/alerts).
+    kind: alerts
+    request:
+      method: GET
+      path: /prometheus/api/v1/alerts
+      accept_status: [404]
+    response:
+      rows_path: "$.data.alerts[*]"
+    columns:
+      - {name: alertname, path: "labels.alertname"}
+      - {name: state, path: state, description: "pending | firing"}
+      - {name: active_at, type: TIMESTAMP, path: activeAt}
+      - {name: value, type: DOUBLE, path: value}
+      - {name: severity, path: "labels.severity"}
+      - {name: service, expr: "_.labels.service_name or _.labels.service or _.labels.job"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+    pitfalls:
+      - "Only Loki ruler alerts; Alertmanager / Grafana alerting hold the routed, silenced view."
+    examples:
+      - sql: "SELECT alertname, state, active_at, labels FROM loki_alerts WHERE state = 'firing' ORDER BY active_at"
+        description: Log-based alerts firing right now.
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: my-alert, state: firing, value: 1.0}
+        note: "Prometheus HTTP API docs /alerts example verbatim (Loki's docs point to it for this Prometheus-compatible endpoint)."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#list-alerts
+
+  - name: loki_buildinfo
+    title: Loki build information
+    description: Loki version and build (GET /loki/api/v1/status/buildinfo). Use to know whether patterns/detected fields (Loki 3.x) are available.
+    kind: entities
+    request:
+      method: GET
+      path: /loki/api/v1/status/buildinfo
+    response:
+      rows_path: "$"
+    columns:
+      - {name: version}
+      - {name: revision}
+      - {name: branch}
+      - {name: build_date, path: buildDate}
+      - {name: build_user, path: buildUser}
+      - {name: go_version, path: goVersion}
+    examples:
+      - sql: "SELECT version, revision FROM loki_buildinfo"
+    tests:
+      - {sql: "SELECT version FROM loki_buildinfo", min_rows: 1}
+    fixtures:
+      - file: buildinfo.json
+        expect_rows: 1
+        expect_columns: {version: "3.7.9", go_version: go1.25.3}
+        note: "The docs list only the field names (version, revision, branch, buildDate, buildUser, goVersion); fixture built strictly from that list with illustrative values."
+    docs_url: https://grafana.com/docs/loki/latest/reference/loki-http-api/#show-build-information
+
+roles:
+  logs:
+    table: loki_logs
+    filters:
+      query: >-
+        {service_name="{{ service | label_escape }}"}{{ ' | level=~"(?i)(error|err|fatal|critical|panic)" or detected_level=~"(?i)(error|fatal|critical)"' if error_only else '' }}
+    columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id, labels: labels}
+    query_language: logql
+    notes: "service_name is the Loki 3.x default service label; on Loki 2.x use job or app in query."
+  log_counts:
+    table: loki_query_range
+    filters:
+      query: >-
+        sum(count_over_time({service_name="{{ service | label_escape }}"}{{ ' | level=~"(?i)(error|err|fatal|critical|panic)" or detected_level=~"(?i)(error|fatal|critical)"' if error_only else '' }} [$__auto]))
+    columns: {ts: ts, value: value, service: service}
+    query_language: logql
+  services:
+    table: loki_label_values
+    filters: {label: service_name}
+    columns: {service: value}
+    notes: "Services that ship logs (service_name label values)."
+  alert_rules:
+    table: loki_rules
+    columns: {name: rule_name, query: query, state: state, severity: severity}
+    notes: "Only LogQL rules evaluated by the Loki ruler."
+  active_alerts:
+    table: loki_alerts
+    columns: {name: alertname, state: state, ts: active_at, severity: severity, service: service, labels: labels}
+    notes: "Pending/firing alerts of Loki ruler (LogQL) rules; empty when the ruler holds no rules."

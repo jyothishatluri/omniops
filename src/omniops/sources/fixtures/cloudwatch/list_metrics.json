@@ -1,0 +1,84 @@
+{
+ "Metrics": [
+  {
+   "Namespace": "AWS/SNS",
+   "Dimensions": [
+    {
+     "Name": "TopicName",
+     "Value": "NotifyMe"
+    }
+   ],
+   "MetricName": "PublishSize"
+  },
+  {
+   "Namespace": "AWS/SNS",
+   "Dimensions": [
+    {
+     "Name": "TopicName",
+     "Value": "CFO"
+    }
+   ],
+   "MetricName": "PublishSize"
+  },
+  {
+   "Namespace": "AWS/SNS",
+   "Dimensions": [
+    {
+     "Name": "TopicName",
+     "Value": "NotifyMe"
+    }
+   ],
+   "MetricName": "NumberOfNotificationsFailed"
+  },
+  {
+   "Namespace": "AWS/SNS",
+   "Dimensions": [
+    {
+     "Name": "TopicName",
+     "Value": "NotifyMe"
+    }
+   ],
+   "MetricName": "NumberOfNotificationsDelivered"
+  },
+  {
+   "Namespace": "AWS/SNS",
+   "Dimensions": [
+    {
+     "Name": "TopicName",
+     "Value": "NotifyMe"
+    }
+   ],
+   "MetricName": "NumberOfMessagesPublished"
+  },
+  {
+   "Namespace": "AWS/SNS",
+   "Dimensions": [
+    {
+     "Name": "TopicName",
+     "Value": "CFO"
+    }
+   ],
+   "MetricName": "NumberOfMessagesPublished"
+  },
+  {
+   "Namespace": "AWS/SNS",
+   "Dimensions": [
+    {
+     "Name": "TopicName",
+     "Value": "CFO"
+    }
+   ],
+   "MetricName": "NumberOfNotificationsDelivered"
+  },
+  {
+   "Namespace": "AWS/SNS",
+   "Dimensions": [
+    {
+     "Name": "TopicName",
+     "Value": "CFO"
+    }
+   ],
+   "MetricName": "NumberOfNotificationsFailed"
+  }
+ ]
+}

@@ -1,0 +1,58 @@
+{
+  "took": 5,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 1500,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+  },
+  "aggregations": {
+    "t": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": [
+        {
+          "key": "checkout-api",
+          "doc_count": 1200,
+          "failures": {
+            "doc_count": 96
+          },
+          "latency_avg": {
+            "value": 84250.5
+          },
+          "latency_pct": {
+            "values": {
+              "95.0": 412000.0,
+              "99.0": 1250000.0
+            }
+          }
+        },
+        {
+          "key": "payments",
+          "doc_count": 300,
+          "failures": {
+            "doc_count": 0
+          },
+          "latency_avg": {
+            "value": 13980.0
+          },
+          "latency_pct": {
+            "values": {
+              "95.0": 32592.0,
+              "99.0": 40100.0
+            }
+          }
+        }
+      ]
+    }
+  }
+}

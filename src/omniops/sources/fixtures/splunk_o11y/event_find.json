@@ -1,0 +1,20 @@
+[
+ {
+  "id": "AddBYZrEFEF",
+  "metadata": {
+   "ETS_key1": "detector",
+   "ETS_key2": false,
+   "ETS_key3": 1001
+  },
+  "properties": {
+   "is": "ok",
+   "sf_notificationWasSent": true,
+   "was": "anomalous"
+  },
+  "sf_eventCategory": "USER_DEFINED",
+  "sf_eventCreatedOnMs": 1553678621002,
+  "sf_eventType": "string",
+  "timestamp": 1554672630000,
+  "tsId": "XzZYApXCDCD"
+ }
+]

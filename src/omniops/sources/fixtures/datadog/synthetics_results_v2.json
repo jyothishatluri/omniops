@@ -1,0 +1,79 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "device": {
+          "browser": {
+            "type": "edge",
+            "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36 Edg/127.0.2651.105 DatadogSynthetics",
+            "version": "127.0.2651.105"
+          },
+          "id": "chrome.laptop_large",
+          "name": "Chrome - Laptop Large",
+          "platform": {
+            "name": "ios",
+            "version": "14.8"
+          },
+          "resolution": {
+            "height": 1100,
+            "pixel_ratio": 2,
+            "width": 1440
+          },
+          "type": "browser"
+        },
+        "execution_info": {
+          "duration": {
+            "has_duration": true,
+            "value": 380
+          },
+          "error_message": "Connection timed out",
+          "is_fast_retry": true,
+          "timings": {
+            "dns": 2.9,
+            "download": 2.1,
+            "firstByte": 95.2,
+            "ssl": 187.9,
+            "tcp": 92.6,
+            "total": 380.7
+          },
+          "tunnel": false,
+          "unhealthy": false
+        },
+        "finished_at": "integer",
+        "location": {
+          "id": "aws:us-east-1",
+          "name": "N. Virginia (AWS)",
+          "version": "1.0.0",
+          "worker_id": "worker-abc-123"
+        },
+        "run_type": "scheduled",
+        "started_at": "integer",
+        "status": "passed",
+        "steps_info": {
+          "completed": 6,
+          "errors": 0,
+          "total": 6
+        },
+        "test_sub_type": "http",
+        "test_type": "api"
+      },
+      "id": "5158904793181869365",
+      "relationships": {
+        "test": {
+          "data": {
+            "id": "abc-def-123",
+            "type": "test"
+          }
+        }
+      },
+      "type": "result_summary"
+    }
+  ],
+  "included": [
+    {
+      "attributes": {},
+      "id": "abc-def-123",
+      "type": "test"
+    }
+  ]
+}

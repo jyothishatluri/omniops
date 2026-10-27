@@ -1,0 +1,23 @@
+{
+  "series": [
+    {
+      "labels": [
+        {"name": "service_name", "value": "order-service"}
+      ],
+      "points": [
+        {"value": 4200000000, "timestamp": "1790852400000"},
+        {"value": 4650000000, "timestamp": "1790852460000"},
+        {"timestamp": "1790852520000"}
+      ]
+    },
+    {
+      "labels": [
+        {"name": "service_name", "value": "payment-service"}
+      ],
+      "points": [
+        {"value": 1100000000, "timestamp": "1790852400000"},
+        {"value": 1180000000, "timestamp": "1790852460000"}
+      ]
+    }
+  ]
+}

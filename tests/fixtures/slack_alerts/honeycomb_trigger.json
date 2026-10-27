@@ -1,0 +1,40 @@
+{
+  "platform": "honeycomb",
+  "description": "Honeycomb trigger fired to a Slack recipient: trigger name, the evaluated result against its threshold, and links to the trigger and the query result.",
+  "provenance": "Honeycomb docs: Triggers (Slack is a recipient type; notifications link to the trigger and the triggering query result) and the trigger template variables (.Name, .ID, .URL = trigger page, .Result.URL = query result, .Operator such as 'greater than or equal to', .Threshold, .Alert.Status TRIGGERED / OK, .Alert.Timestamp RFC 3339). Trigger URLs are https://ui.honeycomb.io/<team>/environments/<env>/datasets/<dataset>/triggers/<id> (environment-wide triggers omit the dataset). The native Slack wording is not published; reconstructed from those variables.",
+  "event": {
+    "type": "message",
+    "user": "U14HNYAPP1",
+    "bot_id": "B14HONEYCB",
+    "app_id": "A14HONEYCB",
+    "bot_profile": {"id": "B14HONEYCB", "app_id": "A14HONEYCB", "name": "Honeycomb", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "danger",
+        "fallback": "Triggered: Checkout error rate",
+        "title": "Triggered: Checkout error rate",
+        "title_link": "https://ui.honeycomb.io/acme/environments/production/datasets/checkout/triggers/AbC123xYz9",
+        "text": "The result of COUNT where http.status_code &gt;= 500 is 412, which is greater than or equal to the threshold of 100.\n<https://ui.honeycomb.io/acme/environments/production/datasets/checkout/result/7HbLmN2pQ4r|View query results>"
+      }
+    ],
+    "ts": "1792504957.000900",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.000900",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "honeycomb",
+    "rule_id": "AbC123xYz9",
+    "rule_name": "Checkout error rate",
+    "status": "firing",
+    "raw_status": "Triggered",
+    "env": "production",
+    "service": "checkout",
+    "value": "412",
+    "threshold": "100",
+    "url": "https://ui.honeycomb.io/acme/environments/production/datasets/checkout/triggers/AbC123xYz9",
+    "tags": {"dataset": "checkout"}
+  }
+}

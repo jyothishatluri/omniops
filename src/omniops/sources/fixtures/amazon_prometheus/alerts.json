@@ -1,0 +1,21 @@
+{
+ "status": "success",
+ "data": {
+  "alerts": [
+   {
+    "labels": {
+     "alertname": "test-1.alert",
+     "severity": "none"
+    },
+    "annotations": {
+     "message": "message"
+    },
+    "state": "firing",
+    "activeAt": "2020-12-01T19:37:25.429565909Z",
+    "value": "1e+00"
+   }
+  ]
+ },
+ "errorType": "",
+ "error": ""
+}

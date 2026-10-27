@@ -1,0 +1,17 @@
+{
+ "count": 0,
+ "result": [
+  {
+   "created": 1556055030000,
+   "creator": "string",
+   "description": "string",
+   "lastUpdated": 1556141430000,
+   "lastUpdatedBy": "string",
+   "name": "string",
+   "tags": [
+    "string"
+   ],
+   "type": "GAUGE"
+  }
+ ]
+}

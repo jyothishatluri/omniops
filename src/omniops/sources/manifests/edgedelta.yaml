@@ -1,0 +1,880 @@
+# Edge Delta REST API, direct HTTPS (no MCP, no SDK, no edx binary).
+#
+# Every endpoint lives under https://api.edgedelta.com/v1/orgs/{org_id}/... and authenticates
+# with the header X-ED-API-Token (securityDefinitions.ApiKeyAuth of the public Swagger spec).
+# Time windows are sent as from/to ISO 8601 UTC (edx uses 2006-01-02T15:04:05.000Z); the
+# alternative `lookback` (Go duration) is never sent because from/to always come from the ts window.
+#
+# Publicly documented (Swagger https://api2.edgedelta.com/swagger/doc.json + docs.edgedelta.com):
+#   GET  /logs/log_search/search    log search (CQL), cursor paged, scope log|audit
+#   GET  /events/search             events: monitor alerts, pattern anomalies, K8s events
+#   GET  /clustering/stats          log patterns with count / proportion / sentiment / delta
+#   GET  /metrics_v2/graph          metric time series (documented with an example response)
+#   GET  /confs                     pipelines (configs) inventory
+#   GET  /pipelines/{conf_id}/history   pipeline config versions (change events)
+# Used by Edge Delta's own open-source clients (edgedelta-mcp-server, edx CLI) but absent from
+# the public Swagger spec - modelled from that source code, with response envelopes taken from it:
+#   POST /graph                     unified graph (scope log|trace|pattern|metric), HTTP 207
+#   GET  /traces                    span search
+#   GET  /monitors, /monitors/{id}, /monitor_states
+#   GET  /facet_options, /facet_keys   field discovery
+# Research notes and doc links: docs/sources/edgedelta.md
+source: edgedelta
+display_name: Edge Delta
+vendor: Edge Delta, Inc.
+description: >-
+  Edge Delta Observability: log search (CQL), log-count and trace graphs, metrics, events
+  (monitor alerts, pattern anomalies, Kubernetes events), log patterns with sentiment and
+  change, spans, monitors and their states, field discovery, and pipeline config history.
+docs_url: https://docs.edgedelta.com/api/
+categories: [logs, metrics, traces, alerts, events, changes]
+base_url: "{{ (env.ED_API_URL or 'https://api.edgedelta.com') | trim('/') }}"
+env:
+  - {name: ED_API_TOKEN, description: "API token (Admin > My Organization > API Tokens) with read access to the log, metric, trace, event, monitor and pipeline resources needed. Sent as the X-ED-API-Token header.", secret: true}
+  - {name: ED_ORG_ID, description: "Organization ID (shown on the API Tokens page); every path is /v1/orgs/<ED_ORG_ID>/..."}
+  - {name: ED_API_URL, default: "https://api.edgedelta.com", description: "API base URL without /v1 (same variable as the Edge Delta MCP server). Override only for a dedicated/staging environment."}
+required_env: [ED_API_TOKEN, ED_ORG_ID]
+auth:
+  type: headers
+  headers:
+    X-ED-API-Token: "{{ env.ED_API_TOKEN }}"
+headers:
+  Accept: application/json
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 120
+  notes: >-
+    Edge Delta documents only 'standard rate limits' and asks clients to back off on HTTP 429;
+    edx retries 429/502/503/504 with exponential backoff. No numeric limit is published, so the
+    engine caps the source at a conservative 120 requests/min.
+retention:
+  logs: "plan / org specific (not published); older data needs a rehydration from archive"
+  metrics: "plan / org specific"
+  events: "plan / org specific; event search has no maximum window"
+errors:
+  - {path: "$.error", non_empty: true, message: "$.error", hint: "Edge Delta rejected the request (bad CQL, unknown cursor or field): fix the query; do not retry unchanged"}
+pitfalls:
+  - "Field names differ by scope. Logs: service.name, severity_text, host.name, ed.tag, k8s.namespace.name, k8s.pod.name, body. Traces: service.name, status.code (the HTTP code as a string), span.kind, trace_id. Events: event.domain, event.type. Unknown fields or values return 0 rows without an error: list them first with edgedelta_facet_keys / edgedelta_facet_options."
+  - "Log attributes need the @ prefix in CQL (@http.status_code:\"504\"); without it the same field silently matches nothing. Bare words are full-text over body only."
+  - "Traces and metrics do not support full-text terms: use field:\"value\" only (a bare word is an error for traces)."
+  - "Cursor paging must repeat the same query and time window; changing either invalidates the cursor (HTTP 400 unknown cursor). A page count is a lower bound until next_cursor comes back empty: count with edgedelta_log_counts, not by paging raw logs."
+  - "Severity values are whatever the pipeline emits (ERROR vs error vs Error); quoted CQL values are case-sensitive. Check edgedelta_facet_options WHERE scope = 'log' AND facet = 'severity_text' before filtering."
+query_languages:
+  cql: >-
+    Edge Delta Common Query Language (logs, events, patterns, traces, monitor states). Bare words
+    are case-insensitive full-text over body (fail matches failure) - not allowed for traces.
+    field:"value" is an exact, case-sensitive match; field:(a OR b); host.name:(web-1 OR web-2).
+    Attributes take an @ prefix: @http.status_code:"504", numeric comparisons on attributes:
+    @latency > 300. Boolean AND / OR / NOT are upper case; a space is AND; a leading - excludes
+    ("Failed request" -GET). * wildcards only at the start/end of a quoted value
+    (service.name:"check*"). No regex and no = / != operators. Examples:
+    service.name:"checkout" AND severity_text:"ERROR" ; "connection refused" k8s.namespace.name:"prod" ;
+    event.domain:("Monitor" OR "Monitor Alerts") ; event.type:"pattern_anomaly" ;
+    status.code:"500" AND span.kind:"server" ; monitor.status:"alert". Group a log-count graph with
+    the group_by filter (sent as ' by {service.name}'). Never put time ranges in CQL.
+  cql_metrics: >-
+    Edge Delta metric query: aggregation:metric_name{filter} [by {field1,field2}] [.rollup(seconds)].
+    Aggregations: sum avg min max count last median p50 p75 p90 p95 p99. {*} matches every series.
+    Examples: avg:ed.buffer.disk.bytes{*} ; sum:api.error.count{service.name:"api"}.rollup(60) ;
+    max:ed.buffer.disk.items{*} by {host.name}.rollup(60) ; p95:http.server.duration{service.name:"checkout"} by {service.name}.
+    The metric name must be exact: find it with edgedelta_facet_options WHERE scope = 'metric' AND facet = 'name'.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_logs
+    title: Log search (CQL)
+    description: >-
+      Search logs (or the org audit trail with scope = 'audit') over the ts window with a CQL
+      query (GET /v1/orgs/{org}/logs/log_search/search). One row per log record, newest first:
+      ts, message (body), level (severity_text), service (service.name), host (host.name),
+      namespace, pod, tag (ed.tag pipeline tag), trace_id, span_id, and the full resource and
+      attributes maps as JSON. Filter on query (CQL; empty = every log) and ts; optional scope
+      and order. Use it to read error lines and to follow a trace_id into logs.
+    kind: logs
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/logs/log_search/search"
+      query:
+        query: "{{ filters.query }}"
+        from: "{{ time.start | rfc3339_ms }}"
+        to: "{{ time.end | rfc3339_ms }}"
+        limit: "{{ [limit or 1000, 1000] | min }}"
+        order: "{{ filters.order or 'desc' }}"
+        scope: "{{ filters.scope or 'log' }}"
+      timeout_s: 90
+    filters:
+      - column: query
+        description: "CQL expression (empty = all logs). Bare words are full-text over body; fields need exact quoted values; attributes need @."
+        examples: ['service.name:"checkout" AND severity_text:"ERROR"']
+      - {column: scope, description: "log (default) or audit (API requests and AI teammate activity of the org: who changed what)", examples: [log]}
+      - {column: order, description: "desc (default, newest first) or asc", examples: [desc]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 6h}
+    pagination: {type: cursor, cursor_path: "$.next_cursor", cursor_param: query.cursor, max_pages: 5}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "Record timestamp (integer epoch; unit inferred from magnitude because the Swagger schema does not state it)"}
+      - {name: id, path: id}
+      - {name: message, path: body, description: "Log body (full-text search applies to this field)"}
+      - {name: level, path: severity_text, description: "severity_text as emitted by the pipeline (ERROR, WARN, INFO ... case varies)"}
+      - {name: service, expr: "(_['resource'] or {})['service.name'] or (_['attributes'] or {})['service.name']", description: "service.name (resource, else attribute)"}
+      - {name: host, expr: "(_['resource'] or {})['host.name'] or (_['attributes'] or {})['host.name']", description: "host.name"}
+      - {name: namespace, path: "resource['k8s.namespace.name']", description: "k8s.namespace.name"}
+      - {name: pod, path: "resource['k8s.pod.name']", description: "k8s.pod.name"}
+      - {name: tag, path: "resource['ed.tag']", description: "ed.tag: the Edge Delta pipeline/fleet tag that shipped the log"}
+      - {name: trace_id, path: trace_id}
+      - {name: span_id, path: span_id}
+      - {name: resource, type: JSON, path: resource, description: "Resource attributes (string map), e.g. resource->>'k8s.container.name'"}
+      - {name: attributes, type: JSON, path: attributes, description: "Log attributes (string map), e.g. attributes->>'http.status_code' (query them in CQL as @http.status_code)"}
+      - {name: query, filter_only: true, description: "CQL query"}
+      - {name: scope, filter_only: true}
+      - {name: order, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Newest first (order=desc) unless order = 'asc'."
+    pitfalls:
+      - "At most 1000 records per page and 5 pages here; aggregate with edgedelta_log_counts or edgedelta_patterns instead of pulling raw logs to count."
+      - "Structured logs often keep the useful value in an attribute, not in body: if full-text finds nothing, read one record (LIMIT 1) and query @attribute:\"value\"."
+      - "No regex, no mid-string wildcards: service.name:\"*checkout*\" works only with the wildcard at the start/end of a quoted value."
+    examples:
+      - sql: >-
+          SELECT ts, service, host, level, message FROM edgedelta_logs
+          WHERE query = 'service.name:"checkout" AND severity_text:"ERROR"'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Error logs of one service during the incident window.
+      - sql: >-
+          SELECT ts, service, message, attributes->>'http.status_code' AS status FROM edgedelta_logs
+          WHERE query = '"connection refused" OR timeout' AND ts >= TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY ts DESC
+        description: Full-text search for connection errors across services.
+      - sql: >-
+          SELECT ts, service, level, message FROM edgedelta_logs
+          WHERE query = 'trace_id:"5b8efff798038103d269b633813fc60c"' ORDER BY ts
+        description: All logs of one trace.
+      - sql: >-
+          SELECT ts, message, attributes FROM edgedelta_logs
+          WHERE scope = 'audit' AND ts >= TIMESTAMP '2026-10-01 09:00:00' ORDER BY ts DESC LIMIT 100
+        description: Audit trail (who changed pipelines/monitors) before the incident.
+    fixtures:
+      - file: log_search.json
+        filters: {query: 'service.name:"checkout"'}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:02:01.784Z", message: "payment provider timeout after 30000ms order_id=81723", level: ERROR, service: checkout, host: ip-10-0-1-12, namespace: prod, pod: checkout-7d9f8b6c5-x2lkq, tag: prod-k8s, trace_id: 5b8efff798038103d269b633813fc60c, span_id: eee19b7ec3c1b174, scope: log}
+        note: >-
+          Built strictly from the core.ArchiveResponseV1 / core.ArchiveRecordV1 schema of the public
+          Edge Delta Swagger spec (items[]{id, timestamp (integer), body, severity_text, trace_id,
+          span_id, resource{string map}, attributes{string map}}, next_cursor, query_id); resource
+          keys are the documented common log fields (service.name, host.name, k8s.namespace.name,
+          k8s.pod.name, ed.tag). The docs give no example body; values (and the ms epoch unit) are illustrative.
+    docs_url: https://docs.edgedelta.com/api/
+
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_log_counts
+    title: Log count graph (time series or table)
+    description: >-
+      Count logs matching a CQL query over the ts window, optionally grouped (POST
+      /v1/orgs/{org}/graph with queries.A.scope = log, the call behind 'edx logs graph').
+      One row per (group, time bucket): ts, value (count in the bucket), total (count over the
+      whole window for the group), group (group values joined with ','), group_values / keys
+      JSON, service when grouped by service.name, window (bucket width chosen by the server).
+      graph_type = 'table' returns one row per group (ts = window start, value = total).
+      Use it for error-rate onset/peak and for 'which service logs the most errors'.
+    kind: timeseries
+    request:
+      method: POST
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/graph"
+      query:
+        from: "{{ time.start | rfc3339_ms }}"
+        to: "{{ time.end | rfc3339_ms }}"
+        graph_type: "{{ filters.graph_type or 'timeseries' }}"
+      body:
+        queries:
+          A:
+            scope: log
+            query: "{{ (filters.query or '*') ~ ((' by {' ~ filters.group_by ~ '}') if filters.group_by else '') }}"
+        formulas:
+          A: {formula: A}
+      timeout_s: 90
+    filters:
+      - {column: query, description: "CQL filter of the logs to count (default * = all logs)", examples: ['severity_text:"ERROR"']}
+      - {column: group_by, description: "Comma-separated fields to group by, e.g. service.name or service.name,severity_text (sent as ' by {...}')", examples: [service.name]}
+      - {column: graph_type, description: "timeseries (default) or table (one total per group)", examples: [timeseries]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, control_lookback: 24h}
+    response:
+      rows_path: "$.A.records[*]"
+      expand:
+        - {explode: timeseries, as: p, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "p['timestamp'] if p else root['A']['from']", transform: auto_time, description: "Bucket time (ISO 8601); the window start for table rows"}
+      - {name: value, type: DOUBLE, expr: "p['value'] if p else _['aggregate']['value']", description: "Log count in the bucket (table rows: total)"}
+      - {name: total, type: DOUBLE, path: "aggregate.value", description: "Count over the whole window for this group"}
+      - {name: group, path: values, transform: join, transform_arg: ",", description: "Group-by values joined with ',' (null without group_by)"}
+      - {name: group_values, type: JSON, path: values, description: "Group-by values in the order of keys"}
+      - {name: keys, type: JSON, path: "$.A.keys", description: "Group-by field names"}
+      - {name: service, expr: "_['values'][root['A']['keys'].index('service.name')] if ('service.name' in (root['A']['keys'] or [])) and _['values'] else none", description: "service.name value when grouped by it"}
+      - {name: level, expr: "_['values'][root['A']['keys'].index('severity_text')] if ('severity_text' in (root['A']['keys'] or [])) and _['values'] else none", description: "severity_text value when grouped by it"}
+      - {name: window, path: "$.A.window", description: "Bucket width chosen by the server (Go duration, e.g. 1m0s)"}
+      - {name: query, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: graph_type, filter_only: true}
+    pitfalls:
+      - "Buckets without logs are missing (the documented time-series contract: 'missing intervals mean no data'): treat absent minutes as 0, otherwise a burst looks like it ended at its peak."
+      - "The server picks the bucket width (window column); narrow the ts window for finer buckets."
+      - "This endpoint answers HTTP 207 Multi-Status on success (per Edge Delta's own clients); the engine treats it as success."
+      - "Not zero-filled by the engine on purpose: the server's bucket width (window) differs from the engine's auto step, so filling would insert fake zero points between real buckets."
+    examples:
+      - sql: >-
+          SELECT ts, service, value FROM edgedelta_log_counts
+          WHERE query = 'severity_text:"ERROR"' AND group_by = 'service.name'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Error-log count per service over time (onset and peak per service).
+      - sql: >-
+          SELECT service, value AS errors FROM edgedelta_log_counts
+          WHERE query = 'severity_text:"ERROR"' AND group_by = 'service.name' AND graph_type = 'table'
+          ORDER BY errors DESC LIMIT 10
+        description: Which services log the most errors in the window.
+    fixtures:
+      - file: graph_logs.json
+        filters: {query: 'severity_text:"ERROR"', group_by: service.name}
+        expect_rows: 4
+        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 3.0, total: 231.0, group: checkout, service: checkout, window: 1m0s, level: null}
+        note: >-
+          Built from Edge Delta's own client code and documented schemas: the /graph response is
+          keyed by query/formula id ({"A": {"records": [...]}}, edx 'metrics query' help and the
+          sumGraphValue struct in edx monitors.go; HTTP 207 in edgedelta-mcp-server graph.go), and
+          each entry follows the documented CommonTimeseriesResponse (from, to, window, keys,
+          records[]{values, timeseries[]{timestamp, value}, aggregate{value}}) of the 'Query Metrics
+          with the API' page. Values are illustrative.
+      - file: graph_table.json
+        filters: {query: 'severity_text:"ERROR"', group_by: service.name, graph_type: table}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 231.0, total: 231.0, service: checkout}
+        note: "Same envelope with graph_type=table: records carry values + aggregate only (GraphRecord struct of edgedelta-mcp-server services.go)."
+    docs_url: https://github.com/edgedelta/edx/blob/main/internal/cli/logs.go
+
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_metrics
+    title: Metric query (time series)
+    description: >-
+      Query a metric over the ts window (GET /v1/orgs/{org}/metrics_v2/graph). The query is
+      aggregation:metric{filter} [by {fields}] [.rollup(seconds)], e.g.
+      avg:ed.buffer.disk.bytes{*} by {host.name}. One row per (group, data point): ts, value,
+      total (aggregate over the window), group / group_values / keys, service and host when
+      grouped by them, window (rollup). Filter on query (required) and ts; optional rollup_s
+      appends .rollup(n) when the query has none.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/metrics_v2/graph"
+      query:
+        query: "{{ filters.query ~ (('.rollup(' ~ (filters.rollup_s | int) ~ ')') if (filters.rollup_s and '.rollup(' not in filters.query) else '') }}"
+        from: "{{ time.start | rfc3339_ms }}"
+        to: "{{ time.end | rfc3339_ms }}"
+      timeout_s: 90
+    filters:
+      - column: query
+        required: true
+        description: "Metric query: aggregation:metric_name{filter} [by {f1,f2}] [.rollup(seconds)]"
+        examples: ['avg:ed.buffer.disk.bytes{*} by {host.name}']
+      - {column: rollup_s, type: BIGINT, description: "Rollup (bucket) in seconds, appended as .rollup(n) when the query has none"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    response:
+      rows_path: "$.records[*]"
+      expand:
+        - {explode: timeseries, as: p, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "p['timestamp'] if p else root['from']", transform: auto_time, description: "Data point time (ISO 8601)"}
+      - {name: value, type: DOUBLE, expr: "p['value'] if p else _['aggregate']['value']"}
+      - {name: total, type: DOUBLE, path: "aggregate.value", description: "Aggregation of the group across the whole window"}
+      - {name: metric, expr: "(filters.query.split(':', 1)[1].split('{')[0]) if (filters.query and ':' in filters.query) else none", description: "Metric name parsed from the query"}
+      - {name: group, path: values, transform: join, transform_arg: ","}
+      - {name: group_values, type: JSON, path: values, description: "Group-by values in the order of keys (null without by)"}
+      - {name: keys, type: JSON, path: "$.keys"}
+      - {name: service, expr: "_['values'][root['keys'].index('service.name')] if ('service.name' in (root['keys'] or [])) and _['values'] else none"}
+      - {name: host, expr: "_['values'][root['keys'].index('host.name')] if ('host.name' in (root['keys'] or [])) and _['values'] else none"}
+      - {name: tag, expr: "_['values'][root['keys'].index('ed.tag')] if ('ed.tag' in (root['keys'] or [])) and _['values'] else none", description: "ed.tag value when grouped by it"}
+      - {name: window, path: "$.window", description: "Rollup window applied (e.g. 1m0s)"}
+      - {name: query, filter_only: true}
+      - {name: rollup_s, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Missing intervals mean no data for that period (documented): a counter with no samples is a gap, not a zero."
+      - "The metric name must match exactly; an unknown name or filter value returns no records. List names with edgedelta_facet_options WHERE scope = 'metric' AND facet = 'name'."
+      - "Metrics do not support full-text terms: filters are field:\"value\" inside {...}."
+    examples:
+      - sql: >-
+          SELECT host, max(value) AS peak, arg_max(ts, value) AS peak_at FROM edgedelta_metrics
+          WHERE query = 'max:ed.buffer.disk.items{*} by {host.name}.rollup(60)'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY host ORDER BY peak DESC
+        description: Which agent host's disk buffer queue grew the most (backpressure) and when.
+      - sql: >-
+          SELECT ts, value FROM edgedelta_metrics
+          WHERE query = 'sum:api.error.count{service.name:"api"}' AND rollup_s = 60 ORDER BY ts
+        description: Per-minute error count of one service.
+    fixtures:
+      - file: metrics_graph.json
+        filters: {query: 'avg:ed.buffer.disk.bytes{*} by {ed.tag,host.name}'}
+        expect_rows: 3
+        expect_columns: {ts: "2025-01-15T00:01:00Z", value: 1048576.0, total: 6291456.0, metric: ed.buffer.disk.bytes, group: "my-pipeline,worker-1", host: worker-1, tag: my-pipeline, window: 1m0s, service: null}
+        note: "Verbatim 'Response Format' example of the Edge Delta 'Query Metrics with the API' page (GET /v1/orgs/{org_id}/metrics_v2/graph)."
+    docs_url: https://docs.edgedelta.com/query-metrics-api/
+
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_events
+    title: Events (monitor alerts, pattern anomalies, K8s events)
+    description: >-
+      Search events over the ts window with CQL (GET /v1/orgs/{org}/events/search). One row per
+      event, newest first: ts, domain (event_domain: Monitor / Monitor Alerts / K8s ...),
+      event_type (metric_threshold, log_threshold, pattern_anomaly ...), level (severity_text),
+      message/title (body), service, monitor_id / monitor_name / evaluated_value / monitor_query
+      for monitor alerts, and the resource and attributes maps as JSON. Filter on query (CQL)
+      and ts. Use it first in an investigation: what fired, and which log patterns turned anomalous.
+    kind: events
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/events/search"
+      query:
+        query: "{{ filters.query }}"
+        from: "{{ time.start | rfc3339_ms }}"
+        to: "{{ time.end | rfc3339_ms }}"
+        limit: "{{ [limit or 1000, 1000] | min }}"
+        order: "{{ filters.order or 'desc' }}"
+      timeout_s: 60
+    filters:
+      - column: query
+        description: "CQL over events, e.g. event.domain:(\"Monitor\" OR \"Monitor Alerts\"), event.type:\"pattern_anomaly\", event.domain:\"K8s\" AND OOMKilled"
+        examples: ['event.domain:("Monitor" OR "Monitor Alerts")']
+      - {column: order, description: "desc (default) or asc", examples: [desc]}
+    time: {column: ts, default_lookback: 6h, max_window: 31d, control_lookback: 7d}
+    pagination: {type: cursor, cursor_path: "$.next_cursor", cursor_param: query.cursor, max_pages: 5}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "Event time (integer epoch; unit inferred from magnitude)"}
+      - {name: domain, path: event_domain, description: "event.domain: Monitor or Monitor Alerts (depends on org and data age), K8s, ..."}
+      - {name: event_type, path: event_type, description: "event.type: metric_threshold, log_threshold, pattern_anomaly, ..."}
+      - {name: level, path: severity_text}
+      - {name: severity, path: severity_text}
+      - {name: message, path: body}
+      - {name: title, path: body}
+      - {name: service, expr: "(_['resource'] or {})['service.name'] or (_['attributes'] or {})['service.name']"}
+      - {name: monitor_id, path: "resource['ed.monitor.id']", description: "Monitor that raised the event (monitor alerts); look it up in edgedelta_monitor"}
+      - {name: monitor_name, path: "resource['event.name']", description: "event.name (the monitor name for monitor alerts)"}
+      - {name: evaluated_value, type: DOUBLE, path: "attributes['ed.monitor.evaluated.value']", description: "Value the monitor evaluated when it fired"}
+      - {name: monitor_query, path: "attributes['ed.monitor.query']", description: "The monitor's query"}
+      - {name: resource, type: JSON, path: resource}
+      - {name: attributes, type: JSON, path: attributes}
+      - {name: query, filter_only: true}
+      - {name: order, filter_only: true}
+    max_rows: 5000
+    pitfalls:
+      - "Monitor events use either \"Monitor\" or \"Monitor Alerts\" as event.domain depending on the org and data age: always use the disjunction. A wrong domain value returns 0 rows without an error."
+      - "Pattern anomalies (event.type:\"pattern_anomaly\") name the anomalous log signature in body; follow up with edgedelta_patterns / edgedelta_logs."
+      - "A single page is a lower bound; events have no server-side window cap, so long windows may need several pages (max 5 here)."
+    examples:
+      - sql: >-
+          SELECT ts, monitor_name, event_type, evaluated_value, service, message FROM edgedelta_events
+          WHERE query = 'event.domain:("Monitor" OR "Monitor Alerts")'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Which monitors fired around the incident, with the value that tripped them.
+      - sql: >-
+          SELECT ts, service, message FROM edgedelta_events
+          WHERE query = 'event.type:"pattern_anomaly"' AND ts >= TIMESTAMP '2026-10-01 06:00:00'
+          ORDER BY ts DESC
+        description: Log pattern anomalies detected by Edge Delta.
+      - sql: >-
+          SELECT ts, message, resource FROM edgedelta_events
+          WHERE query = 'event.domain:"K8s" AND (OOMKilled OR BackOff)' ORDER BY ts DESC
+        description: Kubernetes OOMKilled / BackOff events.
+    fixtures:
+      - file: events_search.json
+        filters: {query: 'event.domain:("Monitor" OR "Monitor Alerts")'}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:05:00Z", domain: Monitor Alerts, event_type: metric_threshold, monitor_id: 8a3f6c1e-4b2d-4e9a-9c7b-1d2e3f4a5b6c, monitor_name: API Errors, evaluated_value: 14.0, service: api, monitor_query: "sum:api.error.count{service.name:\"api\"}.rollup(60)"}
+        note: >-
+          Built strictly from the core.EventResponse / core.EventItem schema of the public Swagger
+          spec (items[]{timestamp (integer), event_domain, event_type, severity_text, body,
+          resource{string map}, attributes{string map}}, next_cursor, query_id); the monitor keys
+          (resource ed.monitor.id / event.name, attributes ed.monitor.evaluated.value /
+          ed.monitor.query) and the domain/type values come from Edge Delta's ed-monitors and
+          ed-events skills (edx repo). Values are illustrative.
+    docs_url: https://docs.edgedelta.com/api/
+
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_patterns
+    title: Log patterns (clustering stats)
+    description: >-
+      Top log patterns (message signatures) for the CQL scope in the ts window (GET
+      /v1/orgs/{org}/clustering/stats): pattern, count (in the window), proportion (% of all
+      clusters), sentiment (negative = error-like), delta (% change versus the previous window
+      of the same length, or the offset window). Filters: query, summary (up to 50 'interesting'
+      clusters), negative (negative-sentiment only), volatility (new / existing / gone / all),
+      offset (comparison window, Go duration). Use it to find new or surging error signatures.
+    kind: events
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/clustering/stats"
+      query:
+        query: "{{ filters.query }}"
+        from: "{{ time.start | rfc3339_ms }}"
+        to: "{{ time.end | rfc3339_ms }}"
+        limit: "{{ limit or 50 }}"
+        summary: "{{ 'true' if filters.summary in (true, 'true', 1, '1') else none }}"
+        negative: "{{ 'true' if filters.negative in (true, 'true', 1, '1') else none }}"
+        volatility: "{{ filters.volatility }}"
+        offset: "{{ filters.offset }}"
+      timeout_s: 90
+    filters:
+      - {column: query, description: "CQL scope of the logs to cluster (e.g. service.name:\"checkout\")", examples: ['service.name:"checkout"']}
+      - {column: summary, type: BOOLEAN, description: "true = up to 50 interesting clusters (limit ignored)"}
+      - {column: negative, type: BOOLEAN, description: "true = negative-sentiment (error-like) patterns only"}
+      - {column: volatility, description: "new, existing, gone or all (default all)", examples: [new]}
+      - {column: offset, description: "Comparison offsets as Go durations, comma separated (default = the window length), e.g. 24h", examples: [24h]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 24h}
+    response:
+      rows_path: "$.stats[*]"
+    columns:
+      - {name: pattern, path: pattern, description: "Log signature with variable parts replaced by *"}
+      - {name: title, path: pattern}
+      - {name: count, type: BIGINT, path: count, description: "Occurrences in the window"}
+      - {name: proportion, type: DOUBLE, path: proportion, description: "Share of all clusters in scope (percent)"}
+      - {name: sentiment, type: DOUBLE, path: sentiment, description: "Sentiment score; negative = error-like"}
+      - {name: delta, type: DOUBLE, path: delta, description: "Percent increase of the count versus the previous / offset window"}
+      - {name: past_count, type: BIGINT, path: past_count, description: "Deprecated: count in the previous window"}
+      - {name: anomaly, type: DOUBLE, path: anomaly, description: "Deprecated anomaly score"}
+      - {name: query, filter_only: true}
+      - {name: summary, type: BOOLEAN, filter_only: true}
+      - {name: negative, type: BOOLEAN, filter_only: true}
+      - {name: volatility, filter_only: true}
+      - {name: offset, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Patterns are aggregates over the whole window (no per-pattern time); compare windows with offset, or graph a signature with edgedelta_log_counts WHERE query = '\"<distinctive token>\"'."
+      - "delta is relative to the previous window of the same length by default: a short window right after onset shows huge deltas for every new pattern."
+    examples:
+      - sql: >-
+          SELECT pattern, count, delta, sentiment FROM edgedelta_patterns
+          WHERE negative = true AND query = 'service.name:"checkout"'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY delta DESC LIMIT 20
+        description: Error-like log signatures of a service that surged in the incident hour.
+      - sql: >-
+          SELECT pattern, count FROM edgedelta_patterns WHERE volatility = 'new' AND offset = '24h' ORDER BY count DESC
+        description: Signatures that did not exist 24 hours earlier.
+    fixtures:
+      - file: clustering_stats.json
+        filters: {query: 'service.name:"checkout"', negative: true}
+        expect_rows: 2
+        expect_columns: {pattern: "payment provider timeout after * ms order_id=*", count: 1834, proportion: 12.4, sentiment: -0.82, delta: 2650.0, past_count: null, negative: true}
+        note: "Built strictly from the core.ClusterStatResponse / core.ClusterStat schema of the public Swagger spec (stats[]{pattern, count, proportion, sentiment, delta}; deprecated fields omitted); values illustrative."
+    docs_url: https://docs.edgedelta.com/api/
+
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_traces
+    title: Span search
+    description: >-
+      Search spans with field-based CQL (GET /v1/orgs/{org}/traces, the call behind
+      'edx traces search' and the MCP get_trace_timeline tool). One row per span: ts, trace_id,
+      span_id, service when present, and the whole span as `span` JSON plus flattened dynamic
+      columns. Filter on query (field:"value" only; e.g. status.code:"500" AND
+      service.name:"checkout", or trace_id:"<id>"), ts, and include_children (also return the
+      child spans of each match = full trace context).
+    kind: spans
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/traces"
+      query:
+        query: "{{ filters.query }}"
+        from: "{{ time.start | rfc3339_ms }}"
+        to: "{{ time.end | rfc3339_ms }}"
+        limit: "{{ [limit or 500, 1000] | min }}"
+        order: "{{ filters.order or 'desc' }}"
+        include_child_spans: "{{ 'true' if filters.include_children in (true, 'true', 1, '1') else none }}"
+      timeout_s: 90
+    filters:
+      - column: query
+        required: true
+        description: "Field-based CQL (no full-text): service.name, status.code (HTTP code string), span.kind, trace_id, ed.tag"
+        examples: ['status.code:"500" AND service.name:"checkout"']
+      - {column: include_children, type: BOOLEAN, description: "true = also return child spans of each matching span"}
+      - {column: order, description: "desc (default) or asc", examples: [desc]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 6h}
+    pagination: {type: cursor, cursor_path: "$.next_cursor", cursor_param: query.cursor, max_pages: 5}
+    response:
+      rows_path: "$.items[*]"
+      dynamic: "."
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_['timestamp'] or _['start_time'] or _['startTime']", transform: auto_time, description: "Span time (field name/unit not publicly documented; inferred)"}
+      - {name: trace_id, expr: "_['trace_id'] or _['traceId']"}
+      - {name: span_id, expr: "_['span_id'] or _['spanId']"}
+      - {name: service, expr: "(_['resource'] or {})['service.name'] or (_['attributes'] or {})['service.name'] or _['service.name'] or _['service_name']"}
+      - {name: span, type: JSON, path: ".", description: "The whole span record as returned"}
+      - {name: query, filter_only: true}
+      - {name: include_children, type: BOOLEAN, filter_only: true}
+      - {name: order, filter_only: true}
+    max_rows: 5000
+    pitfalls:
+      - "The span item schema is not published (absent from the public Swagger spec): read one row (LIMIT 1) and use span->>'...' / the dynamic columns for duration, name and status before writing filters."
+      - "Full-text terms are rejected for traces; status.code holds the HTTP status (\"500\"), so status.code:\"ERROR\" matches nothing."
+      - "Traces may be sampled: absence of a span is weak evidence; widen the window before concluding."
+    examples:
+      - sql: >-
+          SELECT ts, trace_id, service, span FROM edgedelta_traces
+          WHERE query = 'status.code:"500" AND service.name:"checkout"'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 50
+        description: Failing server spans of a service in the incident window.
+      - sql: >-
+          SELECT ts, span_id, service, span FROM edgedelta_traces
+          WHERE query = 'trace_id:"5b8efff798038103d269b633813fc60c"' AND include_children = true ORDER BY ts
+        description: Every span of one trace (deepest failing span = likely root cause).
+    fixtures:
+      - file: traces_empty.json
+        filters: {query: 'status.code:"500"'}
+        expect_rows: 0
+        note: >-
+          Envelope only, verbatim from Edge Delta's edx tests ({"items":[],"next_cursor":""}, items key
+          'items' in edx traces.go). The span item schema is not publicly documented, so no span is
+          fabricated; the columns use defensive fallbacks and the span JSON carries the raw record.
+    docs_url: https://github.com/edgedelta/edgedelta-mcp-server/blob/main/pkg/tools/search.go
+
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_monitors
+    title: Monitors
+    description: >-
+      Monitor definitions (GET /v1/orgs/{org}/monitors): id, name/title, type (metric_threshold,
+      log_threshold ...), evaluation function/window (s), threshold_type (above/below),
+      warning_threshold, alert_threshold, no_data_behavior, query (the formula's query, e.g.
+      sum:api.error.count{service.name:"api"}.rollup(60)), formula_query and the whole monitor
+      JSON. Optional query (CQL over monitors). Use it to find the monitors that cover a service
+      and their thresholds.
+    kind: alerts
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/monitors"
+      query:
+        query: "{{ filters.query }}"
+        limit: 1000
+    filters:
+      - {column: query, description: "Optional CQL filter over monitors", examples: ['api']}
+    pagination: {type: cursor, cursor_path: "$.next_cursor", cursor_param: query.cursor, max_pages: 5}
+    response:
+      rows_path: "$.monitors[*]"
+    columns: &monitor_columns
+      - {name: id, expr: "_['id'] or _['monitor_id']", description: "Monitor id (ed.monitor.id on its events)"}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: type, path: type, description: "metric_threshold, log_threshold, ..."}
+      - {name: evaluation_type, path: evaluation_type, description: "e.g. sliding_window"}
+      - {name: evaluation_function, path: evaluation_function, description: "sum, avg, ..."}
+      - {name: evaluation_window_s, type: BIGINT, path: evaluation_window, description: "Evaluation window in seconds"}
+      - {name: threshold_type, path: threshold_type, description: "above or below"}
+      - {name: warning_threshold, type: DOUBLE, path: warning_threshold}
+      - {name: alert_threshold, type: DOUBLE, path: alert_threshold}
+      - {name: no_data_behavior, path: no_data_behavior}
+      - {name: formula, path: "formula_query.formula"}
+      - {name: query, expr: "((_['formula_query'] or {})['queries'] or {})[(_['formula_query'] or {})['formula'] or 'A']['query']", description: "Query of the monitor's formula (CQL metric/log query)"}
+      - {name: formula_query, type: JSON, path: formula_query}
+      - {name: monitor, type: JSON, path: ".", description: "The whole monitor definition"}
+    pitfalls:
+      - "Monitor evaluation is scheduled, not real time: a new monitor shows No Data until its next run."
+      - "Only the metric_threshold monitor shape is publicly documented; other types keep their fields in the monitor JSON."
+    examples:
+      - sql: >-
+          SELECT name, type, query, threshold_type, warning_threshold, alert_threshold, evaluation_window_s
+          FROM edgedelta_monitors WHERE query LIKE '%checkout%'
+        description: Monitors that evaluate a service and their thresholds.
+    fixtures:
+      - file: monitors.json
+        expect_rows: 1
+        expect_columns: {name: API Errors, type: metric_threshold, evaluation_function: sum, evaluation_window_s: 900, threshold_type: above, warning_threshold: 3.0, alert_threshold: 10.0, query: "sum:api.error.count{service.name:\"api\"}.rollup(60)", id: null}
+        note: >-
+          The monitor object is the documented metric_threshold example of Edge Delta's ed-monitors
+          skill (edx repo, skills/ed-monitors/SKILL.md), wrapped in the list envelope used by edx
+          monitors.go (items key 'monitors') and its paginator (next_cursor). The documented example
+          carries no id field, so id stays null here.
+    docs_url: https://github.com/edgedelta/edx/blob/main/skills/ed-monitors/SKILL.md
+
+  - name: edgedelta_monitor
+    title: Monitor by id
+    description: One monitor definition by id (GET /v1/orgs/{org}/monitors/{id}) with its query, thresholds and evaluation window. Filter on id (required; ed.monitor.id of a monitor event).
+    kind: entities
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/monitors/{{ filters.id | urlencode }}"
+      accept_status: [404]
+    filters:
+      - {column: id, required: true, description: "Monitor id (resource ed.monitor.id of its events)", examples: [8a3f6c1e-4b2d-4e9a-9c7b-1d2e3f4a5b6c]}
+    response:
+      rows_path: "$"
+    columns: *monitor_columns
+    examples:
+      - sql: "SELECT name, query, threshold_type, alert_threshold, evaluation_window_s, monitor FROM edgedelta_monitor WHERE id = '8a3f6c1e-4b2d-4e9a-9c7b-1d2e3f4a5b6c'"
+        description: The exact condition of the monitor that fired.
+    fixtures:
+      - file: monitor.json
+        filters: {id: 8a3f6c1e-4b2d-4e9a-9c7b-1d2e3f4a5b6c}
+        expect_rows: 1
+        expect_columns: {id: 8a3f6c1e-4b2d-4e9a-9c7b-1d2e3f4a5b6c, name: API Errors, formula: A, alert_threshold: 10.0, query: "sum:api.error.count{service.name:\"api\"}.rollup(60)"}
+        note: "Documented metric_threshold monitor example of the ed-monitors skill (edx repo); GET /monitors/{id} returns the bare monitor object per edx monitors.go (get / evaluate). id is filled from the filter because the example has none."
+    docs_url: https://github.com/edgedelta/edx/blob/main/internal/cli/monitors.go
+
+  - name: edgedelta_monitor_states
+    title: Monitor states (triggered / resolved)
+    description: >-
+      Current monitor states (GET /v1/orgs/{org}/monitor_states, 'edx monitors states'). One row
+      per state record: id, the whole record as `state` JSON plus flattened dynamic columns.
+      Filter on query (CQL), e.g. monitor.status:"alert" for monitors alerting now.
+    kind: alerts
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/monitor_states"
+      query:
+        query: "{{ filters.query }}"
+        limit: 1000
+    filters:
+      - {column: query, description: "CQL over monitor states, e.g. monitor.status:\"alert\"", examples: ['monitor.status:"alert"']}
+    pagination: {type: cursor, cursor_path: "$.next_cursor", cursor_param: query.cursor, max_pages: 5}
+    response:
+      rows_path: "$.states[*]"
+      dynamic: "."
+    columns:
+      - {name: id, path: id}
+      - {name: state, type: JSON, path: ".", description: "The whole state record (schema not publicly documented)"}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "The state record schema is not published: read a few rows and use state->>'...' / the dynamic columns. For history with timestamps and evaluated values use edgedelta_events WHERE query = 'event.domain:(\"Monitor\" OR \"Monitor Alerts\")'."
+      - "The server's default page is 50 states; this table asks for 1000 per page."
+    examples:
+      - sql: "SELECT id, state FROM edgedelta_monitor_states WHERE query = 'monitor.status:\"alert\"'"
+        description: Monitors in alert state right now.
+    fixtures:
+      - file: monitor_states.json
+        filters: {query: 'monitor.status:"alert"'}
+        expect_rows: 2
+        expect_columns: {id: s1}
+        note: "Verbatim states envelope from Edge Delta's edx tests (TestMonitorsStatesAllSweepsStatesEnvelope: {\"states\":[{\"id\":\"s1\"},{\"id\":\"s2\"}],\"next_cursor\":\"c1\",\"previous_cursor\":\"\"}); state fields beyond id are not publicly documented."
+    docs_url: https://github.com/edgedelta/edx/blob/main/internal/cli/monitors.go
+
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_facet_options
+    title: Observed values of one field (facet options)
+    description: >-
+      Values observed for one field in a scope (GET /v1/orgs/{org}/facet_options), e.g. every
+      service.name in logs or every metric name (scope metric, facet name). One row per value:
+      value, count. Filter on scope (log, metric, trace, pattern, event) and facet (field path),
+      both required. Use it before filtering on a guessed value.
+    kind: entities
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/facet_options"
+      query:
+        scope: "{{ filters.scope }}"
+        facet_path: "{{ filters.facet }}"
+        limit: "{{ [limit or 1000, 1000] | min }}"
+    filters:
+      - {column: scope, required: true, description: "log, metric, trace, pattern or event", examples: [log]}
+      - {column: facet, required: true, description: "Field path, e.g. service.name, severity_text, host.name, k8s.namespace.name, event.domain; 'name' with scope metric lists metric names", examples: [service.name]}
+    response:
+      rows_path: "$.options[*]"
+    columns:
+      - {name: value, expr: "_['name'] if _['name'] is not none else _['value']", description: "Observed value"}
+      - {name: count, type: BIGINT, path: count, description: "Occurrences when reported"}
+      - {name: scope, filter_only: true}
+      - {name: facet, filter_only: true}
+    examples:
+      - sql: "SELECT value AS service, count FROM edgedelta_facet_options WHERE scope = 'log' AND facet = 'service.name' ORDER BY count DESC"
+        description: Which services exist in logs (exact spelling for CQL).
+      - sql: "SELECT value AS metric FROM edgedelta_facet_options WHERE scope = 'metric' AND facet = 'name' AND value LIKE '%error%'"
+        description: Find metric names (the 'edx metrics list' call).
+    fixtures:
+      - file: facet_options.json
+        filters: {scope: log, facet: service.name}
+        expect_rows: 3
+        expect_columns: {value: checkout, count: 48211, scope: log, facet: service.name}
+        note: "Built from the FacetOption struct of edgedelta-mcp-server (pkg/tools/facet.go: {name, count}) and the 'options' items key read by edx metrics.go; values illustrative."
+    docs_url: https://github.com/edgedelta/edgedelta-mcp-server/blob/main/pkg/tools/facet.go
+
+  - name: edgedelta_facet_keys
+    title: Field names of a scope (facet keys)
+    description: Field names (facet keys) available in a scope (GET /v1/orgs/{org}/facet_keys?scope=...). One row per field (key, name). Filter on scope (required). Indexed keys are the fast ones to filter and group by.
+    kind: entities
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/facet_keys"
+      query:
+        scope: "{{ filters.scope }}"
+    filters:
+      - {column: scope, required: true, description: "log, metric, trace, pattern or event", examples: [trace]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: key, path: key}
+      - {name: name, path: name}
+      - {name: scope, filter_only: true}
+    examples:
+      - sql: "SELECT key FROM edgedelta_facet_keys WHERE scope = 'trace' ORDER BY key"
+        description: Which span fields can be filtered in CQL.
+    fixtures:
+      - file: facet_keys.json
+        filters: {scope: log}
+        expect_rows: 3
+        expect_columns: {key: service.name, scope: log}
+        note: "Built from the response struct of edx metrics.go warnUnindexedGroupBy (GET /facet_keys: array of {key, name}); keys are the documented common log fields."
+    docs_url: https://github.com/edgedelta/edx/blob/main/internal/cli/metrics.go
+
+  # ------------------------------------------------------------------------------------------
+  - name: edgedelta_pipelines
+    title: Pipelines (configs)
+    description: >-
+      Telemetry pipelines of the org (GET /v1/orgs/{org}/confs?empty_contents=true): id (conf_id),
+      tag (ed.tag), cluster_name, environment, fleet type/subtype, status (running/suspended),
+      created/updated with creator/updater, deployed_ts (version currently deployed). Use it to
+      find the conf_id for edgedelta_pipeline_history and to spot a pipeline edited just before
+      a data gap.
+    kind: entities
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/confs"
+      query: {empty_contents: "true"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id, description: "conf_id"}
+      - {name: tag, path: tag, description: "Pipeline tag (ed.tag on its telemetry)"}
+      - {name: title, path: tag}
+      - {name: cluster_name, path: cluster_name}
+      - {name: environment, path: environment, description: "Kubernetes, Helm, Docker, MacOS, Linux, Windows"}
+      - {name: fleet_type, path: fleet_type, description: "Edge, Cloud, IngestionPipeline, Edge-extended, Cloud-extended"}
+      - {name: fleet_subtype, path: fleet_subtype}
+      - {name: status, path: status, description: "running or suspended"}
+      - {name: purpose, path: purpose}
+      - {name: version, path: version, description: "Config schema version (v2 / v3)"}
+      - {name: description, path: description}
+      - {name: creator, path: creator}
+      - {name: created_at, type: TIMESTAMP, path: created}
+      - {name: author, path: updater, description: "Last updater"}
+      - {name: updated_at, type: TIMESTAMP, path: updated}
+      - {name: deployed_ts, type: TIMESTAMP, path: deployed_timestamp, transform: auto_time, description: "Time of the config-history version currently deployed"}
+      - {name: deployed_version, type: BIGINT, path: deployed_timestamp, description: "That version's id (history timestamp) for edgedelta_pipeline_history"}
+    examples:
+      - sql: "SELECT id, tag, status, author, updated_at, deployed_ts FROM edgedelta_pipelines ORDER BY updated_at DESC"
+        description: Pipelines, most recently changed first.
+    fixtures:
+      - file: confs.json
+        expect_rows: 1
+        expect_columns: {id: 3c5b2f8e-1a4d-4b6e-9f70-8e9d0a1b2c3d, tag: prod-k8s, environment: Kubernetes, fleet_type: Edge, status: running, author: alice@example.com, updated_at: "2026-10-01T10:52:11Z", deployed_ts: "2026-10-01T10:52:11Z", deployed_version: 1790851931000}
+        note: "Built strictly from the core.Conf schema of the public Swagger spec (GET /v1/orgs/{org_id}/confs returns an array of core.Conf) with its documented enum values (EnvironmentType, FleetType, FleetSubtype, FleetStatus, ConfPurpose, ConfigVersion, AgentRuntime); ids/names illustrative."
+    docs_url: https://docs.edgedelta.com/api/
+
+  - name: edgedelta_pipeline_history
+    title: Pipeline config history (changes)
+    description: >-
+      Saved versions of one pipeline config (GET /v1/orgs/{org}/pipelines/{conf_id}/history):
+      ts (version time), version (the version id to deploy/revert), author, description, status
+      (Deployed / Not Deployed), conf_id, content (full YAML). Filter on conf_id (required, from
+      edgedelta_pipelines.id). Use it to correlate a pipeline change (dropped logs, new sampling,
+      masking) with a data gap or alert onset.
+    kind: changes
+    request:
+      method: GET
+      path: "/v1/orgs/{{ env.ED_ORG_ID }}/pipelines/{{ filters.conf_id | urlencode }}/history"
+      query:
+        only_latest: "{{ 'true' if filters.only_latest in (true, 'true', 1, '1') else none }}"
+    filters:
+      - {column: conf_id, required: true, description: "Pipeline conf id (edgedelta_pipelines.id)", examples: [3c5b2f8e-1a4d-4b6e-9f70-8e9d0a1b2c3d]}
+      - {column: only_latest, type: BOOLEAN, description: "true = only the latest version"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "Version time (integer epoch; unit inferred)"}
+      - {name: version, type: BIGINT, path: timestamp, description: "Version id (the raw timestamp edx uses for deploy/revert)"}
+      - {name: author, path: author}
+      - {name: description, path: description}
+      - {name: title, path: description}
+      - {name: status, path: status, description: "Deployed or Not Deployed"}
+      - {name: state, path: status}
+      - {name: conf_id, path: config_id}
+      - {name: content, path: content, description: "Full pipeline YAML of the version"}
+      - {name: only_latest, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "'Deployed' marks the version currently rolled out; saving a version does not deploy it, so a change only matters from its deploy time (compare with edgedelta_pipelines.deployed_ts)."
+      - "content is the whole YAML; diff two versions in SQL only after narrowing to the versions around the onset."
+    examples:
+      - sql: >-
+          SELECT ts, author, status, description FROM edgedelta_pipeline_history
+          WHERE conf_id = '3c5b2f8e-1a4d-4b6e-9f70-8e9d0a1b2c3d' AND ts >= TIMESTAMP '2026-09-30 00:00:00'
+          ORDER BY ts DESC
+        description: Pipeline changes in the day before the incident.
+    fixtures:
+      - file: pipeline_history.json
+        filters: {conf_id: 3c5b2f8e-1a4d-4b6e-9f70-8e9d0a1b2c3d}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T10:52:11Z", version: 1790851931000, author: alice@example.com, status: Deployed, conf_id: 3c5b2f8e-1a4d-4b6e-9f70-8e9d0a1b2c3d, description: "drop debug logs from checkout"}
+        note: "Built strictly from the core.ConfigHistory schema of the public Swagger spec (array of {author, config_id, content, description, org_id, status (Deployed | Not Deployed), timestamp (integer)}); values illustrative (ms epoch assumed; the column infers the unit)."
+    docs_url: https://docs.edgedelta.com/api/
+
+roles:
+  logs:
+    table: edgedelta_logs
+    query_language: cql
+    filters:
+      query: >-
+        {{ [('service.name:"' ~ service ~ '"') if service else '', ('host.name:"' ~ host ~ '"') if host else '', 'severity_text:("ERROR" OR "FATAL" OR "CRITICAL")' if error_only else ''] | select | join(' AND ') }}
+    columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id}
+    notes: "severity_text spelling is pipeline specific; check edgedelta_facet_options (scope log, facet severity_text)."
+  log_counts:
+    table: edgedelta_log_counts
+    query_language: cql
+    filters:
+      query: >-
+        {{ ([('service.name:"' ~ service ~ '"') if service else '', ('host.name:"' ~ host ~ '"') if host else '', 'severity_text:("ERROR" OR "FATAL" OR "CRITICAL")' if error_only else ''] | select | join(' AND ')) or '*' }}
+    columns: {ts: ts, value: value}
+    notes: "Empty buckets are missing; treat gaps as 0."
+  metrics:
+    table: edgedelta_metrics
+    query_language: cql_metrics
+    columns: {ts: ts, value: value, metric: metric, labels: group_values, host: host, service: service}
+  traces:
+    table: edgedelta_traces
+    query_language: cql
+    filters:
+      query: >-
+        {{ ([('service.name:"' ~ service ~ '"') if service else '', 'status.code:"500"' if error_only else ''] | select | join(' AND ')) or 'span.kind:"server"' }}
+    columns: {ts: ts, trace_id: trace_id, service: service}
+  active_alerts:
+    table: edgedelta_monitor_states
+    filters: {query: 'monitor.status:"alert"'}
+    columns: {id: id}
+    notes: "State fields are not publicly documented; the state JSON carries them."
+  alert_rules:
+    table: edgedelta_monitor
+    filters: {id: "{{ alert_id }}"}
+    columns: {id: id, name: name, title: title, query: query}
+  alert_history:
+    table: edgedelta_events
+    filters: {query: 'event.domain:("Monitor" OR "Monitor Alerts")'}
+    columns: {ts: ts, name: monitor_name, title: monitor_name, id: monitor_id, service: service, value: evaluated_value}
+  k8s_events:
+    table: edgedelta_events
+    filters: {query: 'event.domain:"K8s"'}
+    columns: {ts: ts, message: message, title: title}
+  change_events:
+    table: edgedelta_logs
+    filters: {scope: audit}
+    columns: {ts: ts, title: message, message: message}
+    notes: "Org audit trail (API requests: pipeline saves/deploys, monitor edits). For a pipeline's versions use edgedelta_pipeline_history with its conf_id."
+  errors:
+    table: edgedelta_patterns
+    filters: {negative: "true"}
+    columns: {title: pattern, count: count}
+    notes: "Negative-sentiment log signatures (Edge Delta has no error-tracking issues)."
+  services:
+    table: edgedelta_facet_options
+    filters: {scope: log, facet: service.name}
+    columns: {service: value}
+  hosts:
+    table: edgedelta_facet_options
+    filters: {scope: log, facet: host.name}
+    columns: {host: value}

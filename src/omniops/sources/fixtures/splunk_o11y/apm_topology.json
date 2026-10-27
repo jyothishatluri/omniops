@@ -1,0 +1,15 @@
+{
+ "edges": [
+  {
+   "fromNode": "service_start",
+   "toNode": "service_end"
+  }
+ ],
+ "nodes": [
+  {
+   "inferred": false,
+   "serviceName": "service_five",
+   "type": "database"
+  }
+ ]
+}

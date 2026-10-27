@@ -1,0 +1,93 @@
+{
+ "kind": "StatefulSetList",
+ "apiVersion": "apps/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "postgres",
+    "namespace": "datastore",
+    "uid": "5a1b2c3d-0000-4000-8000-000000000005",
+    "generation": 1,
+    "creationTimestamp": "2026-10-01T08:00:00Z",
+    "labels": {
+     "app": "postgres"
+    },
+    "managedFields": [
+     {
+      "manager": "argocd-controller",
+      "operation": "Apply",
+      "apiVersion": "v1",
+      "time": "2026-10-01T08:00:00Z",
+      "fieldsType": "FieldsV1",
+      "fieldsV1": {
+       "f:metadata": {}
+      }
+     }
+    ]
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "app": "postgres"
+     }
+    },
+    "serviceName": "postgres",
+    "podManagementPolicy": "OrderedReady",
+    "updateStrategy": {
+     "type": "RollingUpdate",
+     "rollingUpdate": {
+      "partition": 0
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "postgres"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "postgres",
+        "image": "postgres:17.6"
+       }
+      ]
+     }
+    },
+    "volumeClaimTemplates": [
+     {
+      "metadata": {
+       "name": "data"
+      },
+      "spec": {
+       "accessModes": [
+        "ReadWriteOnce"
+       ],
+       "resources": {
+        "requests": {
+         "storage": "1Gi"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": {
+    "observedGeneration": 1,
+    "replicas": 1,
+    "readyReplicas": 1,
+    "currentReplicas": 1,
+    "updatedReplicas": 1,
+    "availableReplicas": 1,
+    "currentRevision": "postgres-6d5f8c7b9d",
+    "updateRevision": "postgres-6d5f8c7b9d",
+    "collisionCount": 0
+   }
+  }
+ ]
+}

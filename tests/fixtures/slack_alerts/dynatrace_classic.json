@@ -1,0 +1,41 @@
+{
+  "platform": "dynatrace",
+  "description": "Dynatrace classic problem-notification Slack integration (incoming webhook) with the default '{State} Problem {ProblemID}: {ImpactedEntity}' message and the problem title linked to {ProblemURL}.",
+  "provenance": "Dynatrace docs: classic Slack integration (Settings > Integration > Problem notifications > Slack; Message accepts problem placeholders) and Notifications API models ({State} OPEN/RESOLVED/MERGED, {ProblemID} display number, {PID} problem id, {ProblemTitle}, {ProblemURL}, {ImpactedEntity}, {ProblemImpact} APPLICATION/SERVICE/INFRASTRUCTURE, {ProblemSeverity}). The attachment layout (title linked to the problem, Impact/Severity fields) is reconstructed; classic problem URLs are <env>/#problems/problemdetails;pid=<PID>.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B04DTHOOK1",
+    "username": "Dynatrace",
+    "text": "OPEN Problem P-26101235: checkout-service",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "dc172a",
+        "fallback": "Failure rate increase",
+        "title": "Failure rate increase",
+        "title_link": "https://abc12345.live.dynatrace.com/#problems/problemdetails;pid=-3302298751940000101_1792504920000V2",
+        "fields": [
+          {"title": "Impact", "value": "SERVICE", "short": true},
+          {"title": "Severity", "value": "ERROR", "short": true}
+        ]
+      }
+    ],
+    "ts": "1792505011.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792505011.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "dynatrace",
+    "rule_name": "Failure rate increase",
+    "status": "firing",
+    "raw_status": "OPEN",
+    "severity": "ERROR",
+    "incident_id": "-3302298751940000101_1792504920000V2",
+    "service": "checkout-service",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "url": "https://abc12345.live.dynatrace.com/#problems/problemdetails;pid=-3302298751940000101_1792504920000V2",
+    "tags": {"problem_id": "P-26101235", "impact": "SERVICE"}
+  }
+}

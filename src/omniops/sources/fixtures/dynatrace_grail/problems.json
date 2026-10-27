@@ -1,0 +1,199 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 42,
+    "locale": "en_US",
+    "query": "fetch dt.davis.problems | dedup event.id, sort: { timestamp desc } | filterOut toBoolean(dt.davis.is_duplicate) == true | ...",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 125000,
+    "scannedBytes": 52428800,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "event.id": "-2045823616914785224_1727778600000V2",
+    "display_id": "P-24101234",
+    "event.name": "Failure rate increase",
+    "event.status": "ACTIVE",
+    "event.category": "ERROR",
+    "event.severity": "2",
+    "event.description": "The current failure rate (12.4 %) exceeds the auto-detected baseline (0.3 %).",
+    "event.start": "2026-10-01T11:40:00.000000000Z",
+    "event.end": null,
+    "timestamp": "2026-10-01T11:45:00.000000000Z",
+    "root_cause_entity_id": "SERVICE-9A1B2C3D4E5F6071",
+    "root_cause_entity_name": "payment-service",
+    "root_cause.smartscape_entity": {
+     "id": "SERVICE-9A1B2C3D4E5F6071",
+     "type": "service",
+     "name": "payment-service"
+    },
+    "affected_entity_ids": [
+     "SERVICE-5D53A2A6A1F2C3B4"
+    ],
+    "affected_entity_names": [
+     "checkout-service"
+    ],
+    "affected_entity_types": [
+     "dt.entity.service"
+    ],
+    "smartscape.affected_entities": [
+     {
+      "id": "SERVICE-5D53A2A6A1F2C3B4",
+      "type": "service",
+      "name": "checkout-service"
+     }
+    ],
+    "dt.davis.event_ids": [
+     "-2127669892157121805_1727778600000"
+    ],
+    "dt.davis.impact_level": "Services",
+    "dt.davis.affected_users_count": "1840",
+    "maintenance.is_under_maintenance": false,
+    "resolved_problem_duration": null,
+    "entity_tags": [
+     "env:prod",
+     "app:checkout"
+    ],
+    "duplicate_problem_ids": []
+   },
+   {
+    "event.id": "7213985548714471234_1727775000000V2",
+    "display_id": "P-24101198",
+    "event.name": "CPU saturation",
+    "event.status": "CLOSED",
+    "event.category": "RESOURCE_CONTENTION",
+    "event.severity": "4",
+    "event.description": "CPU usage 97 % on host ip-10-0-1-17.",
+    "event.start": "2026-10-01T10:30:00.000000000Z",
+    "event.end": "2026-10-01T11:00:00.000000000Z",
+    "timestamp": "2026-10-01T11:00:00.000000000Z",
+    "root_cause_entity_id": "HOST-06F288EE2A930951",
+    "root_cause_entity_name": "ip-10-0-1-17.eu-west-1.compute.internal",
+    "root_cause.smartscape_entity": {
+     "id": "HOST-06F288EE2A930951",
+     "type": "host",
+     "name": "ip-10-0-1-17.eu-west-1.compute.internal"
+    },
+    "affected_entity_ids": [
+     "HOST-06F288EE2A930951"
+    ],
+    "affected_entity_names": [
+     "ip-10-0-1-17.eu-west-1.compute.internal"
+    ],
+    "affected_entity_types": [
+     "dt.entity.host"
+    ],
+    "smartscape.affected_entities": [
+     {
+      "id": "HOST-06F288EE2A930951",
+      "type": "host",
+      "name": "ip-10-0-1-17.eu-west-1.compute.internal"
+     }
+    ],
+    "dt.davis.event_ids": [
+     "5547782627070661074_1727775000000"
+    ],
+    "dt.davis.impact_level": "Infrastructure",
+    "dt.davis.affected_users_count": null,
+    "maintenance.is_under_maintenance": false,
+    "resolved_problem_duration": "1800000000000",
+    "entity_tags": [],
+    "duplicate_problem_ids": []
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     1
+    ],
+    "mappings": {
+     "event.id": {
+      "type": "string"
+     },
+     "display_id": {
+      "type": "string"
+     },
+     "event.name": {
+      "type": "string"
+     },
+     "event.status": {
+      "type": "string"
+     },
+     "event.category": {
+      "type": "string"
+     },
+     "event.severity": {
+      "type": "long"
+     },
+     "event.description": {
+      "type": "string"
+     },
+     "event.start": {
+      "type": "timestamp"
+     },
+     "event.end": {
+      "type": "timestamp"
+     },
+     "timestamp": {
+      "type": "timestamp"
+     },
+     "root_cause_entity_id": {
+      "type": "string"
+     },
+     "root_cause_entity_name": {
+      "type": "string"
+     },
+     "root_cause.smartscape_entity": {
+      "type": "record"
+     },
+     "affected_entity_ids": {
+      "type": "array"
+     },
+     "affected_entity_names": {
+      "type": "array"
+     },
+     "affected_entity_types": {
+      "type": "array"
+     },
+     "smartscape.affected_entities": {
+      "type": "array"
+     },
+     "dt.davis.event_ids": {
+      "type": "array"
+     },
+     "dt.davis.impact_level": {
+      "type": "string"
+     },
+     "dt.davis.affected_users_count": {
+      "type": "long"
+     },
+     "maintenance.is_under_maintenance": {
+      "type": "boolean"
+     },
+     "resolved_problem_duration": {
+      "type": "duration"
+     },
+     "entity_tags": {
+      "type": "array"
+     },
+     "duplicate_problem_ids": {
+      "type": "array"
+     }
+    }
+   }
+  ]
+ }
+}

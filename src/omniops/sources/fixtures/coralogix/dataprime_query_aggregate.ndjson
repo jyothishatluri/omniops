@@ -1,0 +1,3 @@
+{"queryId": {"queryId": "0d9a3c55-2b1e-4c8f-8e7a-6b5c4d3e2f10"}}
+{"result": {"results": [{"metadata": [], "labels": [], "userData": "{\"ts\": \"2026-10-01T11:00:00Z\", \"value\": 12}"}, {"metadata": [], "labels": [], "userData": "{\"ts\": \"2026-10-01T11:01:00Z\", \"value\": 57}"}]}}
+{"statistics": {"status": "COMPLETED", "e2eDurationMs": "180", "outputRowCount": "2"}}

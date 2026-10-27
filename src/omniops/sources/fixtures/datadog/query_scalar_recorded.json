@@ -1,0 +1,29 @@
+{
+  "data": {
+    "type": "scalar_response",
+    "attributes": {
+      "columns": [
+        {
+          "values": [
+            6.368151928283307
+          ],
+          "name": "a",
+          "meta": {
+            "unit": [
+              {
+                "short_name": "%",
+                "id": 17,
+                "plural": "percent",
+                "name": "percent",
+                "family": "percentage",
+                "scale_factor": 1.0
+              },
+              null
+            ]
+          },
+          "type": "number"
+        }
+      ]
+    }
+  }
+}

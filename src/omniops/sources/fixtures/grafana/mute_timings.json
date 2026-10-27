@@ -1,0 +1,33 @@
+[
+  {
+    "name": "weekends",
+    "time_intervals": [
+      {
+        "weekdays": ["saturday", "sunday"],
+        "location": "Europe/Berlin"
+      }
+    ],
+    "version": "a1b2c3d4e5f60789",
+    "provenance": "api"
+  },
+  {
+    "name": "maintenance-window",
+    "time_intervals": [
+      {
+        "times": [
+          {
+            "start_time": "18:00",
+            "end_time": "24:00"
+          }
+        ],
+        "weekdays": ["tuesday"],
+        "days_of_month": ["1:7"],
+        "months": ["1:12"],
+        "years": ["2026"],
+        "location": "UTC"
+      }
+    ],
+    "version": "0f9e8d7c6b5a4321",
+    "provenance": ""
+  }
+]

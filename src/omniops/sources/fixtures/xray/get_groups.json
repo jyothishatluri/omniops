@@ -1,0 +1,15 @@
+{
+ "Groups": [
+  {
+   "GroupName": "Default",
+   "GroupARN": "arn:aws:xray:us-east-1:123456789012:group/Default/AFLWCDIYC5MWQ4JXWZOECH3GQANSIEUCKXPDE6RJUBJRPYW3BEXQ",
+   "InsightsConfiguration": {"InsightsEnabled": true, "NotificationsEnabled": false}
+  },
+  {
+   "GroupName": "checkout-faults",
+   "GroupARN": "arn:aws:xray:us-east-1:123456789012:group/checkout-faults/KXPDE6RJUBJRPYW3BEXQAFLWCDIYC5MWQ4JXWZOECH3GQANSIEUC",
+   "FilterExpression": "service(\"checkout-api\") { fault }",
+   "InsightsConfiguration": {"InsightsEnabled": false, "NotificationsEnabled": false}
+  }
+ ]
+}

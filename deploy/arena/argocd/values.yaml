@@ -1,0 +1,21 @@
+# Argo CD (chart argo-cd 10.4.0, as pinned by the Arena's docs/gitops.md), trimmed for a laptop, plus
+# a read-only API account for OmniOps. The Arena itself only needs the Application controller.
+dex:
+  enabled: false
+notifications:
+  enabled: false
+configs:
+  params:
+    server.insecure: true            # plain HTTP behind kubectl port-forward on localhost
+  cm:
+    accounts.omniops: apiKey         # token-only account, no UI login
+    timeout.reconciliation: 60s      # notice pushed fault commits within a minute
+  rbac:
+    policy.default: ""
+    # role:readonly minus the Arena's control application: its ConfigMap (benchmark-control/suite-state)
+    # names the active scenario, which must stay judge-only (3.16). Deny rules win over allow rules.
+    policy.csv: |
+      p, role:omniops, applications, get, */arena-control, deny
+      p, role:omniops, logs, get, */arena-control, deny
+      g, role:omniops, role:readonly
+      g, omniops, role:omniops

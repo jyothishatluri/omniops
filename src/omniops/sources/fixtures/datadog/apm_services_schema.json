@@ -1,0 +1,10 @@
+{
+  "data": {
+    "attributes": {
+      "metadata": [{"isTraced": true, "isUsm": false}],
+      "services": ["checkout", "cart", "payments-api"]
+    },
+    "id": "services-prod",
+    "type": "services_list"
+  }
+}

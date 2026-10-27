@@ -1,0 +1,80 @@
+{
+  "scopes": [
+    {
+      "name": "link",
+      "tags": [
+        "link-type"
+      ]
+    },
+    {
+      "name": "resource",
+      "tags": [
+        "k6",
+        "service.name"
+      ]
+    },
+    {
+      "name": "span",
+      "tags": [
+        "article.count",
+        "http.flavor",
+        "http.method",
+        "http.request.header.accept",
+        "http.request_content_length",
+        "http.response.header.content-type",
+        "http.response_content_length",
+        "http.scheme",
+        "http.status_code",
+        "http.target",
+        "http.url",
+        "net.host.name",
+        "net.host.port",
+        "net.peer.name",
+        "net.peer.port",
+        "net.sock.family",
+        "net.sock.host.addr",
+        "net.sock.peer.addr",
+        "net.transport",
+        "numbers",
+        "one"
+      ]
+    },
+    {
+      "name": "intrinsic",
+      "tags": [
+        "duration",
+        "event:name",
+        "event:timeSinceStart",
+        "instrumentation:name",
+        "instrumentation:version",
+        "kind",
+        "name",
+        "rootName",
+        "rootServiceName",
+        "span:duration",
+        "span:kind",
+        "span:name",
+        "span:status",
+        "span:statusMessage",
+        "status",
+        "statusMessage",
+        "trace:duration",
+        "trace:rootName",
+        "trace:rootService",
+        "traceDuration"
+      ]
+    },
+    {
+      "name": "event",
+      "tags": [
+        "exception.escape",
+        "exception.message",
+        "exception.stacktrace",
+        "exception.type"
+      ]
+    }
+  ],
+  "metrics": {
+    "inspectedBytes": "377046"
+  }
+}

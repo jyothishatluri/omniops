@@ -1,0 +1,460 @@
+# Chronosphere Observability Platform (now Palo Alto Networks Cortex XCOR).
+# Extends templates/prometheus.yaml for the Prometheus query API under /data/metrics (only instant query,
+# range query, series and labels are supported) and adds the documented Data API (alerts, change events, metric
+# metadata) and
+# Config API (monitors) so alert rules, alert history and deploys are queryable too.
+# Docs: https://docs.chronosphere.io/tooling/prometheus-api  (redirects to docs-xcor.paloaltonetworks.com)
+#       https://docs.chronosphere.io/tooling/api-info
+source: chronosphere
+display_name: Chronosphere (Cortex XCOR)
+vendor: Chronosphere / Palo Alto Networks
+extends: prometheus
+description: >-
+  Chronosphere / Cortex XCOR: PromQL range and instant queries, series and labels (Prometheus API under
+  /data/metrics), plus monitors (Config API), fired alerts, change events and metric metadata (Data API).
+docs_url: https://docs.chronosphere.io/tooling/prometheus-api
+categories: [metrics, alerts, events]
+base_url: >-
+  https://{{ env.CHRONOSPHERE_DOMAIN.replace('https://', '').rstrip('/') if '.' in env.CHRONOSPHERE_DOMAIN
+  else env.CHRONOSPHERE_DOMAIN ~ '.chronosphere.io' }}
+env:
+  - name: CHRONOSPHERE_DOMAIN
+    description: >-
+      Tenant subdomain, e.g. 'acme' for https://acme.chronosphere.io (the docs' ${CHRONOSPHERE_DOMAIN}); a full
+      host such as acme.chronosphere.io is also accepted.
+  - name: CHRONOSPHERE_API_TOKEN
+    description: "Service-account API token (or a temporary personal access token). Sent as 'Authorization: Bearer' and as 'API-Token' for the Config/Data APIs."
+    secret: true
+required_env: [CHRONOSPHERE_DOMAIN, CHRONOSPHERE_API_TOKEN]
+auth:
+  type: bearer
+  token: "{{ env.CHRONOSPHERE_API_TOKEN }}"
+rate_limit:
+  concurrency: 4
+  notes: "Per-tenant query limits (series/samples per query, concurrent queries) return 4xx/429; the Data API ListEvents/ListAlerts page server-side."
+retention:
+  metrics: "per tenant contract (raw then downsampled resolutions); ask the Chronosphere admin"
+  change_events: "events can only be created within +-24h of now; retention per tenant"
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error: fix the expression; do not retry unchanged"}
+query_languages:
+  promql: >-
+    PromQL (Chronosphere is M3-based and PromQL-compatible, plus some custom functions). Selectors use braces:
+    metric{label="value"}. rate()/increase() need a range vector [5m]. Aggregate with sum by (label) (...).
+    Active alerts are also queryable as the metric ALERTS{alertname="...", alertstate="firing"}.
+  chronosphere_events: >-
+    Change-event filter expression: comparisons =, =~, !=, !~ joined with AND / OR and parentheses; dot notation
+    selects labels. Example: (category = "deploys" AND labels.service = "checkout").
+pitfalls:
+  - "Only the instant query, range query, series and labels Prometheus endpoints are supported: there is no Prometheus metadata, rules, alerts or targets API (use chronosphere_metric_metadata, chronosphere_monitors and chronosphere_alerts from the Data / Config APIs)."
+  - "An unknown metric or label returns 0 series, not an error: list label values first, then filter."
+  - "Derived/aggregated metrics (Chronosphere aggregation rules) may drop labels: a label filter that matches nothing may be a dropped label, not missing data."
+  - "Range queries are capped at ~11,000 points per series; the engine auto-sizes step to ~300 points."
+drop_tables: [chronosphere_metric_metadata, chronosphere_alerts, chronosphere_rules, chronosphere_targets]
+tables:
+  - name: chronosphere_query_range
+    description: >-
+      Evaluate a PromQL expression over a time range (GET /data/metrics/api/v1/query_range). One row per
+      (series, timestamp). Filter on query (required) and ts; optional step (seconds).
+    request:
+      method: GET
+      path: /data/metrics/api/v1/query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+    examples:
+      - sql: >-
+          SELECT labels->>'service' AS service, max(value) AS peak, arg_max(ts, value) AS peak_at
+          FROM chronosphere_query_range
+          WHERE query = 'sum by (service) (rate(http_requests_total{code=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per service over an hour, and when it peaked.
+      - sql: >-
+          SELECT ts, labels->>'alertname' AS alertname, value FROM chronosphere_query_range
+          WHERE query = 'ALERTS{alertstate="firing"}'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+        description: Which alerts were firing, minute by minute (ALERTS metric).
+    tests:
+      - {sql: "SELECT count(*) AS n FROM chronosphere_query_range WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_range.json
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+        note: "Prometheus HTTP API docs range example (Chronosphere docs point to prometheus.io for route documentation)."
+      - file: query_error.json
+        filters: {query: 'up{job=}'}
+        expect_error: "parse error"
+        note: "Built strictly from the documented Prometheus API error envelope (status=error, errorType, error); proves the 2xx error rule fires when a proxy/gateway answers 200 with an error body. Message text illustrative."
+    ui_link: null
+    docs_url: https://docs.chronosphere.io/tooling/prometheus-api
+
+  - name: chronosphere_query
+    description: >-
+      Evaluate a PromQL expression at one instant (GET /data/metrics/api/v1/query; evaluation time = upper bound
+      of ts). One row per series.
+    request:
+      method: GET
+      path: /data/metrics/api/v1/query
+      query:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | epoch_s }}"
+    examples:
+      - sql: "SELECT labels->>'alertname' AS alertname, labels->>'severity' AS severity FROM chronosphere_query WHERE query = 'ALERTS{alertstate=\"firing\"}'"
+        description: Alerts firing at the anchor time, from the ALERTS metric.
+      - sql: "SELECT labels->>'instance' AS instance FROM chronosphere_query WHERE query = 'up == 0'"
+        description: Targets that are down.
+    tests:
+      - {sql: "SELECT value FROM chronosphere_query WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_vector.json
+        filters: {query: up}
+        expect_rows: 2
+        expect_columns: {value: 1.0, metric: up}
+        note: "Prometheus HTTP API docs instant-query example (Chronosphere docs point to prometheus.io)."
+    docs_url: https://docs.chronosphere.io/tooling/prometheus-api
+
+  - name: chronosphere_series
+    description: Label sets of series matching a selector (GET /data/metrics/api/v1/series).
+    request:
+      method: GET
+      path: /data/metrics/api/v1/series
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    fixtures:
+      - file: series.json
+        filters: {match: up}
+        expect_rows: 3
+        expect_columns: {metric: up}
+        note: "Prometheus HTTP API docs series example."
+    examples:
+      - sql: "SELECT DISTINCT labels->>'service' AS service FROM chronosphere_series WHERE match = 'http_requests_total'"
+    docs_url: https://docs.chronosphere.io/tooling/prometheus-api
+
+  - name: chronosphere_label_values
+    description: Values of one label (GET /data/metrics/api/v1/label/{name}/values) - confirm a value exists before filtering.
+    request:
+      method: GET
+      path: "/data/metrics/api/v1/label/{{ filters.label }}/values"
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    fixtures:
+      - file: label_values.json
+        filters: {label: code}
+        expect_rows: 2
+        expect_columns: {value: "200"}
+        note: "Prometheus HTTP API docs label-values example."
+    examples:
+      - sql: "SELECT value AS service FROM chronosphere_label_values WHERE label = 'service'"
+    docs_url: https://docs.chronosphere.io/tooling/prometheus-api
+
+  - name: chronosphere_labels
+    title: Label names
+    description: Label names (GET /data/metrics/api/v1/labels), optionally scoped by a selector.
+    kind: entities
+    request:
+      method: GET
+      path: /data/metrics/api/v1/labels
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: match, description: "Optional series selector", examples: ['http_requests_total']}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT label FROM chronosphere_labels WHERE match = 'http_requests_total'"
+    fixtures:
+      - file: labels.json
+        expect_rows: 21
+        expect_columns: {label: __name__}
+        note: "Prometheus HTTP API docs label-names example."
+    docs_url: https://docs.chronosphere.io/tooling/prometheus-api
+
+  - name: chronosphere_alerts
+    title: Fired alerts (Data API)
+    description: >-
+      Alert instances (one signal crossing one monitor or SLO threshold) from the Data API ListAlerts call
+      (POST /api/v1/data/alerts), newest trigger first: state FIRING | RESOLVED, severity WARN | CRITICAL, mute
+      status, signal labels, monitor / SLO and the notifiers a notification was attempted against. ts =
+      triggered_at. By default the window selects alerts that were FIRING AT ANY POINT in it (active_time_range),
+      so long-running alerts that triggered before the window are included and ts can be earlier than the window
+      start; set window_mode = 'triggered' to select only alerts that triggered inside the window (trigger_time_range).
+    kind: alerts
+    request:
+      method: POST
+      path: /api/v1/data/alerts
+      headers: {API-Token: "{{ env.CHRONOSPHERE_API_TOKEN }}"}
+      body:
+        filter:
+          firing_status: "{{ filters.state }}"
+          severity: "{{ filters.severity }}"
+          mute_status: "{{ filters.mute_status }}"
+          source_type: "{{ filters.source_type }}"
+          trigger_time_range: "{{ {'start': time.start | rfc3339, 'end': time.end | rfc3339} if filters.window_mode == 'triggered' else None }}"
+          active_time_range: "{{ None if filters.window_mode == 'triggered' else {'start': time.start | rfc3339, 'end': time.end | rfc3339} }}"
+          monitor_slugs: "{{ filters.monitor_slug | as_list if filters.monitor_slug else None }}"
+          monitor_name_contains: "{{ filters.monitor_name_contains }}"
+          slo_slugs: "{{ filters.slo_slug | as_list if filters.slo_slug else None }}"
+          alert_title_contains: "{{ filters.title_contains }}"
+          source_collection_slugs: "{{ filters.collection_slug | as_list if filters.collection_slug else None }}"
+          source_team_slugs: "{{ filters.team_slug | as_list if filters.team_slug else None }}"
+          notifier_slugs: "{{ filters.notifier | as_list if filters.notifier else None }}"
+          alert_ids: "{{ filters.id | as_list if filters.id else None }}"
+        sort_order: TRIGGERED_DESC
+        page: {max_size: 200}
+    filters:
+      - {column: state, param: state, description: "FIRING | RESOLVED (uppercase)", examples: [FIRING]}
+      - {column: severity, description: "WARN | CRITICAL (uppercase)", examples: [CRITICAL]}
+      - {column: mute_status, description: "MUTED | NOT_MUTED"}
+      - {column: source_type, description: "MONITOR | SLO"}
+      - {column: window_mode, description: "active (default: alerts firing at any point in the window) | triggered (alerts that started in the window)", examples: [active]}
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "Alert id(s)"}
+      - {column: monitor_slug, ops: ["=", "in"], fan_out: false, description: "Monitor slug(s) (one of the OR'ed search filters)", examples: [checkout-error-rate]}
+      - {column: monitor_name_contains, description: "Case-insensitive substring of the monitor name or slug (OR'ed search filter)"}
+      - {column: slo_slug, ops: ["=", "in"], fan_out: false, description: "SLO slug(s) (OR'ed search filter)"}
+      - {column: title_contains, description: "Case-insensitive substring of the alert title (OR'ed search filter)"}
+      - {column: collection_slug, ops: ["=", "in"], fan_out: false, description: "Collection(s) owning the monitor/SLO"}
+      - {column: team_slug, ops: ["=", "in"], fan_out: false, description: "Owning team(s), recorded when the alert triggered"}
+      - {column: notifier, ops: ["=", "in"], fan_out: false, description: "Notifier slug(s) a notification was attempted against (failed sends match too); the notifiers column lists them all", examples: [slack-payments]}
+    time: {column: ts, default_lookback: 6h, max_window: 30d, reapply: false, control_lookback: 7d}
+    pagination: {type: cursor, cursor_path: "$.page.next_token", cursor_param: body.page.token, max_pages: 5}
+    response:
+      rows_path: "$.alerts[*]"
+    columns:
+      - {name: id, path: alert_id}
+      - {name: title, path: alert_title}
+      - {name: state, path: firing_status, description: "FIRING | RESOLVED"}
+      - {name: severity, path: severity, description: "WARN | CRITICAL"}
+      - {name: mute_status, path: mute_status, description: "MUTED | NOT_MUTED"}
+      - {name: source_type, expr: "'SLO' if _.slo_slug else ('MONITOR' if _.monitor_slug else None)", description: "MONITOR | SLO"}
+      - {name: ts, type: TIMESTAMP, path: triggered_at, description: "When the alert started firing (may precede the window in the default 'active' mode)"}
+      - {name: resolved_at, type: TIMESTAMP, path: resolved_at, description: "Null while still firing"}
+      - {name: service, expr: "_.signal.service or _.signal.service_name or _.signal['service.name'] or _.monitor_labels.service"}
+      - {name: monitor_slug, path: monitor_slug}
+      - {name: monitor_name, path: monitor_name}
+      - {name: slo_slug, path: slo_slug}
+      - {name: slo_name, path: slo_name}
+      - {name: collection_slug, path: collection_slug}
+      - {name: notification_policy_slug, path: notification_policy_slug}
+      - {name: notifiers, path: notifier_slugs, transform: join, transform_arg: ",", description: "Notifiers a notification was attempted against (empty = nobody was notified)"}
+      - {name: external_connections, type: JSON, path: external_connections, description: "External connections (PagerDuty, OpsGenie, webhooks...) a notification was attempted through"}
+      - {name: signal, type: JSON, path: signal, description: "Labels of the signal that fired"}
+      - {name: labels, type: JSON, path: monitor_labels, description: "Monitor / SLO labels"}
+      - {name: total_count, type: BIGINT, path: "$.total_count", description: "Alerts matching the filter across all pages (same on every row)"}
+      - {name: window_mode, filter_only: true}
+      - {name: notifier, filter_only: true, description: "Filter: alerts notified via this notifier slug"}
+      - {name: team_slug, filter_only: true}
+      - {name: monitor_name_contains, filter_only: true}
+      - {name: title_contains, filter_only: true}
+    pitfalls:
+      - "monitor_slug, monitor_name_contains, slo_slug and title_contains are OR'ed with each other by the API (they widen the search); every other filter is AND'ed."
+      - "state, severity, mute_status and source_type are uppercase enums (FIRING, CRITICAL, NOT_MUTED, MONITOR); lowercase values are rejected or match nothing."
+      - "The API rejects windows wider than its maximum span instead of truncating; narrow ts if a 400 mentions the time range."
+      - "Time predicates are not re-applied in SQL (the API window is authoritative): in the default active mode ts can be earlier than the window start."
+    examples:
+      - sql: >-
+          SELECT ts, title, severity, state, resolved_at, notifiers FROM chronosphere_alerts
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Every alert that was firing around the incident (including ones that started earlier), and who was notified.
+      - sql: >-
+          SELECT monitor_name, count(*) AS fires FROM chronosphere_alerts
+          WHERE severity = 'CRITICAL' AND window_mode = 'triggered'
+          GROUP BY 1 ORDER BY fires DESC
+        description: Noisiest critical monitors - alerts that triggered inside the window.
+      - sql: "SELECT title, ts, notifiers, external_connections FROM chronosphere_alerts WHERE state = 'FIRING' AND mute_status = 'MUTED'"
+        description: Firing alerts whose notifications are muted (nobody is being paged).
+    fixtures:
+      - file: alerts.json
+        expect_rows: 2
+        expect_columns: {id: 01J9ZK3Q5W8R7T6Y5U4I3O2P1A, state: FIRING, severity: CRITICAL, service: checkout, notifiers: slack-payments, ts: "2026-10-01T11:52:00Z", total_count: 2, source_type: MONITOR}
+        note: "Built strictly from the Data API ListAlerts response schema (datav1ListAlertsResponse / datav1Alert in the Data API swagger); the docs give no example body. Values illustrative."
+    docs_url: https://docs-xcor.paloaltonetworks.com/tooling/api-info/data_definition/operations/ListAlerts
+
+  - name: chronosphere_metric_metadata
+    title: Metric metadata (Data API)
+    description: >-
+      Type, description and ingestion source of one metric (GET /api/v1/data/metrics:metadata/{metric_name},
+      ReadMetricMetadata). The Prometheus /api/v1/metadata route is not supported by Chronosphere, so use this to
+      check whether a metric is a counter (needs rate()) or a gauge, and whether it came from Prometheus, OTel,
+      StatsD, CloudWatch... One row per requested metric.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1/data/metrics:metadata/{{ filters.metric | urlencode }}"
+      headers: {API-Token: "{{ env.CHRONOSPHERE_API_TOKEN }}"}
+      accept_status: [404]
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], description: "Metric name (IN fans out one request per metric)", examples: [http_requests_total]}
+    response:
+      rows_path: "$.metadata"
+    columns:
+      - {name: metric, path: name}
+      - {name: type, path: type, description: "CUMULATIVE_COUNTER | GAUGE | DELTA_COUNTER | MEASUREMENT | CUMULATIVE_EXPONENTIAL_HISTOGRAM | DELTA_EXPONENTIAL_HISTOGRAM"}
+      - {name: help, path: description, description: "Human-readable description"}
+      - {name: source, path: source, description: "PROMETHEUS | OPEN_TELEMETRY | STATSD | DOGSTATSD | CARBON | SIGNALFX | WAVEFRONT | CLOUDWATCH_METRIC_STREAM | CHRONO_GCP | CHRONO_AZURE ..."}
+    pitfalls:
+      - "A metric that does not exist answers 404, which this table turns into 0 rows."
+      - "DELTA_COUNTER / MEASUREMENT metrics come from non-Prometheus senders (StatsD, OTel delta temporality): check the type before applying rate()/increase(), which assume cumulative counters."
+    examples:
+      - sql: "SELECT metric, type, source, help FROM chronosphere_metric_metadata WHERE metric IN ('http_requests_total', 'http_request_duration_seconds')"
+        description: Are these counters or gauges, and where do they come from?
+    fixtures:
+      - file: metric_metadata.json
+        filters: {metric: http_requests_total}
+        expect_rows: 1
+        expect_columns: {metric: http_requests_total, type: CUMULATIVE_COUNTER, source: PROMETHEUS}
+        note: "Built strictly from the Data API ReadMetricMetadata response schema (datav1ReadMetricMetadataResponse / datav1MetricMetadata); the docs give no example body."
+    docs_url: https://docs-xcor.paloaltonetworks.com/tooling/api-info/data_definition/operations/ReadMetricMetadata
+
+  - name: chronosphere_change_events
+    title: Change events (deploys, feature flags, infra)
+    description: >-
+      Change events in the window (GET /api/v1/data/events, ListEvents): deploys, feature flags, infrastructure
+      and alert events with labels. ts = happened_at. Push down category / service, or a raw event query.
+    kind: changes
+    request:
+      method: GET
+      path: /api/v1/data/events
+      headers: {API-Token: "{{ env.CHRONOSPHERE_API_TOKEN }}"}
+      query:
+        happened_after: "{{ time.start | rfc3339 }}"
+        happened_before: "{{ time.end | rfc3339 }}"
+        query: >-
+          {{ ((['(' ~ filters.query ~ ')'] if filters.query else [])
+          + (['category = "' ~ filters.category ~ '"'] if filters.category else [])
+          + (['labels.service = "' ~ filters.service ~ '"'] if filters.service else [])) | join(' AND ') or None }}
+        page.max_size: 200
+    filters:
+      - {column: category, description: "alerts | broadcasts | chronosphere | deploys | feature_flags | infrastructure | third_party (case-sensitive)", examples: [deploys]}
+      - {column: service, description: "Matches labels.service exactly", examples: [checkout]}
+      - {column: query, description: "Raw event filter expression, e.g. source =~ \"argocd|spinnaker\"", examples: ['source = "argocd"']}
+    time: {column: ts, default_lookback: 6h, max_window: 30d}
+    pagination: {type: cursor, cursor_path: "$.page.next_token", cursor_param: query.page.token, max_pages: 5}
+    response:
+      rows_path: "$.events[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: happened_at}
+      - {name: title, path: title}
+      - {name: category, path: category}
+      - {name: type, path: type}
+      - {name: source, path: source}
+      - {name: service, path: "labels.service"}
+      - {name: version, expr: "_.labels.version or _.labels.git_sha or _.labels.commit"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: payload, path: payload_json, description: "Original event JSON (string)"}
+      - {name: id, path: id}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Categories are case-sensitive (deploys, not Deploys); a wrong case returns 0 rows."
+      - "Without both time bounds the API defaults to the last hour; the engine always sends the window."
+    examples:
+      - sql: >-
+          SELECT ts, service, title, version, source FROM chronosphere_change_events
+          WHERE category = 'deploys' AND ts BETWEEN TIMESTAMP '2026-10-01 10:30:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Deploys shortly before and during the incident.
+      - sql: "SELECT ts, category, title FROM chronosphere_change_events WHERE service = 'checkout' ORDER BY ts DESC"
+        description: Every change touching checkout in the window.
+    fixtures:
+      - file: events.json
+        expect_rows: 2
+        expect_columns: {title: Deploy checkout v2.14.0, category: deploys, service: checkout, version: v2.14.0, ts: "2026-10-01T11:48:00Z"}
+        note: "Built strictly from the Data API ListEvents response schema (datav1ListEventsResponse in api_v1_data_swagger.json)."
+    docs_url: https://docs-xcor.paloaltonetworks.com/tooling/api-info/data_definition/operations/ListEvents
+
+  - name: chronosphere_monitors
+    title: Monitors (alert rules)
+    description: >-
+      Monitor definitions (GET /api/v1/config/monitors, ListMonitors): query (PromQL / Graphite / logging),
+      signal grouping, warn/critical series conditions with sustain, labels, annotations (runbooks) and the
+      notification policy. Look up why and to whom an alert fires.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/config/monitors
+      headers: {API-Token: "{{ env.CHRONOSPHERE_API_TOKEN }}"}
+      query:
+        slugs: "{{ filters.slug }}"
+        names: "{{ filters.name }}"
+        collection_slugs: "{{ filters.collection_slug }}"
+        team_slugs: "{{ filters.team_slug }}"
+        name_contains: "{{ filters.name_contains }}"
+        label_matchers: "{{ filters.label_matcher }}"
+        page.max_size: 200
+    filters:
+      - {column: slug, ops: ["=", "in"], fan_out: false, description: "Monitor slug(s)", examples: [checkout-error-rate]}
+      - {column: name, ops: ["=", "in"], fan_out: false, description: "Exact monitor name(s)"}
+      - {column: collection_slug, ops: ["=", "in"], fan_out: false, description: "Collection slug(s)"}
+      - {column: team_slug, ops: ["=", "in"], fan_out: false, description: "Owning team slug(s)"}
+      - {column: name_contains, description: "Case-insensitive substring of the name"}
+      - {column: label_matcher, ops: ["=", "in"], fan_out: false, description: "name=value or name!=value label matchers, AND-ed", examples: ['team=payments']}
+    pagination: {type: cursor, cursor_path: "$.page.next_token", cursor_param: query.page.token, max_pages: 10}
+    response:
+      rows_path: "$.monitors[*]"
+    columns:
+      - {name: slug, path: slug}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: query, expr: "_.prometheus_query or _.graphite_query or _.logging_query"}
+      - {name: query_type, expr: "'promql' if _.prometheus_query else ('graphite' if _.graphite_query else ('logging' if _.logging_query else None))"}
+      - {name: interval_secs, type: BIGINT, path: interval_secs}
+      - {name: series_conditions, type: JSON, path: series_conditions, description: "warn/critical conditions: op, value (threshold), sustain_secs"}
+      - {name: critical_threshold, type: DOUBLE, path: "series_conditions.defaults.critical.conditions[0].value"}
+      - {name: warn_threshold, type: DOUBLE, path: "series_conditions.defaults.warn.conditions[0].value"}
+      - {name: signal_grouping, type: JSON, path: signal_grouping}
+      - {name: collection_slug, expr: "_.collection_slug or _.collection.slug"}
+      - {name: bucket_slug, path: bucket_slug}
+      - {name: notification_policy_slug, path: notification_policy_slug}
+      - {name: team, path: "labels.team"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations, description: "Annotations (runbook links, summaries)"}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: team_slug, filter_only: true}
+      - {name: name_contains, filter_only: true}
+      - {name: label_matcher, filter_only: true}
+    pitfalls:
+      - "Many Config API list calls require an unrestricted service account; a restricted token returns 403."
+      - "updated_at close to the incident start means the monitor itself changed (threshold edits can cause or hide alerts)."
+    examples:
+      - sql: "SELECT name, query, critical_threshold, warn_threshold, annotations, updated_at FROM chronosphere_monitors WHERE slug = 'checkout-error-rate'"
+        description: The monitor behind an alert, with thresholds and runbook.
+      - sql: "SELECT slug, name, updated_at FROM chronosphere_monitors WHERE label_matcher = 'team=payments' ORDER BY updated_at DESC"
+        description: Payments-team monitors, most recently edited first.
+    fixtures:
+      - file: monitors.json
+        expect_rows: 1
+        expect_columns: {slug: checkout-error-rate, query_type: promql, critical_threshold: 0.05, team: payments, collection_slug: checkout}
+        note: "Built strictly from the Config API ListMonitors response schema (configv1ListMonitorsResponse / configv1Monitor in api_v1_config_swagger.json) and the pagination example on the api-info page."
+    docs_url: https://docs-xcor.paloaltonetworks.com/tooling/api-info/definition/operations/ListMonitors
+roles:
+  metrics: {table: chronosphere_query_range, query_language: promql}
+  active_alerts:
+    table: chronosphere_alerts
+    filters: {state: FIRING}
+    columns: {name: title, state: state, ts: ts, severity: severity, labels: signal, service: service}
+  alert_history:
+    table: chronosphere_alerts
+    columns: {name: title, state: state, ts: ts, severity: severity, service: service}
+  alert_rules:
+    table: chronosphere_monitors
+    columns: {name: name, query: query, id: slug}
+  change_events:
+    table: chronosphere_change_events
+    filters: {service: "{{ service }}"}
+    columns: {ts: ts, service: service, title: title, version: version}

@@ -1,0 +1,26 @@
+{
+  "init_offset": 0,
+  "messages": [
+    {"type": "DEBUG", "text": "base lispy: [ AND index::_internal ]"},
+    {"type": "INFO", "text": "Your timerange was substituted based on your search string"}
+  ],
+  "preview": false,
+  "results": [
+    {
+      "_cd": "50:59480",
+      "_indextime": "1333739623",
+      "_raw": "127.0.0.1 - admin [06/Apr/2012:12:13:42.943 -0700] \"POST /servicesNS/admin/search/search/jobs/export HTTP/1.1\" 200 2063 - - - 317ms",
+      "_serial": "0",
+      "_si": ["mbp15.splunk.com", "_internal"],
+      "_sourcetype": "splunkd_access",
+      "_subsecond": ".943",
+      "_time": "2012-04-06T12:13:42.943-07:00",
+      "host": "mbp15.splunk.com",
+      "index": "_internal",
+      "linecount": "1",
+      "source": "/Applications/splunk/var/log/splunk/splunkd_access.log",
+      "sourcetype": "splunkd_access",
+      "splunk_server": "mbp15.splunk.com"
+    }
+  ]
+}

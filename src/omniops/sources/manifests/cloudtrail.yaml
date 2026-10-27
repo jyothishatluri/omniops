@@ -1,0 +1,338 @@
+# AWS CloudTrail reached directly over HTTPS: event history (management events, last 90 days)
+# and, for accounts that already use it, CloudTrail Lake SQL.
+#
+# Protocol: AWS JSON 1.1 (service model protocol json, jsonVersion 1.1,
+# targetPrefix com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101)
+#   POST https://cloudtrail.<region>.amazonaws.com/
+#   Content-Type: application/x-amz-json-1.1
+#   X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.<Operation>
+#   auth: SigV4, signing name "cloudtrail"
+# StartTime/EndTime are epoch SECONDS; EventTime comes back as epoch seconds (e.g. 1424476529.0).
+# CloudTrailEvent is the full record as a JSON STRING; the engine parses it (expand parse: true).
+# Service model: https://github.com/boto/botocore/blob/develop/botocore/data/cloudtrail/2013-11-01/service-2.json
+# Research notes: docs/sources/cloudtrail.md
+source: cloudtrail
+display_name: AWS CloudTrail (event history)
+vendor: Amazon Web Services
+description: >-
+  Who changed what in the AWS account: management API calls (deployments, config and IAM changes,
+  scaling, security-group edits) and CloudTrail Insights events from the regional 90-day event
+  history (LookupEvents), plus CloudTrail Lake SQL queries for existing Lake customers.
+docs_url: https://docs.aws.amazon.com/awscloudtrail/latest/APIReference/Welcome.html
+categories: [changes, audit]
+base_url: >-
+  {{ env.AWS_ENDPOINT_URL_CLOUDTRAIL if (env.AWS_ENDPOINT_URL_CLOUDTRAIL and env.AWS_ENDPOINT_URL_CLOUDTRAIL != 'auto') else
+     ('https://cloudtrail.' ~ env.AWS_REGION ~ ('.amazonaws.com.cn' if (env.AWS_REGION or '').startswith('cn-') else '.amazonaws.com')) }}
+env:
+  - {name: AWS_REGION, description: "Region whose event history to read, e.g. us-east-1. Global services (IAM, CloudFront, Route 53) log to us-east-1."}
+  - {name: AWS_ENDPOINT_URL_CLOUDTRAIL, default: auto, description: "Optional endpoint override (VPC endpoint, FIPS https://cloudtrail-fips.<region>.amazonaws.com). 'auto' = https://cloudtrail.<region>.amazonaws.com"}
+  - {name: AWS_PROFILE, description: "Optional named profile; credentials come from the standard AWS chain (not read by templates)."}
+  - {name: AWS_ACCESS_KEY_ID, description: "Optional static key (AWS credential chain)", secret: true}
+  - {name: AWS_SECRET_ACCESS_KEY, description: "Optional static secret (AWS credential chain)", secret: true}
+  - {name: AWS_SESSION_TOKEN, description: "Optional session token (AWS credential chain)", secret: true}
+required_env: [AWS_REGION]
+auth:
+  type: aws_sigv4
+  service: cloudtrail
+  region: "{{ env.AWS_REGION }}"
+headers:
+  Content-Type: application/x-amz-json-1.1
+rate_limit:
+  concurrency: 1
+  # LookupEvents allows 2 requests per second per account per region (hard limit).
+  requests_per_minute: 100
+  # Throttling is HTTP 400 ThrottlingException ("Rate exceeded"); only those 400s are retried,
+  # genuinely invalid requests (InvalidLookupAttributesException...) fail immediately.
+  retry_body_patterns: ["ThrottlingException", "Rate exceeded", "MaxConcurrentQueriesException"]
+  max_retries: 3
+  notes: "LookupEvents: 2 requests per second per account per region (hard limit); 50 events per page. CloudTrail Lake: max 10 concurrent queries."
+retention:
+  changes: 90d
+  events: 90d
+ui_base_url: "https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudtrailv2/home?region={{ env.AWS_REGION }}"
+pitfalls:
+  - "Event history is regional and covers 90 days of MANAGEMENT events only: data events (S3 object access, Lambda Invoke, DynamoDB item reads) are not here; they need a trail or CloudTrail Lake."
+  - "Global services (IAM, STS global endpoint, CloudFront, Route 53) record in us-east-1."
+  - "Events usually appear within ~5 minutes of the API call; the last few minutes before 'now' can be incomplete."
+query_languages:
+  cloudtrail_lake_sql: >-
+    CloudTrail Lake SQL (Trino-like SELECT only): SELECT eventTime, eventSource, eventName,
+    userIdentity.arn AS user_arn, errorCode, requestParameters FROM <event-data-store-id> WHERE
+    eventTime > '2026-10-01 09:00:00' AND eventTime < '2026-10-01 12:00:00' AND readOnly = false
+    ORDER BY eventTime DESC LIMIT 200. The FROM clause is the event data store ID (the suffix of its
+    ARN). Always bound eventTime (billed per GB scanned). Nested fields use dots; element_at() for maps.
+tables:
+  - name: cloudtrail_events
+    title: Management events / change history (LookupEvents)
+    description: >-
+      One row per AWS management API call in the window, newest first: who (username, user_arn,
+      the assumed role in session_issuer, access_key_id), what (event_source like
+      lambda.amazonaws.com, event_name like UpdateFunctionCode20150331v2 / UpdateService /
+      ModifyDBInstance / PutScalingPolicy / AuthorizeSecurityGroupIngress), on which resources,
+      whether it failed (error_code), from where (source_ip, user_agent), and the parsed request
+      parameters and full record (cloudtrail_event JSON). read_only = false keeps only mutating
+      calls - the "what changed right before the incident" question. Only ONE lookup attribute is
+      sent to AWS (priority: resource_name, resource_type, event_id, event_name, username,
+      access_key_id, event_source, read_only); the other predicates are applied in SQL to what
+      comes back, so include the most selective one. event_category = 'insight' returns
+      CloudTrail Insights (API call-rate / error-rate anomaly) events.
+    kind: changes
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.LookupEvents}
+      body:
+        StartTime: "{{ time.start | epoch_s }}"
+        EndTime: "{{ time.end | epoch_s }}"
+        EventCategory: "{{ filters.event_category }}"
+        MaxResults: 50
+        # Insights events only support EventId / EventName / EventSource lookups.
+        LookupAttributes: >-
+          {{ [{'AttributeKey': 'ResourceName', 'AttributeValue': filters.resource_name}] if (filters.resource_name and filters.event_category != 'insight')
+             else [{'AttributeKey': 'ResourceType', 'AttributeValue': filters.resource_type}] if (filters.resource_type and filters.event_category != 'insight')
+             else [{'AttributeKey': 'EventId', 'AttributeValue': filters.event_id}] if (filters.event_id and not filters.event_id__op)
+             else [{'AttributeKey': 'EventName', 'AttributeValue': filters.event_name}] if (filters.event_name and not filters.event_name__op)
+             else [{'AttributeKey': 'Username', 'AttributeValue': filters.username}] if (filters.username and not filters.username__op and filters.event_category != 'insight')
+             else [{'AttributeKey': 'AccessKeyId', 'AttributeValue': filters.access_key_id}] if (filters.access_key_id and not filters.access_key_id__op and filters.event_category != 'insight')
+             else [{'AttributeKey': 'EventSource', 'AttributeValue': filters.event_source}] if (filters.event_source and not filters.event_source__op)
+             else [{'AttributeKey': 'ReadOnly', 'AttributeValue': (filters.read_only | string | lower)}] if (filters.read_only in [true, false, 'true', 'false'] and filters.event_category != 'insight')
+             else None }}
+    filters:
+      - {column: event_id, ops: ["=", "in"], description: "CloudTrail event id"}
+      - {column: resource_name, ops: ["=", "in"], description: "Exact resource name or ARN as recorded (function name, instance id, service ARN...); always pushed to AWS (IN fans out). For substring matches use resource_names LIKE '%x%' in SQL", examples: ["checkout-api"]}
+      - {column: event_name, ops: ["=", "in", "!=", "like"], description: "API action, e.g. UpdateFunctionCode20150331v2, UpdateService, ModifyDBInstance (Lambda names carry a version suffix: use LIKE 'UpdateFunction%', applied in SQL)", examples: ["UpdateService"]}
+      - {column: username, ops: ["=", "in", "!=", "like"], description: "IAM user / role session name as shown in event history", examples: ["deploy-bot"]}
+      - {column: access_key_id, ops: ["=", "in"], description: "Access key id used for the call"}
+      - {column: resource_type, ops: ["=", "in"], description: "Exact resource type, e.g. AWS::Lambda::Function, AWS::ECS::Service, AWS::EC2::SecurityGroup (pushed to AWS unless resource_name is also set, in which case it is ignored)", examples: ["AWS::Lambda::Function"]}
+      - {column: event_source, ops: ["=", "in", "!=", "like"], description: "Service endpoint, e.g. lambda.amazonaws.com, ecs.amazonaws.com, rds.amazonaws.com, autoscaling.amazonaws.com", examples: ["lambda.amazonaws.com"]}
+      - {column: read_only, type: BOOLEAN, ops: ["="], description: "false = only mutating (write) calls", examples: ["false"]}
+      - {column: event_category, description: "'insight' for CloudTrail Insights events (default: management events)"}
+    time: {column: ts, default_lookback: 3h, max_window: 90d, retention: 90d}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 6}
+    response:
+      rows_path: "$.Events[*]"
+      expand:
+        - {explode: CloudTrailEvent, parse: true, as: ev, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: EventTime, transform: auto_time, description: "When the API call happened (UTC)"}
+      - {name: event_name, path: EventName}
+      - {name: event_source, path: EventSource}
+      - {name: username, path: Username, description: "IAM user, role session name or root"}
+      - {name: read_only, type: BOOLEAN, path: ReadOnly, description: "ReadOnly arrives as the string 'true'/'false'"}
+      - {name: resource_names, path: "Resources[*].ResourceName", transform: join, transform_arg: ",", description: "Affected resources (comma-separated)"}
+      - {name: resource_types, path: "Resources[*].ResourceType", transform: join, transform_arg: ","}
+      - {name: resources, type: JSON, path: Resources, description: "[{ResourceType, ResourceName}]"}
+      - {name: title, expr: "(_.EventName or '') ~ ((' on ' ~ (_.Resources | map(attribute='ResourceName') | join(', '))) if _.Resources else '') ~ ((' by ' ~ _.Username) if _.Username else '') ~ ((' FAILED: ' ~ ev.errorCode) if (ev and ev.errorCode) else '')", description: "One-line summary: EventName on resources by user (+ error code)"}
+      - {name: event_id, path: EventId}
+      - {name: access_key_id, path: AccessKeyId}
+      - {name: error_code, path: "@ev.errorCode", description: "Set when the call FAILED (AccessDenied, ThrottlingException, ValidationException...): a failed call changed nothing"}
+      - {name: error_message, path: "@ev.errorMessage"}
+      - {name: succeeded, type: BOOLEAN, expr: "(not ev.errorCode) if ev else None"}
+      - {name: user_arn, path: "@ev.userIdentity.arn", description: "Caller ARN (assumed-role ARNs include the session name)"}
+      - {name: user_type, path: "@ev.userIdentity.type", description: "IAMUser | AssumedRole | Root | AWSService | AWSAccount | FederatedUser | IdentityCenterUser"}
+      - {name: session_issuer, path: "@ev.userIdentity.sessionContext.sessionIssuer.userName", description: "Role name behind an assumed-role session (e.g. the CI/CD deploy role)"}
+      - {name: invoked_by, path: "@ev.userIdentity.invokedBy", description: "AWS service that made the call on the user's behalf (cloudformation.amazonaws.com, autoscaling...)"}
+      - {name: source_ip, path: "@ev.sourceIPAddress"}
+      - {name: user_agent, path: "@ev.userAgent", description: "Tool used: console, aws-cli/..., Terraform/..., Boto3/..., CloudFormation"}
+      - {name: aws_region, path: "@ev.awsRegion"}
+      - {name: event_type, path: "@ev.eventType", description: "AwsApiCall | AwsServiceEvent | AwsConsoleSignIn | AwsCloudTrailInsight"}
+      - {name: account_id, path: "@ev.recipientAccountId"}
+      - {name: request_parameters, type: JSON, path: "@ev.requestParameters", description: "What was asked for: request_parameters->>'functionName', ->'desiredCount'"}
+      - {name: response_elements, type: JSON, path: "@ev.responseElements"}
+      - {name: insight_details, type: JSON, path: "@ev.insightDetails", description: "Insights events: state (Start|End), insightType, baseline vs insight averages"}
+      - {name: cloudtrail_event, type: JSON, path: "@ev", description: "Full parsed CloudTrail record"}
+      - {name: url, expr: "'https://' ~ ((ev.awsRegion if ev else None) or 'us-east-1') ~ '.console.aws.amazon.com/cloudtrailv2/home?region=' ~ ((ev.awsRegion if ev else None) or 'us-east-1') ~ '#/events/' ~ _.EventId", description: "Console link to the event (event history)"}
+      - {name: resource_name, filter_only: true, description: "Lookup filter (matches any affected resource); see resource_names"}
+      - {name: resource_type, filter_only: true}
+      - {name: event_category, filter_only: true}
+    max_rows: 2000
+    sort_hint: "newest first; at most max_pages x 50 events per request window"
+    pitfalls:
+      - "Only one lookup attribute reaches AWS; with an unselective one (read_only = false in a busy account) the 6-page cap (300 newest events) truncates the window. Prefer resource_name or event_source, and short windows."
+      - "Automated callers dominate history (autoscaling, CloudFormation, service-linked roles, log agents calling CreateLogStream): exclude them with invoked_by IS NULL, user_type <> 'AWSService', or event_name NOT IN (...) in SQL."
+      - "Lambda event names have API-version suffixes (UpdateFunctionCode20150331v2, UpdateFunctionConfiguration20150331v2); ECS deploys are UpdateService/RegisterTaskDefinition; CodeDeploy CreateDeployment; CloudFormation UpdateStack/ExecuteChangeSet."
+      - "Failed calls are recorded too: error_code IS NOT NULL means nothing changed."
+      - "resource_name matching is exact on what CloudTrail recorded (sometimes the name, sometimes the ARN)."
+      - "With event_category = 'insight' only event_id / event_name / event_source can be pushed; resource_name / resource_type / username filters are then ignored."
+    examples:
+      - sql: >-
+          SELECT ts, event_source, event_name, username, session_issuer, resource_names, user_agent
+          FROM cloudtrail_events
+          WHERE read_only = false
+            AND ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND event_name NOT IN ('AssumeRole', 'CreateLogStream', 'ConsoleLogin', 'StartQuery')
+            AND error_code IS NULL AND invoked_by IS NULL
+          ORDER BY ts DESC
+        description: Successful human/CI mutating API calls in the three hours before the incident.
+      - sql: >-
+          SELECT ts, event_name, username, resource_names, request_parameters->>'functionName' AS function_name, error_code
+          FROM cloudtrail_events
+          WHERE event_source = 'lambda.amazonaws.com' AND event_name LIKE 'UpdateFunction%'
+          ORDER BY ts DESC
+        description: Lambda code/config deployments (event source pushed to AWS, name prefix filtered in SQL).
+      - sql: >-
+          SELECT ts, event_name, username, request_parameters->>'taskDefinition' AS task_definition, request_parameters->>'desiredCount' AS desired_count
+          FROM cloudtrail_events
+          WHERE resource_name = 'arn:aws:ecs:us-east-1:123456789012:service/prod/checkout'
+          ORDER BY ts DESC LIMIT 20
+        description: Every recorded change to one ECS service (deploys, desired-count changes).
+      - sql: >-
+          SELECT ts, event_name, event_source, insight_details->>'state' AS insight_state, insight_details->>'insightType' AS insight_type
+          FROM cloudtrail_events WHERE event_category = 'insight'
+        description: CloudTrail Insights anomalies (unusual API call or error rates).
+      - sql: >-
+          SELECT ts, event_name, username, error_code, error_message FROM cloudtrail_events
+          WHERE event_source = 'iam.amazonaws.com' AND read_only = false ORDER BY ts DESC
+        description: IAM changes (look at us-east-1, where IAM records) - a revoked permission often explains AccessDenied storms.
+    tests:
+      - {sql: "SELECT ts, event_name FROM cloudtrail_events WHERE read_only = false LIMIT 5", min_rows: 0}
+    fixtures:
+      - file: lookup_events.json
+        filters: {event_source: null, read_only: null, event_name: null, username: null}
+        expect_rows: 1
+        expect_columns:
+          ts: "2015-02-20T23:55:29Z"
+          event_name: ConsoleLogin
+          username: root
+          event_id: 0ebbaee4-6e67-431d-8225-ba0d81df5972
+          title: ConsoleLogin by root
+          user_type: Root
+          source_ip: 203.0.113.4
+          aws_region: us-east-2
+          succeeded: true
+          url: "https://us-east-2.console.aws.amazon.com/cloudtrailv2/home?region=us-east-2#/events/0ebbaee4-6e67-431d-8225-ba0d81df5972"
+        note: >-
+          The "fictitious example" returned event from Viewing recent management events with the
+          AWS CLI (https://docs.aws.amazon.com/awscloudtrail/latest/userguide/view-cloudtrail-events-cli.html).
+          The doc pretty-prints CloudTrailEvent across lines (invalid JSON) and drops one escape;
+          it is re-serialized here as the single-line JSON string the API returns, content unchanged.
+          Schema: https://docs.aws.amazon.com/awscloudtrail/latest/APIReference/API_LookupEvents.html
+      - file: lookup_events_change.json
+        filters: {event_source: ec2.amazonaws.com, read_only: false}
+        expect_rows: 1
+        expect_columns:
+          ts: "2023-07-19T21:14:20Z"
+          event_name: StopInstances
+          event_source: ec2.amazonaws.com
+          read_only: false
+          resource_names: "i-EXAMPLE56126103cb,i-EXAMPLEaff4840c22"
+          title: "StopInstances on i-EXAMPLE56126103cb, i-EXAMPLEaff4840c22 by Nikki"
+          user_arn: "arn:aws:iam::777788889999:user/Nikki"
+          user_type: IAMUser
+          user_agent: "aws-cli/2.13.5 Python/3.11.4 Linux/4.14.255-314-253.539.amzn2.x86_64 exec-env/CloudShell exe/x86_64.amzn.2 prompt/off command/ec2.stop-instances"
+          request_parameters: '{"instancesSet":{"items":[{"instanceId":"i-EXAMPLE56126103cb"},{"instanceId":"i-EXAMPLEaff4840c22"}]},"force":false}'
+        note: >-
+          Built strictly from the LookupEvents response schema (Events[] of EventId, EventName,
+          ReadOnly, AccessKeyId, EventTime, EventSource, Username, Resources[], CloudTrailEvent),
+          wrapping the documented StopInstances record from
+          https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-log-file-examples.html
+          (AWS's public example key AKIAI44QH8DHBEXAMPLE, no secrets).
+      - file: lookup_events_assumed_role_failed.json
+        filters: {event_source: lambda.amazonaws.com}
+        expect_rows: 1
+        expect_columns:
+          event_name: UpdateFunctionConfiguration20150331v2
+          user_type: AssumedRole
+          session_issuer: deploy-role
+          error_code: AccessDenied
+          succeeded: false
+          title: "UpdateFunctionConfiguration20150331v2 on checkout-api by ci-session FAILED: AccessDenied"
+        note: >-
+          Built strictly from the LookupEvents response schema and the documented CloudTrail record
+          fields (userIdentity.type AssumedRole with sessionContext.sessionIssuer, errorCode,
+          errorMessage) at https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-user-identity.html
+          and https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-record-contents.html.
+          Values are illustrative.
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudtrailv2/home?region={{ env.AWS_REGION }}#/events
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudtrail_lake_query
+    title: CloudTrail Lake SQL query (StartQuery -> GetQueryResults)
+    description: >-
+      Run a CloudTrail Lake SQL query against an event data store (existing Lake customers only:
+      Lake closed to new customers on 2026-05-31). Use it when the 90-day management-event history
+      is not enough: data events (S3 object writes, Lambda invokes), longer retention, or
+      organization-wide stores. `query` (required) is the SQL with the event data store ID in FROM
+      and an eventTime range in WHERE. One row per result row: `row` holds every selected column
+      as JSON (row->>'eventName'); ts / event_name / event_source / user_arn / error_code are
+      filled when the query selects columns with those names (eventTime, eventName, eventSource,
+      user_arn, errorCode). The engine starts the query and polls until QueryStatus = FINISHED.
+    kind: changes
+    steps:
+      - name: start
+        method: POST
+        path: /
+        headers: {X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.StartQuery}
+        body:
+          QueryStatement: "{{ filters.query }}"
+          EventDataStoreOwnerAccountId: "{{ filters.owner_account_id }}"
+        capture: {query_id: "$.QueryId"}
+      - name: results
+        method: POST
+        path: /
+        headers: {X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.GetQueryResults}
+        body:
+          QueryId: "{{ captures.query_id }}"
+          MaxQueryResults: 1000
+          EventDataStoreOwnerAccountId: "{{ filters.owner_account_id }}"
+        poll:
+          until: "response.QueryStatus == 'FINISHED'"
+          fail_if: "response.QueryStatus in ['FAILED', 'CANCELLED', 'TIMED_OUT']"
+          interval_s: 2
+          timeout_s: 120
+    filters:
+      - column: query
+        required: true
+        description: "CloudTrail Lake SQL with FROM <event-data-store-id> and an eventTime range (see query_languages.cloudtrail_lake_sql)"
+        examples:
+          - "SELECT eventTime, eventSource, eventName, userIdentity.arn AS user_arn, errorCode FROM EXAMPLE-f852-4e8f-8bd1-bcf6cEXAMPLE WHERE eventTime > '2026-10-01 09:00:00' AND readOnly = false ORDER BY eventTime DESC LIMIT 200"
+      - {column: owner_account_id, description: "Account that owns the event data store (organization / delegated-admin stores)"}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.QueryResultRows[*]"
+      errors:
+        - {path: "$.ErrorMessage", non_empty: true, message: "$.ErrorMessage", hint: "CloudTrail Lake query failed: fix the SQL (FROM must be the event data store ID)"}
+    columns:
+      - {name: row, type: JSON, expr: "dict(_ | map('dictsort') | sum(start=[]))", description: "All selected columns of the result row (values are strings)"}
+      - {name: ts, type: TIMESTAMP, expr: "dict(_ | map('dictsort') | sum(start=[])).get('eventTime') or dict(_ | map('dictsort') | sum(start=[])).get('eventtime')", transform: auto_time, description: "eventTime when selected"}
+      - {name: event_name, expr: "dict(_ | map('dictsort') | sum(start=[])).get('eventName')"}
+      - {name: event_source, expr: "dict(_ | map('dictsort') | sum(start=[])).get('eventSource')"}
+      - {name: user_arn, expr: "dict(_ | map('dictsort') | sum(start=[])).get('user_arn')", description: "Select userIdentity.arn AS user_arn to fill it"}
+      - {name: error_code, expr: "dict(_ | map('dictsort') | sum(start=[])).get('errorCode')"}
+      - {name: query, filter_only: true}
+      - {name: owner_account_id, filter_only: true}
+    max_rows: 5000
+    positive_control: false
+    pitfalls:
+      - "Billed per GB scanned: always bound eventTime in the SQL; the SQL time range is authoritative (this table has no ts pushdown)."
+      - "Only for accounts that already have an event data store; LookupEvents (cloudtrail_events) works everywhere."
+      - "All values come back as strings; CAST(row->>'x' AS ...) for numbers."
+      - "The engine waits at most 120 s; long scans fail loudly - narrow eventTime."
+    examples:
+      - sql: >-
+          SELECT ts, event_source, event_name, user_arn, error_code FROM cloudtrail_lake_query
+          WHERE query = 'SELECT eventTime, eventSource, eventName, userIdentity.arn AS user_arn, errorCode FROM EXAMPLE-f852-4e8f-8bd1-bcf6cEXAMPLE WHERE eventTime > ''2026-10-01 09:00:00'' AND eventTime < ''2026-10-01 12:00:00'' AND readOnly = false ORDER BY eventTime DESC LIMIT 200'
+          ORDER BY ts DESC
+        description: Mutating calls (including data events, if the store collects them) in the hours before the incident.
+    fixtures:
+      - file: lake_get_query_results.json
+        filters: {query: "SELECT eventTime, eventSource, eventName, userIdentity.arn AS user_arn, errorCode FROM EXAMPLE-f852-4e8f-8bd1-bcf6cEXAMPLE"}
+        expect_rows: 2
+        expect_columns:
+          ts: "2026-10-01T11:41:07Z"
+          event_name: UpdateFunctionCode20150331v2
+          event_source: lambda.amazonaws.com
+          user_arn: "arn:aws:sts::123456789012:assumed-role/deploy-role/ci-session"
+        note: >-
+          Built strictly from the GetQueryResults response schema (QueryStatus, QueryStatistics,
+          QueryResultRows = array of arrays of string-to-string maps, one map per selected column) at
+          https://docs.aws.amazon.com/awscloudtrail/latest/APIReference/API_GetQueryResults.html
+          (no documented example of QueryResultRows). Values are illustrative.
+
+roles:
+  change_events:
+    table: cloudtrail_events
+    filters: {read_only: "false"}
+    columns: {ts: ts, title: title, author: username, resource: resource_names, id: event_id, service: event_source, url: url, status: error_code}
+    notes: "AWS-level changes only (deploys via API, config, IAM, scaling). Exclude automation (invoked_by, user_type = 'AWSService') and failed calls (error_code) in SQL; code changes live in the VCS sources."

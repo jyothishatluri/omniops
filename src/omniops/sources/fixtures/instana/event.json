@@ -1,0 +1,15 @@
+{
+  "eventId": "LZOGo1lXR4WeCB2ftgtGGQ",
+  "start": 1706783553000,
+  "end": 1706783553000,
+  "type": "change",
+  "state": "closed",
+  "problem": "Pulled",
+  "detail": "Successfully pulled image \"registry.redhat.io/redhat/redhat-marketplace-index:v4.14\" in 830.603468ms (830.624088ms including waiting)",
+  "severity": -2,
+  "entityName": "Kubernetes Pod",
+  "entityLabel": "openshift-marketplace/redhat-marketplace-qbn8f (pod)",
+  "entityType": "INFRASTRUCTURE",
+  "fixSuggestion": "Successfully pulled image \"registry.redhat.io/redhat/redhat-marketplace-index:v4.14\" in 830.603468ms (830.624088ms including waiting)",
+  "snapshotId": "xLziJivLyeepxBf0UnNR1ff-9MI"
+}

@@ -1,0 +1,1214 @@
+# Atlassian Jira Cloud (REST API v3) + Jira Service Management Operations (alerts, on-call) and
+# Incident (ITSM incident details) APIs as SQL tables.
+# Direct REST, no MCP.
+#
+# Every path, parameter, time unit and response path below was checked on 2026-10-27 against the
+# official OpenAPI descriptions that render the reference pages:
+#   Jira platform v3:  https://developer.atlassian.com/cloud/jira/platform/swagger-v3.v3.json
+#   JSM Operations:    https://developer.atlassian.com/cloud/jira/service-desk-ops/swagger.v3.json
+#   JSM Incident (v1, beta): https://dac-static.atlassian.com/cloud/incidents/swagger.v3.json
+# The fixtures are those documents' example responses (see each fixture note).
+# Research notes, auth, rate limits and pitfalls: docs/sources/jira.md.
+#
+# Conventions:
+#   * Issue search uses the CURRENT enhanced search endpoint GET /rest/api/3/search/jql
+#     (nextPageToken pagination). The old /rest/api/3/search (startAt/total) is being removed
+#     (Atlassian changelog CHANGE-2046) and is not used.
+#   * JQL dates are interpreted in the API user's PROFILE time zone and JQL has no UTC suffix. The
+#     ts window is therefore pushed down widened by 14 h on both sides ("yyyy-MM-dd HH:mm"), and
+#     the exact UTC window is re-applied in SQL on the returned timestamps.
+#   * Rich text (description, comment bodies) is Atlassian Document Format (ADF) JSON in v3. Tables
+#     request expand=renderedFields / renderedBody and expose plain text (HTML tags stripped);
+#     when no rendered HTML is present the text is taken from the ADF paragraphs.
+source: jira
+display_name: Jira
+vendor: Atlassian
+description: >-
+  Jira Cloud REST v3: JQL issue search (tickets, incidents, postmortem actions), one issue with
+  rendered description and changelog, issue changelogs (status/assignee/priority transitions,
+  single and bulk), comments, remote links (PRs, runbooks, Confluence pages linked from a ticket),
+  approximate JQL counts, projects, fields (custom field ids such as Severity) and users; plus Jira
+  Service Management Operations (ex-Opsgenie) alerts, alert logs and notes, on-call schedules,
+  who is on call, and operations teams; plus the JSM Incident REST API (beta) for one ITSM
+  incident's responders, affected services, major flag, linked alerts, paging alerts and chat
+  channels.
+docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/
+categories: [tickets, incidents, changes, alerts, oncall]
+base_url: "{{ (env.JIRA_URL or '') | trim('/') }}"
+ui_base_url: "{{ (env.JIRA_UI_URL or env.JIRA_URL or '') | trim('/') }}"
+env:
+  - {name: JIRA_URL, description: "Site base URL, e.g. https://acme.atlassian.net (no trailing /rest). For OAuth 2.0 (3LO) or scoped API tokens use the gateway form https://api.atlassian.com/ex/jira/<cloudId> and set JIRA_UI_URL."}
+  - {name: JIRA_EMAIL, description: "Atlassian account email used with JIRA_API_TOKEN for basic auth (JIRA_AUTH=basic)"}
+  - {name: JIRA_API_TOKEN, description: "API token (id.atlassian.com > Security > API tokens) for basic auth, or an OAuth 2.0 access token when JIRA_AUTH=bearer. Read-only use: Browse projects permission is enough.", secret: true}
+  - {name: JIRA_AUTH, description: "basic (email + API token, default) | bearer (OAuth 2.0 access token / service-account bearer token)", default: basic}
+  - {name: JIRA_UI_URL, description: "Browser base for /browse links when JIRA_URL is the api.atlassian.com gateway, e.g. https://acme.atlassian.net"}
+  - {name: JIRA_CLOUD_ID, description: "Site cloud id for the Jira Service Management Operations API (api.atlassian.com/jsm/ops/api/<cloudId>). Optional: when unset it is read from <site>/_edge/tenant_info on each JSM call."}
+  - {name: JIRA_INCIDENT_JQL, description: "JQL clause that defines an incident ticket for jira_incidents and the incidents role", default: "issuetype = Incident"}
+required_env: [JIRA_URL, JIRA_API_TOKEN]
+auth:
+  type: headers
+  headers:
+    Authorization: "{{ ('Bearer ' ~ env.JIRA_API_TOKEN) if (env.JIRA_AUTH or 'basic') | lower == 'bearer' else ('Basic ' ~ (((env.JIRA_EMAIL or '') ~ ':' ~ (env.JIRA_API_TOKEN or '')) | b64)) }}"
+headers:
+  Accept: application/json
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 300
+  max_retries: 3
+  notes: >-
+    Jira Cloud returns HTTP 429 with Retry-After (seconds) and RateLimit-Reason
+    (jira-burst-based | jira-quota-global-based | jira-quota-tenant-based | jira-per-issue-on-write).
+    Burst limits: ~100 GET/POST requests per second per tenant (GET issue 150/s). Points-based hourly
+    quotas (65,000 points/hour global pool; 1 point per request + 1 per object read, 2 per
+    user/group object) apply to Forge/Connect/OAuth 2.0 apps from 2 March 2026; API-token traffic
+    is governed by the burst limits only. JSM Operations alerts allow offset+size < 20,000.
+errors:
+  - {path: "$.errorMessages", non_empty: true, message: "$.errorMessages", hint: "Jira rejected the request (bad JQL, unknown field/value, or no permission): fix what the message names"}
+pitfalls:
+  - "JQL values must exist: an unknown project, status, issuetype, priority or label value is a 400 error ('The value 'X' does not exist for the field ...'), not 0 rows. List projects with jira_projects and custom fields with jira_fields first."
+  - "JQL dates have NO time zone: they are read in the API user's profile time zone. Always filter time with ts (UTC) in SQL; the engine widens the pushed-down window by 14 h and re-applies the exact range, so never hand-write updated >= '...' inside jql for incident windows."
+  - "The current search endpoint returns ONLY issue ids unless fields are requested; these tables always request the needed fields. Very large field lists make Jira return fewer issues per page (it never errors), so pagination continues via nextPageToken."
+  - "Unbounded JQL (e.g. only 'ORDER BY created') is rejected by /search/jql; every search here is bounded by the ts window or by key."
+  - "Status, priority and issue type names are pushed down case-insensitively but re-checked case-sensitively in SQL: use the exact display names (e.g. 'In Progress', 'Done'), or filter status_category ('To Do' | 'In Progress' | 'Done') which is stable across workflows."
+  - "Search results are eventually consistent: an issue created or updated seconds ago may be missing; look it up by key with jira_issue."
+  - "With the api.atlassian.com gateway JIRA_URL, issue url columns point at the gateway; set JIRA_UI_URL for browser links."
+query_languages:
+  jql: >-
+    JQL (Jira Query Language): clauses joined with AND / OR / NOT, e.g. project = OPS AND
+    issuetype = Incident AND statusCategory != Done AND labels in (checkout, payments) AND text ~
+    "connection reset" ORDER BY created DESC. Operators: = != > >= < <= ~ (contains, text fields)
+    !~ IN NOT IN IS EMPTY IS NOT EMPTY WAS CHANGED. Quote values with spaces or reserved words
+    ("In Progress"). Functions: currentUser(), now(), startOfDay(-1d), membersOf("team"). Use
+    accountIds (not names) for assignee/reporter. Custom fields: cf[10050] = "Sev 1" or the field
+    name in quotes ("Severity" = "Sev 1"). Max 7 ORDER BY fields. Do not put time windows in JQL
+    here: filter ts in SQL.
+  jsm_alert_search: >-
+    JSM Operations alert search: field: value pairs joined with AND / OR / NOT and parentheses,
+    e.g. status: open AND tag: critical, message: *timeout, entity: checkout-db, teams: "SRE",
+    priority is not searchable; comparisons count > 5; createdAt takes epoch milliseconds
+    (createdAt > 1470394841148) or DD-MM-YYYY. Wildcard * only at the start of a term. Fields:
+    alertId tinyId alias message description source entity status owner acknowledgedBy closedBy
+    recipients isSeen acknowledged snoozed teams integration.name integration.type tag actions
+    details.key details.value createdAt lastOccurredAt snoozedUntil count.
+
+tables:
+  # ----------------------------------------------------------------------------------------------
+  # Issue search (JQL)
+  # ----------------------------------------------------------------------------------------------
+  - name: jira_issues
+    title: Issues matching JQL (enhanced search)
+    description: >-
+      One row per Jira issue from GET /rest/api/3/search/jql, newest first by the time field
+      (time_field: updated (default) | created | resolved; ts is that field). Filter with any of:
+      query (free text over summary, description, environment and comments: JQL text ~), jql
+      (any JQL clause, e.g. "project = OPS AND issuetype = Bug"), project, key, status,
+      status_category, issue_type, priority, label, component, and a ts range (pushed down as JQL
+      on the chosen time field). key lookups ignore the time window. Use it to find tickets
+      mentioning a service or error, incidents opened around an onset, or follow-ups after one.
+    kind: incidents
+    request:
+      method: GET
+      path: /rest/api/3/search/jql
+      query:
+        jql: >-
+          {%- set j = (filters.jql or '') | trim -%}
+          {%- set oi = (j | lower).find('order by') -%}
+          {%- set w = ((j[:oi] if oi >= 0 else j) | trim) -%}
+          {%- set tf = {'created': 'created', 'resolved': 'resolved'}.get(filters.time_field or 'updated', 'updated') -%}
+          {%- set c = [] -%}
+          {%- if w %}{% set _ = c.append('(' ~ w ~ ')') %}{% endif -%}
+          {%- if filters.query %}{% set _ = c.append('text ~ ' ~ (filters.query | quote)) %}{% endif -%}
+          {%- if filters.project %}{% set _ = c.append('project in (' ~ (filters.project | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.key %}{% set _ = c.append('key in (' ~ (filters.key | as_list | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.status %}{% set _ = c.append('status in (' ~ (filters.status | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.status_category %}{% set _ = c.append('statusCategory in (' ~ (filters.status_category | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.issue_type %}{% set _ = c.append('issuetype in (' ~ (filters.issue_type | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.priority %}{% set _ = c.append('priority in (' ~ (filters.priority | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.label %}{% set _ = c.append('labels in (' ~ (filters.label | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.component %}{% set _ = c.append('component in (' ~ (filters.component | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if not filters.key %}{% set _ = c.append(tf ~ ' >= "' ~ (((time.start | epoch_s) - 50400) | strftime('%Y-%m-%d %H:%M')) ~ '" AND ' ~ tf ~ ' <= "' ~ (((time.end | epoch_s) + 50400) | strftime('%Y-%m-%d %H:%M')) ~ '"') %}{% endif -%}
+          {{ c | join(' AND ') }} {{ j[oi:] if oi >= 0 else ('ORDER BY ' ~ tf ~ ' DESC') }}
+        fields: &jira_search_fields "summary,status,priority,issuetype,project,labels,components,assignee,reporter,created,updated,resolutiondate,resolution,description,parent,fixVersions,environment,duedate,statuscategorychangedate"
+        expand: renderedFields
+        maxResults: "{{ [limit or 100, 100] | min }}"
+    filters: &jira_issue_filters
+      - {column: query, description: "Free text searched with JQL text ~ (summary, description, environment, comments, text custom fields). Word/stem match, not substring.", examples: ["checkout timeout"]}
+      - {column: jql, description: "Extra JQL clause(s) ANDed with the other filters; may end with ORDER BY. Do not put time windows here.", examples: ["project = OPS AND labels = postmortem"]}
+      - {column: project, ops: ["=", "in"], fan_out: false, description: "Project key or name", examples: [OPS]}
+      - {column: key, ops: ["=", "in"], fan_out: false, description: "Issue key(s); disables the time window", examples: [OPS-123]}
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "Exact status name (workflow specific)", examples: [In Progress]}
+      - {column: status_category, ops: ["=", "in"], fan_out: false, description: "To Do | In Progress | Done", examples: [Done]}
+      - {column: issue_type, ops: ["=", "in"], fan_out: false, description: "Issue type name, e.g. Bug, Incident, Task", examples: [Bug]}
+      - {column: priority, ops: ["=", "in"], fan_out: false, description: "Priority name, e.g. Highest, High, Medium", examples: [High]}
+      - {column: label, ops: ["=", "in"], fan_out: false, description: "Issues having this label (labels in (...))", examples: [checkout]}
+      - {column: component, ops: ["=", "in"], fan_out: false, description: "Issues in this component (by name)", examples: [payments-api]}
+      - {column: time_field, description: "Which date the ts window applies to: updated (default) | created | resolved", examples: [created]}
+    time: {column: ts, default_lookback: 7d}
+    pagination: &jira_search_pagination {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.nextPageToken, max_pages: 5}
+    response:
+      rows_path: "$.issues[*]"
+    columns: &jira_issue_columns
+      - {name: ts, type: TIMESTAMP, expr: "_.fields[{'created': 'created', 'resolved': 'resolutiondate'}.get(filters.time_field or 'updated', 'updated')]", description: "The time_field value (updated by default; created / resolutiondate)"}
+      - {name: key, path: key, description: "Issue key, e.g. OPS-123"}
+      - {name: id, path: id, description: "Numeric issue id (string)"}
+      - {name: title, path: fields.summary, description: "Summary"}
+      - {name: status, path: fields.status.name, description: "Workflow status name"}
+      - {name: status_category, path: fields.status.statusCategory.name, description: "To Do | In Progress | Done"}
+      - {name: priority, path: fields.priority.name}
+      - {name: issue_type, path: fields.issuetype.name}
+      - {name: project, path: fields.project.key, description: "Project key"}
+      - {name: project_name, path: fields.project.name}
+      - {name: assignee, path: fields.assignee.displayName}
+      - {name: assignee_account_id, path: fields.assignee.accountId, description: "Use in JQL: assignee = <accountId>"}
+      - {name: reporter, path: fields.reporter.displayName}
+      - {name: labels, type: JSON, path: fields.labels, description: "JSON array of labels"}
+      - {name: components, type: JSON, path: "fields.components[*].name", description: "JSON array of component names"}
+      - {name: fix_versions, type: JSON, path: "fields.fixVersions[*].name", description: "JSON array of fix version names"}
+      - {name: created, type: TIMESTAMP, path: fields.created}
+      - {name: updated, type: TIMESTAMP, path: fields.updated}
+      - {name: resolved, type: TIMESTAMP, path: fields.resolutiondate, description: "Resolution time (NULL while unresolved)"}
+      - {name: resolution, path: fields.resolution.name, description: "Fixed, Won't Do, Duplicate ... (NULL while unresolved)"}
+      - {name: parent_key, path: fields.parent.key, description: "Parent issue / epic key"}
+      - {name: description, expr: "((_.renderedFields.description | replace('<', ' <') | striptags) if (_.renderedFields and _.renderedFields.description) else (_.fields.description if _.fields.description is string else ((_.fields.description.content or []) | map(attribute='content') | select | sum(start=[]) | map(attribute='text') | select | join(' '))))", description: "Description as plain text (rendered HTML with tags stripped; ADF paragraphs as fallback)"}
+      - {name: url, expr: "((_.self or '').split('/rest/api/')[0]) ~ '/browse/' ~ _.key", description: "Browser link (site/browse/KEY)"}
+      - {name: query, filter_only: true}
+      - {name: jql, filter_only: true}
+      - {name: label, filter_only: true}
+      - {name: component, filter_only: true}
+      - {name: time_field, filter_only: true}
+    max_rows: 500
+    sort_hint: "newest first by time_field (updated by default) unless jql ends with its own ORDER BY"
+    pitfalls:
+      - "Without a ts predicate the window is the analysis window (often only minutes during an alert): give ts >= now() - INTERVAL 30 DAY (or similar) when looking for prior tickets."
+      - "time_field = 'created' finds tickets OPENED in the window; the default 'updated' also returns old tickets that were merely touched (comment, label) in the window."
+      - "query uses Jira's text index (word stems, stop words removed); 'checkout-api' matches 'checkout' and 'api' separately. Quote phrases inside query: query = '\"connection reset\"'."
+      - "A moved issue answers with its NEW key; a key filter on the old key returns the new key, which the SQL key = predicate then drops - use jira_issue for single lookups."
+    examples:
+      - sql: >-
+          SELECT key, ts, status, priority, title, url FROM jira_issues
+          WHERE query = 'checkout' AND time_field = 'created'
+            AND ts >= TIMESTAMP '2026-09-01 00:00:00' ORDER BY ts DESC LIMIT 20
+        description: Tickets created in the last month that mention the failing service.
+      - sql: >-
+          SELECT key, created, resolved, title, url FROM jira_issues
+          WHERE project = 'OPS' AND issue_type = 'Bug' AND status_category <> 'Done'
+            AND ts >= now() - INTERVAL 14 DAY
+        description: Open bugs in the OPS project touched in the last two weeks.
+      - sql: >-
+          SELECT key, status, assignee, title FROM jira_issues
+          WHERE jql = 'labels = postmortem AND text ~ "redis"' AND ts >= now() - INTERVAL 90 DAY
+        description: Postmortem follow-ups that mention Redis.
+    fixtures:
+      - file: search_jql.json
+        filters: {query: checkout}
+        expect_rows: 1
+        expect_columns: {key: ED-1, id: "10002", project: EX, project_name: Example, description: "Main order flow broken", url: "https://your-domain.atlassian.net/browse/ED-1"}
+        note: "Official example response of GET /rest/api/3/search/jql (operation searchAndReconsileIssuesUsingJql, Jira platform v3 OpenAPI), unmodified. It carries no summary/status fields, so the next fixture covers those."
+      - file: search_jql_page.json
+        filters: {project: EX, time_field: created}
+        expect_rows: 1
+        expect_columns: {ts: "2021-01-17T12:34:00Z", key: EX-1, title: "Checkout API returns 502 after deploy", status: In Progress, status_category: In Progress, priority: Major, issue_type: Task, project: EX, assignee: Mia Krystof, assignee_account_id: 5b10a2844c20165700ede21g, resolved: "2021-01-18T23:45:00Z", resolution: Fixed, description: "Main order flow broken", url: "https://your-domain.atlassian.net/browse/EX-1"}
+        note: "Built strictly from the SearchAndReconcileResults / IssueBean schemas (isLast, nextPageToken, issues[].fields, renderedFields). The status, priority, issuetype, resolution, project, user and component objects are the official example responses of GET /rest/api/3/status/{idOrName}, /priority/{id}, /issuetype/{id}, /resolution/{id}, /project/search, /user and /project/{key}/components; summary, labels and dates are schema-typed sample values."
+    ui_link: "{{ ui_base_url }}/issues/?jql={{ (filters.jql or (('text ~ ' ~ (filters.query | quote)) if filters.query else 'order by updated DESC')) | urlencode }}"
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/#api-rest-api-3-search-jql-get
+
+  - name: jira_incidents
+    title: Incident tickets (JQL scoped by JIRA_INCIDENT_JQL)
+    description: >-
+      Same rows and filters as jira_issues, restricted to incident tickets: the search is ANDed
+      with JIRA_INCIDENT_JQL (default "issuetype = Incident", the Jira Service Management ITSM
+      incident type). time_field works as in jira_issues (default updated; use created to find
+      incidents opened in the window). Use it for "has this happened before": prior incidents
+      for a service, their priority, resolution and time to resolve.
+    kind: incidents
+    request:
+      method: GET
+      path: /rest/api/3/search/jql
+      query:
+        jql: >-
+          {%- set j = (filters.jql or '') | trim -%}
+          {%- set oi = (j | lower).find('order by') -%}
+          {%- set w = ((j[:oi] if oi >= 0 else j) | trim) -%}
+          {%- set tf = {'created': 'created', 'resolved': 'resolved'}.get(filters.time_field or 'updated', 'updated') -%}
+          {%- set c = ['(' ~ (env.JIRA_INCIDENT_JQL or 'issuetype = Incident') ~ ')'] -%}
+          {%- if w %}{% set _ = c.append('(' ~ w ~ ')') %}{% endif -%}
+          {%- if filters.query %}{% set _ = c.append('text ~ ' ~ (filters.query | quote)) %}{% endif -%}
+          {%- if filters.project %}{% set _ = c.append('project in (' ~ (filters.project | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.key %}{% set _ = c.append('key in (' ~ (filters.key | as_list | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.status %}{% set _ = c.append('status in (' ~ (filters.status | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.status_category %}{% set _ = c.append('statusCategory in (' ~ (filters.status_category | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.issue_type %}{% set _ = c.append('issuetype in (' ~ (filters.issue_type | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.priority %}{% set _ = c.append('priority in (' ~ (filters.priority | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.label %}{% set _ = c.append('labels in (' ~ (filters.label | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.component %}{% set _ = c.append('component in (' ~ (filters.component | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if not filters.key %}{% set _ = c.append(tf ~ ' >= "' ~ (((time.start | epoch_s) - 50400) | strftime('%Y-%m-%d %H:%M')) ~ '" AND ' ~ tf ~ ' <= "' ~ (((time.end | epoch_s) + 50400) | strftime('%Y-%m-%d %H:%M')) ~ '"') %}{% endif -%}
+          {{ c | join(' AND ') }} {{ j[oi:] if oi >= 0 else ('ORDER BY ' ~ tf ~ ' DESC') }}
+        fields: *jira_search_fields
+        expand: renderedFields
+        maxResults: "{{ [limit or 100, 100] | min }}"
+    filters: *jira_issue_filters
+    time: {column: ts, default_lookback: 30d}
+    pagination: *jira_search_pagination
+    response:
+      rows_path: "$.issues[*]"
+    columns: *jira_issue_columns
+    max_rows: 500
+    sort_hint: "newest first by time_field (updated by default)"
+    pitfalls:
+      - "If the site has no issue type called Incident the search fails with 400 ('The value 'Incident' does not exist for the field 'issuetype''): set JIRA_INCIDENT_JQL (e.g. 'project = INC' or 'labels = incident')."
+      - "Severity in JSM is usually a custom field (find its id with jira_fields WHERE name ILIKE '%severity%' and filter jql = 'cf[10050] = \"Sev 1\"'); the priority column is the standard Priority field."
+    examples:
+      - sql: >-
+          SELECT key, created, resolved, priority, status, title, url FROM jira_incidents
+          WHERE query = 'checkout' AND time_field = 'created' AND ts >= now() - INTERVAL 90 DAY
+          ORDER BY created DESC
+        description: Prior incidents for the checkout service in the last 90 days, with time to resolve.
+      - sql: >-
+          SELECT key, title, date_diff('minute', created, resolved) AS minutes_to_resolve FROM jira_incidents
+          WHERE time_field = 'resolved' AND ts >= now() - INTERVAL 30 DAY ORDER BY minutes_to_resolve DESC
+        description: Incidents resolved in the last 30 days, slowest first.
+    fixtures:
+      - file: search_jql_page.json
+        filters: {query: checkout, time_field: created}
+        expect_rows: 1
+        expect_columns: {key: EX-1, priority: Major, resolution: Fixed, created: "2021-01-17T12:34:00Z"}
+        note: "Same schema-built page as jira_issues (SearchAndReconcileResults with field objects copied from the official status/priority/issuetype/resolution/user examples)."
+      - file: search_jql.json
+        expect_rows: 1
+        expect_columns: {key: ED-1, project: EX}
+        note: "Official example response of GET /rest/api/3/search/jql, unmodified."
+    ui_link: "{{ ui_base_url }}/issues/?jql={{ (env.JIRA_INCIDENT_JQL or 'issuetype = Incident') | urlencode }}"
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/#api-rest-api-3-search-jql-get
+
+  - name: jira_issue_count
+    title: Approximate number of issues matching JQL
+    description: >-
+      One row with the approximate count of issues matching the same filters as jira_issues
+      (query, jql, project, status, status_category, issue_type, priority, label, component,
+      time_field + ts window), from POST /rest/api/3/search/approximate-count. Cheap way to ask
+      "how many incidents / bugs mention X in the last 30 days" without paging issues.
+    kind: generic
+    request:
+      method: POST
+      path: /rest/api/3/search/approximate-count
+      body:
+        jql: >-
+          {%- set j = (filters.jql or '') | trim -%}
+          {%- set oi = (j | lower).find('order by') -%}
+          {%- set w = ((j[:oi] if oi >= 0 else j) | trim) -%}
+          {%- set tf = {'created': 'created', 'resolved': 'resolved'}.get(filters.time_field or 'updated', 'updated') -%}
+          {%- set c = [] -%}
+          {%- if w %}{% set _ = c.append('(' ~ w ~ ')') %}{% endif -%}
+          {%- if filters.query %}{% set _ = c.append('text ~ ' ~ (filters.query | quote)) %}{% endif -%}
+          {%- if filters.project %}{% set _ = c.append('project in (' ~ (filters.project | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.key %}{% set _ = c.append('key in (' ~ (filters.key | as_list | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.status %}{% set _ = c.append('status in (' ~ (filters.status | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.status_category %}{% set _ = c.append('statusCategory in (' ~ (filters.status_category | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.issue_type %}{% set _ = c.append('issuetype in (' ~ (filters.issue_type | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.priority %}{% set _ = c.append('priority in (' ~ (filters.priority | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.label %}{% set _ = c.append('labels in (' ~ (filters.label | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.component %}{% set _ = c.append('component in (' ~ (filters.component | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if not filters.key %}{% set _ = c.append(tf ~ ' >= "' ~ (((time.start | epoch_s) - 50400) | strftime('%Y-%m-%d %H:%M')) ~ '" AND ' ~ tf ~ ' <= "' ~ (((time.end | epoch_s) + 50400) | strftime('%Y-%m-%d %H:%M')) ~ '"') %}{% endif -%}
+          {{ c | join(' AND ') }}
+    filters: *jira_issue_filters
+    time: {column: ts, default_lookback: 30d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: count, type: BIGINT, path: count, description: "Approximate number of matching issues (recent changes may lag)"}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: jql, filter_only: true}
+      - {name: project, filter_only: true}
+      - {name: key, filter_only: true}
+      - {name: status, filter_only: true}
+      - {name: status_category, filter_only: true}
+      - {name: issue_type, filter_only: true}
+      - {name: priority, filter_only: true}
+      - {name: label, filter_only: true}
+      - {name: component, filter_only: true}
+      - {name: time_field, filter_only: true}
+    pitfalls:
+      - "The count is approximate and eventually consistent; use it for trends and magnitude, not exact accounting."
+    examples:
+      - sql: >-
+          SELECT count FROM jira_issue_count
+          WHERE issue_type = 'Incident' AND query = 'checkout' AND time_field = 'created' AND ts >= now() - INTERVAL 30 DAY
+        description: How many checkout incidents were opened in the last 30 days.
+    fixtures:
+      - file: approximate_count.json
+        filters: {query: checkout}
+        expect_rows: 1
+        expect_columns: {count: 153}
+        note: "Official example response of POST /rest/api/3/search/approximate-count (operation countIssues), unmodified."
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/#api-rest-api-3-search-approximate-count-post
+
+  # ----------------------------------------------------------------------------------------------
+  # One issue, its history, comments and links
+  # ----------------------------------------------------------------------------------------------
+  - name: jira_issue
+    title: One issue with all fields, rendered description and recent changelog
+    description: >-
+      One row for the issue key (or id) from GET /rest/api/3/issue/{key}?fields=*all
+      &expand=renderedFields,names,changelog. Gives the plain-text description, all fields as
+      JSON (custom fields included; field_names maps customfield ids to names), issue links,
+      subtasks, and the recent changelog. Use it to read a ticket referenced in an alert, a
+      Slack thread or a commit message.
+    kind: entities
+    request:
+      method: GET
+      path: "/rest/api/3/issue/{{ filters.key }}"
+      query:
+        fields: "*all"
+        expand: "renderedFields,names,changelog"
+      accept_status: [404]
+    filters:
+      - {column: key, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Issue key or numeric id", examples: [OPS-123]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: key, path: key}
+      - {name: id, path: id}
+      - {name: title, path: fields.summary}
+      - {name: status, path: fields.status.name}
+      - {name: status_category, path: fields.status.statusCategory.name}
+      - {name: priority, path: fields.priority.name}
+      - {name: issue_type, path: fields.issuetype.name}
+      - {name: project, path: fields.project.key}
+      - {name: assignee, path: fields.assignee.displayName}
+      - {name: reporter, path: fields.reporter.displayName}
+      - {name: labels, type: JSON, path: fields.labels}
+      - {name: components, type: JSON, path: "fields.components[*].name"}
+      - {name: created, type: TIMESTAMP, path: fields.created}
+      - {name: updated, type: TIMESTAMP, path: fields.updated}
+      - {name: resolved, type: TIMESTAMP, path: fields.resolutiondate}
+      - {name: resolution, path: fields.resolution.name}
+      - {name: description, expr: "((_.renderedFields.description | replace('<', ' <') | striptags) if (_.renderedFields and _.renderedFields.description) else (_.fields.description if _.fields.description is string else ((_.fields.description.content or []) | map(attribute='content') | select | sum(start=[]) | map(attribute='text') | select | join(' '))))", description: "Plain-text description"}
+      - {name: environment, expr: "((_.renderedFields.environment | replace('<', ' <') | striptags) if (_.renderedFields and _.renderedFields.environment) else (_.fields.environment if _.fields.environment is string else None))"}
+      - {name: issue_links, type: JSON, path: fields.issuelinks, description: "Linked issues (type.inward/outward + inwardIssue/outwardIssue key and status)"}
+      - {name: subtasks, type: JSON, path: "fields.subtasks[*].key"}
+      - {name: comment_count, type: BIGINT, path: fields.comment.total, description: "Total comments (read them with jira_issue_comments)"}
+      - {name: changelog, type: JSON, path: changelog.histories, description: "Recent change histories (created, author, items[field, fromString, toString]); full paged history: jira_issue_changelog"}
+      - {name: fields, type: JSON, path: fields, description: "Every field as JSON, keyed by field id (customfield_10050 ...)"}
+      - {name: field_names, type: JSON, path: names, description: "Field id -> display name map (expand=names)"}
+      - {name: url, expr: "((_.self or '').split('/rest/api/')[0]) ~ '/browse/' ~ _.key"}
+    pitfalls:
+      - "404 (no such issue or no Browse permission) is returned as 0 rows."
+      - "The embedded changelog is only the most recent histories; use jira_issue_changelog for the complete, paged history."
+    examples:
+      - sql: "SELECT key, status, priority, assignee, created, resolved, title, description, url FROM jira_issue WHERE key = 'OPS-123'"
+        description: Read the ticket referenced in an alert or a Slack message.
+      - sql: "SELECT key, fields->>'customfield_10050' AS severity, field_names->>'customfield_10050' AS severity_field FROM jira_issue WHERE key IN ('OPS-123', 'OPS-124')"
+        description: Read a custom field (e.g. Severity) of two tickets.
+    fixtures:
+      - file: issue.json
+        filters: {key: ED-1}
+        expect_rows: 1
+        expect_columns: {key: ED-1, id: "10002", project: EX, description: "Main order flow broken", url: "https://your-domain.atlassian.net/browse/ED-1"}
+        note: "Official example response of GET /rest/api/3/issue/{issueIdOrKey} (operation getIssue, Jira platform v3 OpenAPI), unmodified; description is ADF, so this also tests the ADF text fallback."
+    ui_link: "{{ ui_base_url }}/browse/{{ filters.key }}"
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-get
+
+  - name: jira_issue_changelog
+    title: Full change history of one issue
+    description: >-
+      One row per changed field per history entry of an issue (GET
+      /rest/api/3/issue/{key}/changelog, oldest first, paged with startAt). Shows when a ticket
+      changed status (Open -> In Progress -> Resolved), priority, assignee, labels, fix version or
+      any custom field, and who changed it. Use it to reconstruct an incident ticket's timeline
+      (time to acknowledge, time to resolve, escalations).
+    kind: events
+    request:
+      method: GET
+      path: "/rest/api/3/issue/{{ filters.key }}/changelog"
+      accept_status: [404]
+    filters:
+      - {column: key, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Issue key or id", examples: [OPS-123]}
+    pagination: {type: offset, offset_param: query.startAt, limit_param: query.maxResults, page_size: 100, total_path: "$.total", max_pages: 5}
+    response:
+      rows_path: "$.values[*]"
+      expand:
+        - {explode: items, as: it}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created, description: "When the change was made"}
+      - {name: history_id, path: id}
+      - {name: author, path: author.displayName}
+      - {name: author_account_id, path: author.accountId}
+      - {name: field, path: "@it.field", description: "Field name (status, assignee, priority, labels, resolution, Fix Version ...)"}
+      - {name: field_id, path: "@it.fieldId"}
+      - {name: field_type, path: "@it.fieldtype", description: "jira | custom"}
+      - {name: from_value, path: "@it.fromString", description: "Previous value (display string)"}
+      - {name: to_value, path: "@it.toString", description: "New value (display string)"}
+      - {name: from_id, path: "@it.from"}
+      - {name: to_id, path: "@it.to"}
+      - {name: key, filter_only: true}
+    sort_hint: "oldest first"
+    examples:
+      - sql: >-
+          SELECT ts, author, from_value, to_value FROM jira_issue_changelog
+          WHERE key = 'INC-42' AND field = 'status' ORDER BY ts
+        description: Status timeline of an incident ticket (acknowledged, mitigated, resolved).
+    fixtures:
+      - file: changelog.json
+        filters: {key: TT-1}
+        expect_rows: 2
+        expect_columns: {ts: "1970-01-18T06:27:50.429Z", history_id: "10001", author: Mia Krystof, field: fields, field_type: jira, from_value: "", to_value: label-1, key: TT-1}
+        note: "Official example response of GET /rest/api/3/issue/{issueIdOrKey}/changelog (operation getChangeLogs), unmodified."
+    ui_link: "{{ ui_base_url }}/browse/{{ filters.key }}?page=com.atlassian.jira.plugin.system.issuetabpanels:changehistory-tabpanel"
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-changelog-get
+
+  - name: jira_changelogs
+    title: Change histories of many issues at once (bulk)
+    description: >-
+      One row per changed field per history entry for up to 1000 issues in one call (POST
+      /rest/api/3/changelog/bulkfetch), optionally limited to some field ids (field_id IN
+      ('status', 'priority', 'assignee'), max 10). Rows carry the numeric issue_id, not the key:
+      join to jira_issues.id. Use it to compare time-in-status across a set of incident tickets.
+    kind: events
+    request:
+      method: POST
+      path: /rest/api/3/changelog/bulkfetch
+      body:
+        issueIdsOrKeys: "{{ filters.key | as_list }}"
+        fieldIds: "{{ (filters.field_id | as_list) or None }}"
+        maxResults: 1000
+    filters:
+      - {column: key, required: true, ops: ["=", "in"], fan_out: false, description: "Issue keys or ids (up to 1000)", examples: [OPS-123]}
+      - {column: field_id, ops: ["=", "in"], fan_out: false, description: "Only changes to these field ids (status, assignee, priority, resolution, customfield_10050 ...; max 10)", examples: [status]}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: body.nextPageToken, max_pages: 5}
+    response:
+      rows_path: "$.issueChangeLogs[*]"
+      expand:
+        - {explode: changeHistories, as: h}
+        - {explode: "@h.items", as: it}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@h.created", transform: auto_time, description: "When the change was made (the bulk API returns epoch seconds)"}
+      - {name: issue_id, path: issueId, description: "Numeric issue id (join jira_issues.id)"}
+      - {name: history_id, path: "@h.id"}
+      - {name: author, path: "@h.author.displayName"}
+      - {name: field, path: "@it.field"}
+      - {name: field_id, path: "@it.fieldId"}
+      - {name: from_value, path: "@it.fromString"}
+      - {name: to_value, path: "@it.toString"}
+      - {name: key, filter_only: true}
+    sort_hint: "oldest change first, then smallest issue id"
+    pitfalls:
+      - "field_id takes field IDS (status, assignee, priority, resolution, labels, customfield_NNNNN), not display names; the field column shows the display name."
+    examples:
+      - sql: >-
+          SELECT issue_id, ts, from_value, to_value FROM jira_changelogs
+          WHERE key IN ('INC-41', 'INC-42', 'INC-43') AND field_id = 'status' ORDER BY issue_id, ts
+        description: Status transitions of several incident tickets in one call.
+    fixtures:
+      - file: changelog_bulk.json
+        filters: {key: [TT-1]}
+        expect_rows: 2
+        expect_columns: {ts: "2017-04-13T08:00:29Z", issue_id: "10100", history_id: "10001", author: Mia Krystof, field_id: fieldId, from_value: old summary, to_value: new summary}
+        note: "Official example response of POST /rest/api/3/changelog/bulkfetch (operation getBulkChangelogs), unmodified (created is epoch seconds there)."
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-changelog-bulkfetch-post
+
+  - name: jira_issue_comments
+    title: Comments of one issue
+    description: >-
+      One row per comment of an issue, newest first (GET /rest/api/3/issue/{key}/comment
+      ?orderBy=-created&expand=renderedBody), with the body as plain text. Incident tickets often
+      hold the timeline, mitigation notes and root-cause discussion in comments.
+    kind: events
+    request:
+      method: GET
+      path: "/rest/api/3/issue/{{ filters.key }}/comment"
+      query:
+        orderBy: "-created"
+        expand: renderedBody
+      accept_status: [404]
+    filters:
+      - {column: key, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Issue key or id", examples: [OPS-123]}
+    pagination: {type: offset, offset_param: query.startAt, limit_param: query.maxResults, page_size: 100, total_path: "$.total", max_pages: 5}
+    response:
+      rows_path: "$.comments[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created}
+      - {name: updated, type: TIMESTAMP, path: updated}
+      - {name: id, path: id}
+      - {name: author, path: author.displayName}
+      - {name: author_account_id, path: author.accountId}
+      - {name: message, expr: "((_.renderedBody | replace('<', ' <') | striptags) if _.renderedBody else (_.body if _.body is string else ((_.body.content or []) | map(attribute='content') | select | sum(start=[]) | map(attribute='text') | select | join(' '))))", description: "Comment text (rendered HTML stripped; ADF paragraphs as fallback)"}
+      - {name: visibility, path: visibility.value, description: "Restricted to this role/group (NULL = public)"}
+      - {name: jsm_public, type: BOOLEAN, path: jsdPublic, description: "JSM: visible to customers"}
+      - {name: key, filter_only: true}
+    sort_hint: "newest first"
+    examples:
+      - sql: "SELECT ts, author, message FROM jira_issue_comments WHERE key = 'INC-42' ORDER BY ts"
+        description: Read an incident ticket's comment timeline.
+    fixtures:
+      - file: comments.json
+        filters: {key: ED-1}
+        expect_rows: 1
+        expect_columns: {ts: "2021-01-17T12:34:00Z", id: "10000", author: Mia Krystof, visibility: Administrators, key: ED-1, message: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Pellentesque eget venenatis elit. Duis eu justo eget augue iaculis fermentum. Sed semper quam laoreet nisi egestas at posuere augue semper."}
+        note: "Official example response of GET /rest/api/3/issue/{issueIdOrKey}/comment (operation getComments), unmodified (ADF body, no renderedBody)."
+    ui_link: "{{ ui_base_url }}/browse/{{ filters.key }}"
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/#api-rest-api-3-issue-issueidorkey-comment-get
+
+  - name: jira_issue_remote_links
+    title: Remote links of one issue (PRs, runbooks, dashboards, Confluence pages)
+    description: >-
+      One row per remote link on an issue (GET /rest/api/3/issue/{key}/remotelink): links to
+      pull requests, Confluence postmortems, dashboards, other trackers. Use it to jump from an
+      incident ticket to the change or document it references.
+    kind: entities
+    request:
+      method: GET
+      path: "/rest/api/3/issue/{{ filters.key }}/remotelink"
+      accept_status: [404]
+    filters:
+      - {column: key, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Issue key or id", examples: [OPS-123]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: title, path: object.title}
+      - {name: summary, path: object.summary}
+      - {name: url, path: object.url, description: "Target URL"}
+      - {name: relationship, path: relationship, description: "e.g. 'causes', 'mentioned in', 'is tested by'"}
+      - {name: application, path: application.name}
+      - {name: application_type, path: application.type}
+      - {name: resolved, type: BOOLEAN, path: object.status.resolved}
+      - {name: global_id, path: globalId}
+      - {name: key, filter_only: true}
+    pitfalls:
+      - "Development-panel links (branches, commits, PRs synced by the GitHub/GitLab/Bitbucket apps) are NOT remote links and do not appear here."
+    examples:
+      - sql: "SELECT title, relationship, application, url FROM jira_issue_remote_links WHERE key = 'INC-42'"
+        description: What the incident ticket links to.
+    fixtures:
+      - file: remote_links.json
+        filters: {key: MKY-1}
+        expect_rows: 2
+        expect_columns: {id: 10000, title: TSTSUP-111, summary: Customer support issue, url: "http://www.mycompany.com/support?id=1", relationship: causes, application: My Acme Tracker, resolved: true}
+        note: "Official example response of GET /rest/api/3/issue/{issueIdOrKey}/remotelink (operation getRemoteIssueLinks), unmodified."
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/#api-rest-api-3-issue-issueidorkey-remotelink-get
+
+  # ----------------------------------------------------------------------------------------------
+  # Discovery: projects, fields, users
+  # ----------------------------------------------------------------------------------------------
+  - name: jira_projects
+    title: Projects visible to the token
+    description: >-
+      One row per project (GET /rest/api/3/project/search, sorted by key). Filter query (matches
+      key or name, case-insensitive) or type_key (software | service_desk | business). Use it to
+      find the project key of a team or service before writing JQL.
+    kind: entities
+    request:
+      method: GET
+      path: /rest/api/3/project/search
+      query:
+        query: "{{ filters.query }}"
+        typeKey: "{{ filters.type_key }}"
+        expand: "description,lead,insight"
+    filters:
+      - {column: query, description: "Substring of project key or name", examples: [payments]}
+      - {column: type_key, description: "software | service_desk | business", examples: [service_desk]}
+    pagination: {type: offset, offset_param: query.startAt, limit_param: query.maxResults, page_size: 100, total_path: "$.total", max_pages: 5}
+    response:
+      rows_path: "$.values[*]"
+    columns:
+      - {name: key, path: key}
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: type_key, path: projectTypeKey}
+      - {name: category, path: projectCategory.name}
+      - {name: lead, path: lead.displayName}
+      - {name: description, path: description}
+      - {name: style, path: style, description: "classic (company-managed) | next-gen (team-managed)"}
+      - {name: last_issue_update, type: TIMESTAMP, path: insight.lastIssueUpdateTime}
+      - {name: issue_count, type: BIGINT, path: insight.totalIssueCount}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT key, name, type_key, last_issue_update FROM jira_projects WHERE query = 'pay' ORDER BY last_issue_update DESC"
+        description: Find the project behind the payments team.
+    fixtures:
+      - file: project_search.json
+        expect_rows: 2
+        expect_columns: {key: EX, id: "10000", name: Example, category: FIRST, style: classic, last_issue_update: "2021-04-22T05:37:05Z", issue_count: 100}
+        note: "Official example response of GET /rest/api/3/project/search (operation searchProjects), unmodified."
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-projects/#api-rest-api-3-project-search-get
+
+  - name: jira_fields
+    title: Issue fields (system and custom)
+    description: >-
+      One row per issue field (GET /rest/api/3/field): id (customfield_10050), name (Severity),
+      JQL clause names and type. Use it to find the id of a custom field (Severity, Affected
+      services, Root cause) before filtering with jql = 'cf[10050] = ...' or reading
+      jira_issue.fields.
+    kind: entities
+    request: {method: GET, path: /rest/api/3/field}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: custom, type: BOOLEAN, path: custom}
+      - {name: clause_names, type: JSON, path: clauseNames, description: "Names usable in JQL"}
+      - {name: type, path: schema.type}
+      - {name: custom_type, path: schema.custom}
+      - {name: searchable, type: BOOLEAN, path: searchable}
+    examples:
+      - sql: "SELECT id, name, clause_names, type FROM jira_fields WHERE custom AND name ILIKE '%severity%'"
+        description: Find the custom field that holds incident severity.
+    fixtures:
+      - file: fields.json
+        expect_rows: 2
+        expect_columns: {id: description, name: Description, custom: false, type: string, searchable: true}
+        note: "Official example response of GET /rest/api/3/field (operation getFields), unmodified."
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-fields/#api-rest-api-3-field-get
+
+  - name: jira_users
+    title: Users matching a name or email prefix
+    description: >-
+      Active users whose display name or email starts with query (GET /rest/api/3/user/search).
+      Use it to turn a person's name into the accountId JQL needs (assignee = <accountId>).
+    kind: entities
+    request:
+      method: GET
+      path: /rest/api/3/user/search
+      query:
+        query: "{{ filters.query }}"
+    filters:
+      - {column: query, required: true, description: "Prefix of display name or email", examples: [mia]}
+    pagination: {type: offset, offset_param: query.startAt, limit_param: query.maxResults, page_size: 50, max_pages: 2}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: account_id, path: accountId}
+      - {name: name, path: displayName}
+      - {name: email, path: emailAddress, description: "Often hidden by profile privacy settings"}
+      - {name: account_type, path: accountType, description: "atlassian | app | customer"}
+      - {name: active, type: BOOLEAN, path: active}
+      - {name: time_zone, path: timeZone}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Needs the 'Browse users and groups' global permission; without it the result is silently empty."
+    examples:
+      - sql: "SELECT account_id, name FROM jira_users WHERE query = 'mia'"
+        description: accountId of a person, for an assignee JQL clause.
+    fixtures:
+      - file: user_search.json
+        filters: {query: mia}
+        expect_rows: 2
+        expect_columns: {account_id: 5b10a2844c20165700ede21g, name: Mia Krystof, account_type: atlassian, active: false}
+        note: "Official example response of GET /rest/api/3/user/search (operation findUsers), unmodified."
+    docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-user-search/#api-rest-api-3-user-search-get
+
+  # ----------------------------------------------------------------------------------------------
+  # Jira Service Management Operations (alerts, on-call). Host: api.atlassian.com/jsm/ops/api/<cloudId>
+  # ----------------------------------------------------------------------------------------------
+  - name: jira_jsm_alerts
+    title: JSM Operations alerts created in a time window
+    description: >-
+      One row per Jira Service Management Operations alert (ex-Opsgenie) CREATED in the ts window
+      (GET https://api.atlassian.com/jsm/ops/api/{cloudId}/v1/alerts, newest first), any status.
+      Filter query (alert search syntax, e.g. "tag: checkout AND entity: db-1"), status
+      (open | acked | closed ...). Use it for alert history: what fired before and during the
+      incident, how often an alert recurs, who acknowledged it.
+    kind: alerts
+    steps:
+      - &jsm_cloud_step
+        name: cloud_id
+        when: "not env.JIRA_CLOUD_ID"
+        method: GET
+        url: "{{ (env.JIRA_UI_URL or env.JIRA_URL or '') | trim('/') }}/_edge/tenant_info"
+        capture: {cloud_id: "$.cloudId"}
+      - name: alerts
+        method: GET
+        url: "https://api.atlassian.com/jsm/ops/api/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/alerts"
+        query:
+          query: >-
+            {%- set c = [] -%}
+            {%- if filters.query %}{% set _ = c.append('(' ~ filters.query ~ ')') %}{% endif -%}
+            {%- if filters.status %}{% set _ = c.append('(' ~ (filters.status | as_list | format_each('status: {}') | join(' OR ')) ~ ')') %}{% endif -%}
+            {%- set _ = c.append('createdAt >= ' ~ (time.start | epoch_ms) ~ ' AND createdAt <= ' ~ (time.end | epoch_ms)) -%}
+            {{ c | join(' AND ') }}
+          sort: createdAt
+          order: desc
+    filters:
+      - {column: query, description: "JSM alert search expression (see query_languages.jsm_alert_search)", examples: ["tag: checkout"]}
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "open | acked | resolved | snoozed | closed", examples: [open]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.size, page_size: 100, total_path: "$.count", max_pages: 5}
+    response:
+      rows_path: "$.values[*]"
+    columns: &jsm_alert_columns
+      - {name: ts, type: TIMESTAMP, path: createdAt, description: "Alert creation time"}
+      - {name: id, path: id}
+      - {name: tiny_id, path: tinyId, description: "Short alert number shown in the UI"}
+      - {name: title, path: message, description: "Alert message (title)"}
+      - {name: state, path: status, description: "open | acked | resolved | snoozed | closed"}
+      - {name: status, path: status}
+      - {name: severity, path: priority, description: "P1 (highest) .. P5"}
+      - {name: acknowledged, type: BOOLEAN, path: acknowledged}
+      - {name: owner, path: owner}
+      - {name: count, type: BIGINT, path: count, description: "Times this alert (same alias) was triggered (deduplication count)"}
+      - {name: alias, path: alias, description: "Deduplication key"}
+      - {name: entity, path: entity}
+      - {name: source, path: source}
+      - {name: description, path: description}
+      - {name: tags, type: JSON, path: tags}
+      - {name: labels, type: JSON, path: extraProperties, description: "Extra properties (key/value details), e.g. labels->>'environment'"}
+      - {name: responders, type: JSON, path: responders}
+      - {name: integration_name, path: integrationName}
+      - {name: integration_type, path: integrationType}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: ack_time, type: TIMESTAMP, path: ackTime}
+      - {name: close_time, type: TIMESTAMP, path: closeTime}
+      - {name: last_occurred_at, type: TIMESTAMP, expr: "_.lastOccurredAt or _.lastOccuredAt", description: "Most recent trigger time"}
+      - {name: snoozed, type: BOOLEAN, path: snoozed}
+      - {name: query, filter_only: true}
+    max_rows: 500
+    sort_hint: "newest created first"
+    pitfalls:
+      - "The window filters on alert CREATION: an alert opened yesterday and still firing is not in today's window; use jira_jsm_active_alerts for what is open now."
+      - "At most 20,000 alerts are reachable (offset + size < 20,000); narrow query/time instead of paging."
+      - "JSM Operations must be enabled on the site; otherwise these tables return 401/403/404 (not 0 rows). The API user needs read:ops-alert access (basic auth with an API token works)."
+      - "JIRA_CLOUD_ID is discovered from <site>/_edge/tenant_info when unset; with an api.atlassian.com JIRA_URL set JIRA_CLOUD_ID explicitly."
+    examples:
+      - sql: >-
+          SELECT ts, tiny_id, severity, state, title, entity, count FROM jira_jsm_alerts
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00' ORDER BY ts
+        description: Every alert created around the incident, in order (which fired first).
+      - sql: >-
+          SELECT title, count(*) AS times, min(ts) AS first_seen, max(ts) AS last_seen FROM jira_jsm_alerts
+          WHERE query = 'tag: checkout' AND ts >= now() - INTERVAL 7 DAY GROUP BY title ORDER BY times DESC
+        description: How often checkout alerts fired in the last week.
+    fixtures:
+      - file: jsm_alerts.json
+        filters: {status: closed}
+        expect_rows: 1
+        expect_columns: {ts: "2024-01-05T07:06:47.958Z", id: e0caa0ce-d52f-4500-81b9-d592d06970b6, tiny_id: "1234", title: "The CPU usage on Server XYZ has exceeded 80% for over 5 minutes.", state: closed, severity: P1, acknowledged: true, count: 3, entity: DatabaseServer1, source: DBMonitoringTool, last_occurred_at: "2022-04-01T00:00:00Z"}
+        note: "Example response of 'List alerts' (GET /v1/alerts, operation listAlerts) as rendered on the JSM Operations reference page, i.e. the ListAlertResponse schema examples from the official swagger.v3.json; Priority is an enum without an example there, so its first value P1 is used."
+    docs_url: https://developer.atlassian.com/cloud/jira/service-desk-ops/rest/v2/api-group-alerts/#api-api-cloudid-v1-alerts-get
+
+  - name: jira_jsm_active_alerts
+    title: JSM Operations alerts open right now
+    description: >-
+      One row per JSM Operations alert that is currently open (status: open), whenever it was
+      created (GET .../v1/alerts?query=status: open, newest first). Optional query narrows it
+      (alert search syntax). Use it for "what else is firing right now".
+    kind: alerts
+    steps:
+      - *jsm_cloud_step
+      - name: alerts
+        method: GET
+        url: "https://api.atlassian.com/jsm/ops/api/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/alerts"
+        query:
+          query: "{{ ('status: open AND (' ~ filters.query ~ ')') if filters.query else 'status: open' }}"
+          sort: createdAt
+          order: desc
+    filters:
+      - {column: query, description: "Extra JSM alert search expression ANDed with status: open", examples: ["teams: SRE"]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.size, page_size: 100, total_path: "$.count", max_pages: 3}
+    response:
+      rows_path: "$.values[*]"
+    columns: *jsm_alert_columns
+    max_rows: 300
+    sort_hint: "newest created first"
+    examples:
+      - sql: "SELECT ts, severity, title, entity, acknowledged, owner FROM jira_jsm_active_alerts ORDER BY ts"
+        description: Everything open in JSM right now, oldest first.
+    fixtures:
+      - file: jsm_alerts.json
+        expect_rows: 1
+        expect_columns: {tiny_id: "1234", severity: P1, alias: DatabaseConnectionFailure_DatabaseServer1, integration_name: Default API}
+        note: "Same ListAlertResponse example as jira_jsm_alerts (official JSM Operations swagger.v3.json schema examples)."
+    docs_url: https://developer.atlassian.com/cloud/jira/service-desk-ops/rest/v2/api-group-alerts/#api-api-cloudid-v1-alerts-get
+
+  - name: jira_jsm_alert_logs
+    title: Activity log of one JSM alert
+    description: >-
+      One row per activity log entry of an alert (created, notified, acknowledged, assigned,
+      escalated, closed) from GET .../v1/alerts/{id}/logs. Use it to reconstruct the response
+      timeline: when the on-call was paged and acknowledged.
+    kind: events
+    steps:
+      - *jsm_cloud_step
+      - name: logs
+        method: GET
+        url: "https://api.atlassian.com/jsm/ops/api/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/alerts/{{ filters.alert_id }}/logs"
+        query: {size: 100}
+        accept_status: [404]
+    filters:
+      - {column: alert_id, required: true, description: "Alert id (the id column of jira_jsm_alerts, not tiny_id)", examples: [e0caa0ce-d52f-4500-81b9-d592d06970b6]}
+    response:
+      rows_path: "$.values[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: logTime}
+      - {name: log_type, path: logType, description: "system | alertRecipient | ..."}
+      - {name: message, path: log}
+      - {name: owner, path: owner, description: "User, team or system that caused the entry"}
+      - {name: alert_id, filter_only: true}
+    pitfalls:
+      - "Only the first 100 log entries are fetched (the API pages with a relative links.next URL the engine cannot follow on this host)."
+    examples:
+      - sql: "SELECT ts, owner, message FROM jira_jsm_alert_logs WHERE alert_id = 'e0caa0ce-d52f-4500-81b9-d592d06970b6' ORDER BY ts"
+        description: Paging / acknowledgement timeline of one alert.
+    fixtures:
+      - file: jsm_alert_logs.json
+        filters: {alert_id: 4513b7ea-3b91-438f-b7e4-e3e54af9147c}
+        expect_rows: 1
+        expect_columns: {ts: "2024-01-05T07:06:47.958Z", log_type: system, owner: system, message: "Assigning owner team [Dream] to alert because it is the only team on the alert and alert is not created via team integration."}
+        note: "Example response of 'List alert logs' (GET /v1/alerts/{id}/logs, operation getAlertLogs): the AlertLogsResponse schema examples from the official JSM Operations swagger.v3.json."
+    docs_url: https://developer.atlassian.com/cloud/jira/service-desk-ops/rest/v2/api-group-alerts/#api-api-cloudid-v1-alerts-id-logs-get
+
+  - name: jira_jsm_alert_notes
+    title: Notes on one JSM alert
+    description: >-
+      One row per note responders added to an alert (GET .../v1/alerts/{id}/notes): mitigation
+      steps, suspected causes, hand-offs.
+    kind: events
+    steps:
+      - *jsm_cloud_step
+      - name: notes
+        method: GET
+        url: "https://api.atlassian.com/jsm/ops/api/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/alerts/{{ filters.alert_id }}/notes"
+        query: {size: 100}
+        accept_status: [404]
+    filters:
+      - {column: alert_id, required: true, description: "Alert id (jira_jsm_alerts.id)", examples: [e0caa0ce-d52f-4500-81b9-d592d06970b6]}
+    response:
+      rows_path: "$.values[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: id, path: id}
+      - {name: author, path: owner}
+      - {name: message, path: note}
+      - {name: updated, type: TIMESTAMP, path: updatedAt}
+      - {name: alert_id, filter_only: true}
+    examples:
+      - sql: "SELECT ts, author, message FROM jira_jsm_alert_notes WHERE alert_id = 'e0caa0ce-d52f-4500-81b9-d592d06970b6' ORDER BY ts"
+        description: What responders wrote on the alert.
+    fixtures:
+      - file: jsm_alert_notes.json
+        filters: {alert_id: 4513b7ea-3b91-438f-b7e4-e3e54af9147c}
+        expect_rows: 1
+        expect_columns: {ts: "2024-01-05T07:06:47.958Z", id: "1704869443312000050", author: user@atlassian.com, message: System downtime expected due to maintenance activities.}
+        note: "Example response of 'List alert notes' (GET /v1/alerts/{id}/notes, operation getAlertNotes): the GetAlertNotesResponse schema examples from the official JSM Operations swagger.v3.json."
+    docs_url: https://developer.atlassian.com/cloud/jira/service-desk-ops/rest/v2/api-group-alerts/#api-api-cloudid-v1-alerts-id-notes-get
+
+  - name: jira_jsm_schedules
+    title: On-call schedules
+    description: >-
+      One row per JSM Operations on-call schedule (GET .../v1/schedules?expand=rotation), with its
+      team, time zone and rotations. Filter name (exact, case-insensitive; end with * for prefix).
+      Use it to find the schedule id for jira_jsm_oncalls.
+    kind: entities
+    steps:
+      - *jsm_cloud_step
+      - name: schedules
+        method: GET
+        url: "https://api.atlassian.com/jsm/ops/api/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/schedules"
+        query:
+          query: "{{ filters.name }}"
+          expand: rotation
+    filters:
+      - {column: name, description: "Schedule name (exact, case-insensitive; 'pay*' = prefix)", examples: [Support Schedule]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.size, page_size: 50, max_pages: 4}
+    response:
+      rows_path: "$.values[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: team_id, path: teamId}
+      - {name: timezone, path: timezone}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: rotations, type: JSON, path: rotations, description: "Rotations with type, length, participants"}
+    pitfalls:
+      - "A trailing * in name is a prefix match: the SQL re-check then compares the literal 'pay*' and drops rows; prefer name ILIKE 'pay%' in SQL without the filter for fuzzy matches."
+    examples:
+      - sql: "SELECT id, name, team_id, timezone FROM jira_jsm_schedules WHERE enabled"
+        description: All enabled schedules.
+    fixtures:
+      - file: jsm_schedules.json
+        expect_rows: 1
+        expect_columns: {id: f8f2a4ec-54b2-4513-865b-8cb3b81c9544, name: Support Schedule, team_id: cd68207b-c55d-4611-ab25-72fd0c439e9f, timezone: America/New_York, enabled: true}
+        note: "Example response of 'List schedules' (GET /v1/schedules, operation listSchedules): the ListSchedulesResponse schema examples from the official JSM Operations swagger.v3.json."
+    docs_url: https://developer.atlassian.com/cloud/jira/service-desk-ops/rest/v2/api-group-schedules/#api-api-cloudid-v1-schedules-get
+
+  - name: jira_jsm_oncalls
+    title: Who is on call for a schedule (at the window end)
+    description: >-
+      One row per on-call participant (user, team or escalation) of a schedule at the end of the
+      ts window (default: now), from GET .../v1/schedules/{id}/on-calls?date=. Give schedule_id,
+      or schedule_name (resolved with one schedules lookup). participant_id of a user is an
+      Atlassian accountId (jira_users / Slack email lookup to name them).
+    kind: entities
+    steps:
+      - *jsm_cloud_step
+      - name: schedule
+        when: "not filters.schedule_id"
+        method: GET
+        url: "https://api.atlassian.com/jsm/ops/api/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/schedules"
+        query: {query: "{{ filters.schedule_name }}", size: 1}
+        capture: {schedule_id: "$.values[0].id"}
+      - name: oncalls
+        method: GET
+        url: "https://api.atlassian.com/jsm/ops/api/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/schedules/{{ filters.schedule_id or captures.schedule_id }}/on-calls"
+        query:
+          date: "{{ time.end | rfc3339 }}"
+        accept_status: [404]
+    filters:
+      - {column: schedule_id, description: "Schedule id (jira_jsm_schedules.id)", examples: [f8f2a4ec-54b2-4513-865b-8cb3b81c9544]}
+      - {column: schedule_name, description: "Schedule name (exact, case-insensitive) when the id is unknown", examples: [Support Schedule]}
+    require_one_of: [[schedule_id, schedule_name]]
+    time: {column: ts, default_lookback: 5m, reapply: false}
+    response:
+      rows_path: "$.onCallParticipants[*]"
+    columns:
+      - {name: participant_id, path: id, description: "accountId (user) or team / escalation id"}
+      - {name: participant_type, path: type, description: "user | team | escalation"}
+      - {name: nested, type: JSON, path: onCallParticipants, description: "For teams/escalations: the users actually on call"}
+      - {name: forwarded_from, type: JSON, path: forwardedFrom, description: "Set when on call through forwarding"}
+      - {name: schedule_id, filter_only: true}
+      - {name: schedule_name, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Evaluation instant = upper bound of the ts range"}
+    examples:
+      - sql: "SELECT participant_type, participant_id, nested FROM jira_jsm_oncalls WHERE schedule_name = 'Support Schedule'"
+        description: Who is on call right now for the support schedule.
+      - sql: "SELECT participant_id FROM jira_jsm_oncalls WHERE schedule_id = 'f8f2a4ec-54b2-4513-865b-8cb3b81c9544' AND ts <= TIMESTAMP '2026-10-01 03:00:00'"
+        description: Who was on call at the incident onset.
+    fixtures:
+      - file: jsm_oncalls.json
+        filters: {schedule_id: f8f2a4ec-54b2-4513-865b-8cb3b81c9544}
+        expect_rows: 3
+        expect_columns: {participant_id: bc667897-cb21-496f-a46e-7c05ff0419dd, participant_type: team, schedule_id: f8f2a4ec-54b2-4513-865b-8cb3b81c9544}
+        note: "Example response of 'Get on-calls' (GET /v1/schedules/{scheduleId}/on-calls, operation getOnCalls): the OnCallResponse schema example from the official JSM Operations swagger.v3.json, unmodified."
+    docs_url: https://developer.atlassian.com/cloud/jira/service-desk-ops/rest/v2/api-group-schedule-on-calls/#api-api-cloudid-v1-schedules-scheduleid-on-calls-get
+
+  - name: jira_jsm_teams
+    title: JSM Operations teams
+    description: One row per operations team the API user can see (GET .../v1/teams). Maps team ids in schedules and responders to names.
+    kind: entities
+    steps:
+      - *jsm_cloud_step
+      - name: teams
+        method: GET
+        url: "https://api.atlassian.com/jsm/ops/api/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/teams"
+    response:
+      rows_path: "$.platformTeams[*]"
+    columns:
+      - {name: id, path: teamId}
+      - {name: name, path: teamName}
+    examples:
+      - sql: "SELECT id, name FROM jira_jsm_teams ORDER BY name"
+        description: Team id -> name map.
+    fixtures:
+      - file: jsm_teams.json
+        expect_rows: 1
+        expect_columns: {id: 85f14c10-5bd7-4e98-aee5-511ce1f80086, name: Red Team}
+        note: "Example response of 'List teams' (GET /v1/teams, operation getTeams): the ListPlatformTeamResponse schema examples from the official JSM Operations swagger.v3.json."
+    docs_url: https://developer.atlassian.com/cloud/jira/service-desk-ops/rest/v2/api-group-team/#api-api-cloudid-v1-teams-get
+
+  # ----------------------------------------------------------------------------------------------
+  # Jira Service Management Incident REST API (v1, beta). Host: api.atlassian.com/jsm/incidents/cloudId/<cloudId>
+  # An "incident" here is an ITSM incident ISSUE; it is addressed by its NUMERIC issue id, so a key
+  # filter is first resolved with GET /rest/api/3/issue/{key}?fields=issuetype.
+  # ----------------------------------------------------------------------------------------------
+  - name: jira_jsm_incident
+    title: One JSM incident (responders, affected services, major flag, linked alerts)
+    description: >-
+      One row for a Jira Service Management ITSM incident from GET
+      https://api.atlassian.com/jsm/incidents/cloudId/{cloudId}/v1/incident/{issueID} (JSM Incident
+      REST API, beta): summary, status, priority, reporter/assignee, labels, responders (users and
+      teams paged), affected services, the Major incident field, participants, linked alert ids and
+      issue links. Filter key (resolved to the numeric id with one issue lookup) or issue_id
+      (jira_issues.id). Use it after jira_incidents finds the incident ticket, to see who responded,
+      which services were affected and which alerts were linked.
+    kind: incidents
+    steps:
+      - *jsm_cloud_step
+      - &jsm_incident_issue_id_step
+        name: issue_id
+        when: "not filters.issue_id"
+        method: GET
+        path: "/rest/api/3/issue/{{ filters.key }}"
+        query: {fields: issuetype}
+        capture: {issue_id: "$.id"}
+      - name: incident
+        method: GET
+        url: "https://api.atlassian.com/jsm/incidents/cloudId/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/incident/{{ filters.issue_id or captures.issue_id }}"
+        accept_status: [404]
+    filters: &jsm_incident_filters
+      - {column: key, ops: ["=", "in"], max_fan_out: 10, description: "Incident issue key (resolved to its numeric id)", examples: [ITSM-30]}
+      - {column: issue_id, ops: ["=", "in"], max_fan_out: 10, description: "Numeric incident issue id (jira_issues.id)", examples: ["10030"]}
+    require_one_of: [[key, issue_id]]
+    response:
+      rows_path: "$"
+    columns:
+      - {name: title, path: summary}
+      - {name: description, path: description, description: "Description (plain string in this API)"}
+      - {name: status, path: status.name}
+      - {name: status_category, path: status.statusCategory.name, description: "To Do | In Progress | Done"}
+      - {name: priority, path: priority.name}
+      - {name: severity, path: priority.name, description: "Same as priority (JSM incidents rank by Priority)"}
+      - {name: reporter, path: reporter.displayName}
+      - {name: reporter_account_id, path: reporter.accountId}
+      - {name: assignee, path: assignee.displayName}
+      - {name: labels, type: JSON, path: labels}
+      - {name: major_incident, path: majorIncident.value, description: "Value of the Major incident field (NULL when the incident is not flagged major)"}
+      - {name: responders, type: JSON, path: responders.value, description: "[{ari, name, type: user|team}] responders paged for the incident"}
+      - {name: responder_names, type: JSON, path: "responders.value[*].name", description: "JSON array of responder display names"}
+      - {name: affected_services, type: JSON, path: affectedServices.value, description: "Affected services ([{id}] / service ARIs)"}
+      - {name: participants, type: JSON, path: participants.value}
+      - {name: linked_alert_ids, type: JSON, path: linkedAlerts, description: "JSM Operations alert ids linked to the incident"}
+      - {name: issue_links, type: JSON, path: issueLinks}
+      - {name: field_ids, type: JSON, expr: "{'participants': _.participants.fieldId if _.participants else None, 'majorIncident': _.majorIncident.fieldId if _.majorIncident else None, 'responders': _.responders.fieldId if _.responders else None, 'affectedServices': _.affectedServices.fieldId if _.affectedServices else None}", description: "Custom field ids behind participants / major incident / responders / affected services (use them in JQL: cf[10001] ...)"}
+      - {name: key, filter_only: true}
+      - {name: issue_id, filter_only: true}
+    pitfalls:
+      - "Beta API (v1): fields may change. Works only for ITSM incident issues in a JSM service space; any other issue returns 404 (0 rows) or 400."
+      - "The response carries no key or id: the key / issue_id columns echo the filter."
+      - "The Major incident feature is Premium/Enterprise only; on other plans major_incident is always NULL."
+      - "The reference intro shows '/v1/incidents/<issueID>' (plural) in its URL overview, the operation reference and OpenAPI use '/v1/incident/{issueID}' (used here)."
+    examples:
+      - sql: "SELECT title, status, priority, major_incident, responder_names, affected_services, linked_alert_ids FROM jira_jsm_incident WHERE key = 'ITSM-30'"
+        description: Who responded to an incident, what it affected and which alerts are linked.
+    fixtures:
+      - file: jsm_incident.json
+        filters: {issue_id: "10030"}
+        expect_rows: 1
+        expect_columns: {title: Mia create this incident, status: Open, status_category: To Do, priority: Medium, reporter: Mia Krystof, reporter_account_id: "99:27935d01-92a7-4687-8272-a9b8d3b2ae2e", major_incident: null, responder_names: '["Mia Krystof"]', affected_services: "[]", issue_id: "10030"}
+        note: "Official 200 example of GET /jsm/incidents/cloudId/{cloudId}/v1/incident/{issueID} (operation getIncident, JSM Incident REST API swagger.v3.json, as rendered on the Incident API group page), unmodified."
+    ui_link: "{{ (ui_base_url ~ '/browse/' ~ filters.key) if filters.key else None }}"
+    docs_url: https://developer.atlassian.com/cloud/incidents/rest/api-group-incident/#api-jsm-incidents-cloudid-cloudid-v1-incident-issueid-get
+
+  - name: jira_jsm_incident_alerts
+    title: JSM Operations alerts linked to an incident
+    description: >-
+      One row per JSM Operations alert id linked to an ITSM incident (GET
+      .../v1/incident/{issueID}/alert, cursor startKey). Filter key or issue_id. Join alert_id to
+      jira_jsm_alerts.id (or query jira_jsm_alerts with query = 'alertId: <id>') to see the alerts.
+    kind: alerts
+    steps:
+      - *jsm_cloud_step
+      - *jsm_incident_issue_id_step
+      - name: alerts
+        method: GET
+        url: "https://api.atlassian.com/jsm/incidents/cloudId/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/incident/{{ filters.issue_id or captures.issue_id }}/alert"
+        accept_status: [404]
+    filters: *jsm_incident_filters
+    require_one_of: [[key, issue_id]]
+    pagination: {type: cursor, cursor_path: "$.startKey", cursor_param: query.startKey, max_pages: 5}
+    response:
+      rows_path: "$.values.alertIds[*]"
+    columns:
+      - {name: alert_id, path: ".", description: "JSM Operations alert id (jira_jsm_alerts.id)"}
+      - {name: key, filter_only: true}
+      - {name: issue_id, filter_only: true}
+    examples:
+      - sql: "SELECT alert_id FROM jira_jsm_incident_alerts WHERE key = 'ITSM-30'"
+        description: Alerts that were linked to the incident.
+    fixtures:
+      - file: jsm_incident_alerts.json
+        filters: {issue_id: "10030"}
+        expect_rows: 1
+        expect_columns: {alert_id: 8dd24912-a0ad-41cd-ac80-535eaf649ed7, issue_id: "10030"}
+        note: "Official 200 example of GET .../v1/incident/{issueID}/alert (operation getAssociatedAlerts, JSM Incident REST API), unmodified."
+    docs_url: https://developer.atlassian.com/cloud/incidents/rest/api-group-linked-alerts/#api-jsm-incidents-cloudid-cloudid-v1-incident-issueid-alert-get
+
+  - name: jira_jsm_incident_responder_alerts
+    title: Responder (paging) alerts of an incident
+    description: >-
+      One row per responder alert JSM raised to page the incident's responders (GET
+      .../v1/incident/{issueID}/responder-alerts): alert id, message, status and a link to the alert.
+      Use it to check whether and how responders were paged and whether those pages are still open.
+    kind: alerts
+    steps:
+      - *jsm_cloud_step
+      - *jsm_incident_issue_id_step
+      - name: responder_alerts
+        method: GET
+        url: "https://api.atlassian.com/jsm/incidents/cloudId/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/incident/{{ filters.issue_id or captures.issue_id }}/responder-alerts"
+        accept_status: [404]
+    filters: *jsm_incident_filters
+    require_one_of: [[key, issue_id]]
+    response:
+      rows_path: "$.responderAlerts[*]"
+    columns:
+      - {name: id, path: id, description: "Responder alert id"}
+      - {name: title, path: message}
+      - {name: state, path: status, description: "open | acked | closed ..."}
+      - {name: url, path: link, description: "Link to the alert in JSM Operations"}
+      - {name: key, filter_only: true}
+      - {name: issue_id, filter_only: true}
+    examples:
+      - sql: "SELECT title, state, url FROM jira_jsm_incident_responder_alerts WHERE key = 'ITSM-30'"
+        description: Paging alerts raised for the incident's responders and whether they are still open.
+    fixtures:
+      - file: jsm_incident_responder_alerts.json
+        filters: {issue_id: "10030"}
+        expect_rows: 1
+        expect_columns: {id: 28517c02-e621-4d51-9435-a7fe693b93dd-1770130534412, title: Sample message, state: open, url: "https://abc.atlassian-app.opsgenie.com/alert/detail/28517c02-e621-4d51-9435-a7fe693b93dd-1770130534412/details"}
+        note: "Official 200 example of GET .../v1/incident/{issueID}/responder-alerts (operation getResponderAlerts, JSM Incident REST API), unmodified."
+    docs_url: https://developer.atlassian.com/cloud/incidents/rest/api-group-responder-alerts/#api-jsm-incidents-cloudid-cloudid-v1-incident-issueid-responder-alerts-get
+
+  - name: jira_jsm_incident_chat_channels
+    title: Chat channels (Slack / Teams) linked to an incident
+    description: >-
+      One row per chat channel linked to an ITSM incident (GET .../v1/incident/{issueID}/chat/channel):
+      channel name, type (slack ...) and whether it is active. Use the name with slack_channels
+      (WHERE name = ...) to get the channel id, then read the incident channel with
+      slack_channel_history.
+    kind: entities
+    steps:
+      - *jsm_cloud_step
+      - *jsm_incident_issue_id_step
+      - name: channels
+        method: GET
+        url: "https://api.atlassian.com/jsm/incidents/cloudId/{{ env.JIRA_CLOUD_ID or captures.cloud_id }}/v1/incident/{{ filters.issue_id or captures.issue_id }}/chat/channel"
+        accept_status: [404]
+    filters: *jsm_incident_filters
+    require_one_of: [[key, issue_id]]
+    response:
+      rows_path: "$.channels[*]"
+    columns:
+      - {name: name, path: name, description: "Channel name (no #)"}
+      - {name: channel_type, path: channelType, description: "slack | msteams ..."}
+      - {name: active, type: BOOLEAN, path: active}
+      - {name: connection_id, path: connectionId}
+      - {name: key, filter_only: true}
+      - {name: issue_id, filter_only: true}
+    examples:
+      - sql: "SELECT name, channel_type, active FROM jira_jsm_incident_chat_channels WHERE key = 'ITSM-30'"
+        description: The Slack channel opened for the incident (then slack_channels WHERE name = ...).
+    fixtures:
+      - file: jsm_incident_chat_channels.json
+        filters: {issue_id: "10030"}
+        expect_rows: 1
+        expect_columns: {name: sip-0, channel_type: slack, active: true, connection_id: e3cc821f-cd95-4cc7-a24f-fa855dd19677, issue_id: "10030"}
+        note: "Official 200 example of GET .../v1/incident/{issueID}/chat/channel (operation getChatChannels) as rendered on the JSM Incident API Chat tools page (GetChatChannelResponse wrapping the Channel schema example), unmodified."
+    docs_url: https://developer.atlassian.com/cloud/incidents/rest/api-group-chat-tools/#api-jsm-incidents-cloudid-cloudid-v1-incident-issueid-chat-channel-get
+
+roles:
+  tickets:
+    table: jira_issues
+    columns: {ts: ts, title: title, state: status, severity: priority, url: url, id: key, message: description}
+    query_language: jql
+    notes: "Seeds pass the service or alert name as query (JQL text ~) and an explicit 30-day ts window."
+  incidents:
+    table: jira_incidents
+    filters: {time_field: created}
+    columns: {ts: ts, title: title, state: status, severity: priority, url: url, id: key, message: description}
+    query_language: jql
+    notes: "Incident tickets (JIRA_INCIDENT_JQL); ts = created so the window finds incidents OPENED in it."
+  active_alerts:
+    table: jira_jsm_active_alerts
+    columns: {ts: ts, name: title, title: title, state: state, severity: severity, labels: tags, id: id}
+    query_language: jsm_alert_search
+  alert_history:
+    table: jira_jsm_alerts
+    filters: {query: "{{ ('message: ' ~ (alert_name | quote)) if alert_name else None }}"}
+    columns: {ts: ts, name: title, title: title, state: state, severity: severity, count: count, id: id}
+    query_language: jsm_alert_search
+    notes: "JSM Operations alerts CREATED in the window whose message is the alert name; count = de-duplicated occurrences."
+  oncall:
+    table: jira_jsm_oncalls
+    columns: {user: participant_id, type: participant_type}

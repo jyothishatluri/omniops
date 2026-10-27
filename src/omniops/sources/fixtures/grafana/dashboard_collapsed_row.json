@@ -1,0 +1,107 @@
+{
+  "dashboard": {
+    "id": 12,
+    "uid": "svc-rows",
+    "title": "Service Rows",
+    "version": 3,
+    "schemaVersion": 41,
+    "tags": [
+      "payments"
+    ],
+    "timezone": "browser",
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": []
+    },
+    "panels": [
+      {
+        "id": 1,
+        "type": "row",
+        "title": "Overview",
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 0
+        },
+        "panels": []
+      },
+      {
+        "id": 2,
+        "type": "timeseries",
+        "title": "Request Rate",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 1
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (job) (rate(http_requests_total[5m]))",
+            "legendFormat": "{{job}}"
+          },
+          {
+            "refId": "B",
+            "expr": "sum by (job) (rate(http_requests_total{status=~\"5..\"}[5m]))",
+            "legendFormat": "{{job}} 5xx"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "type": "row",
+        "title": "Logs",
+        "collapsed": true,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 9
+        },
+        "panels": [
+          {
+            "id": 4,
+            "type": "logs",
+            "title": "Error Logs",
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 24,
+              "x": 0,
+              "y": 10
+            },
+            "targets": [
+              {
+                "refId": "A",
+                "expr": "{job=\"payment-service\"} |= \"error\""
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "meta": {
+    "isStarred": false,
+    "url": "/d/svc-rows/service-rows",
+    "folderId": 0,
+    "folderUid": "",
+    "slug": "service-rows"
+  }
+}

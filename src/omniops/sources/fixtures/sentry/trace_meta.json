@@ -1,0 +1,22 @@
+{
+ "errorsCount": 0,
+ "logsCount": 5,
+ "metricsCount": 0,
+ "performanceIssuesCount": 0,
+ "spansCount": 195,
+ "transactionChildCountMap": [
+  {
+   "transaction.event_id": "280027d94f30428c83a2de46f932612a",
+   "count()": 7
+  },
+  {
+   "transaction.event_id": "66087f4e87c847759db67fd62e32829c",
+   "count()": 38
+  }
+ ],
+ "spansCountMap": {
+  "db": 58,
+  "cache.get": 56,
+  "http.server": 6
+ }
+}

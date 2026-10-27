@@ -1,0 +1,122 @@
+{
+  "took": 5,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 2,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+      {
+        "_index": ".internal.alerts-observability.apm.alerts-default-000001",
+        "_id": "8f3a2b6e-5d7c-4e1a-9b2f-0c1d2e3f4a5b",
+        "_score": null,
+        "fields": {
+          "@timestamp": [
+            "2026-10-01T11:58:00.000Z"
+          ],
+          "kibana.alert.start": [
+            "2026-10-01T11:42:00.000Z"
+          ],
+          "kibana.alert.status": [
+            "active"
+          ],
+          "kibana.alert.uuid": [
+            "8f3a2b6e-5d7c-4e1a-9b2f-0c1d2e3f4a5b"
+          ],
+          "kibana.alert.rule.name": [
+            "checkout-api error rate"
+          ],
+          "kibana.alert.rule.uuid": [
+            "0cc8ed92-cbe6-42bd-800b-19ba5134ffd2"
+          ],
+          "kibana.alert.rule.rule_type_id": [
+            "apm.transaction_error_rate"
+          ],
+          "kibana.alert.rule.category": [
+            "Failed transaction rate threshold"
+          ],
+          "kibana.alert.rule.consumer": [
+            "apm"
+          ],
+          "kibana.alert.rule.producer": [
+            "apm"
+          ],
+          "kibana.alert.reason": [
+            "Failed transactions is 8% in the last 5 mins for service: checkout-api, env: production. Alert when > 5%."
+          ],
+          "kibana.alert.instance.id": [
+            "checkout-api_production_request"
+          ],
+          "kibana.alert.duration.us": [
+            960000000
+          ],
+          "kibana.alert.workflow_status": [
+            "open"
+          ],
+          "kibana.alert.evaluation.value": [
+            8.0
+          ],
+          "kibana.alert.evaluation.threshold": [
+            5.0
+          ],
+          "kibana.alert.flapping": [
+            false
+          ],
+          "kibana.alert.rule.tags": [
+            "team-checkout"
+          ],
+          "kibana.space_ids": [
+            "default"
+          ],
+          "service.name": [
+            "checkout-api"
+          ],
+          "service.environment": [
+            "production"
+          ]
+        },
+        "sort": [
+          1790855880000
+        ]
+      },
+      {
+        "_index": ".internal.alerts-stack.alerts-default-000001",
+        "_id": "1b2c3d4e-0000-4000-8000-000000000001",
+        "_score": null,
+        "_source": {
+          "@timestamp": "2026-10-01T11:30:00.000Z",
+          "kibana.alert.start": "2026-10-01T10:55:00.000Z",
+          "kibana.alert.end": "2026-10-01T11:30:00.000Z",
+          "kibana.alert.status": "recovered",
+          "kibana.alert.uuid": "1b2c3d4e-0000-4000-8000-000000000001",
+          "kibana.alert.rule.name": "my alert",
+          "kibana.alert.rule.uuid": "3583a470-74f6-11ed-9801-35303b735aef",
+          "kibana.alert.rule.rule_type_id": ".index-threshold",
+          "kibana.alert.rule.category": "Index threshold",
+          "kibana.alert.reason": "my alert is active for group all documents",
+          "kibana.alert.instance.id": "all documents",
+          "kibana.alert.duration.us": 2100000000,
+          "kibana.alert.workflow_status": "open",
+          "kibana.alert.flapping": false,
+          "kibana.space_ids": [
+            "default"
+          ],
+          "tags": [
+            "cpu"
+          ]
+        },
+        "sort": [
+          1790854200000
+        ]
+      }
+    ]
+  }
+}

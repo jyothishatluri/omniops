@@ -1,0 +1,45 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "custom_tags": [
+          "language:java",
+          "department:engineering",
+          "region:us-east-1"
+        ],
+        "env": "production",
+        "finished_at": "2023-08-31T14:26:24Z",
+        "git": {
+          "commit_sha": "66adc9350f2cc9b250b69abddab733dd55e1a588",
+          "repository_id": "github.com/organization/example-repository"
+        },
+        "service": "shopist",
+        "started_at": "2023-08-31T14:26:14Z",
+        "team": "backend",
+        "version": "v1.12.07"
+      },
+      "id": "4242fcdd31586083",
+      "type": "dora_deployment"
+    },
+    {
+      "attributes": {
+        "custom_tags": [
+          "language:go",
+          "department:platform"
+        ],
+        "env": "production",
+        "finished_at": "2023-08-31T14:28:04Z",
+        "git": {
+          "commit_sha": "77bdc9350f2cc9b250b69abddab733dd55e1a599",
+          "repository_id": "github.com/organization/api-service"
+        },
+        "service": "api-service",
+        "started_at": "2023-08-31T14:27:54Z",
+        "team": "backend",
+        "version": "v2.1.0"
+      },
+      "id": "4242fcdd31586084",
+      "type": "dora_deployment"
+    }
+  ]
+}

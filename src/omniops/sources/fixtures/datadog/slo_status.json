@@ -1,0 +1,16 @@
+{
+  "data": {
+    "attributes": {
+      "error_budget_remaining": 99.5,
+      "raw_error_budget_remaining": {
+        "unit": "seconds",
+        "value": 86400.5
+      },
+      "sli": 99.95,
+      "span_precision": 2,
+      "state": "ok"
+    },
+    "id": "00000000-0000-0000-0000-000000000000",
+    "type": "slo_status"
+  }
+}

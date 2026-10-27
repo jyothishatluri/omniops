@@ -1,0 +1,29 @@
+# Grafana Tempo reached directly (self-hosted monolithic/microservices, single- or multi-tenant,
+# Grafana Enterprise Traces, Grafana Cloud Traces). All tables come from templates/tempo.yaml.
+# Auth (https://grafana.com/docs/tempo/latest/api_docs/ and
+#       https://grafana.com/docs/tempo/latest/operations/manage-advanced-systems/multitenancy/):
+#   - self-hosted single tenant (multitenancy_enabled: false): nothing
+#   - self-hosted multi-tenant: X-Scope-OrgID: <tenant> (several tenants: "t1|t2")
+#   - GET: basic auth, username = tenant, password = access policy token
+#   - Grafana Cloud Traces: basic auth, username = Tempo instance ID ("User"), password = Cloud
+#     Access Policy token with traces:read; URL https://tempo-prod-XX-<region>.grafana.net/tempo
+# o11y-bench: TEMPO_URL=http://localhost:3200 (Tempo 3.1, no auth).
+source: tempo
+display_name: Grafana Tempo
+extends: tempo
+base_url: "{{ env.TEMPO_URL }}"
+env:
+  - {name: TEMPO_URL, description: "Tempo query-frontend URL without /api, e.g. http://tempo:3200 or https://tempo-prod-04-prod-us-east-0.grafana.net/tempo"}
+  - {name: TEMPO_TENANT_ID, description: "Optional X-Scope-OrgID for multi-tenant Tempo (several tenants separated by |). Not needed for Grafana Cloud."}
+  - {name: TEMPO_USERNAME, description: "Optional basic-auth user: Grafana Cloud Tempo instance ID / GET tenant"}
+  - {name: TEMPO_PASSWORD, description: "Optional basic-auth password: Grafana Cloud access policy token (traces:read)", secret: true}
+  - {name: TEMPO_TOKEN, description: "Optional bearer token for a reverse proxy in front of Tempo (ignored when TEMPO_USERNAME is set)", secret: true}
+required_env: [TEMPO_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Basic ' ~ ((env.TEMPO_USERNAME ~ ':' ~ (env.TEMPO_PASSWORD or '')) | b64)) if env.TEMPO_USERNAME
+         else (('Bearer ' ~ env.TEMPO_TOKEN) if env.TEMPO_TOKEN else None) }}
+headers:
+  X-Scope-OrgID: "{{ env.TEMPO_TENANT_ID }}"

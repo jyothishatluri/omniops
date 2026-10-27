@@ -1,0 +1,14 @@
+{
+  "flamegraph": {
+    "names": ["total", "main", "handleOrder", "json.Marshal", "db.Query", "runtime.mallocgc"],
+    "levels": [
+      {"values": ["0", "1000", "0", "0"]},
+      {"values": ["0", "1000", "0", "1"]},
+      {"values": ["0", "700", "100", "2", "0", "300", "300", "5"]},
+      {"values": ["100", "400", "300", "3", "0", "200", "200", "4"]},
+      {"values": ["400", "100", "100", "5"]}
+    ],
+    "total": "1000",
+    "maxSelf": "300"
+  }
+}

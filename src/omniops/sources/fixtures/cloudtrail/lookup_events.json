@@ -1,0 +1,13 @@
+{
+ "NextToken": "kbOt5LlZe++mErCebpy2TgaMgmDvF1kYGFcH64JSjIbZFjsuvrSqg66b5YGssKutDYIyII4lrP4IDbeQdiObkp9YAlju3oXd12juy3CIZW8=",
+ "Events": [
+  {
+   "EventId": "0ebbaee4-6e67-431d-8225-ba0d81df5972",
+   "Username": "root",
+   "EventTime": 1424476529.0,
+   "CloudTrailEvent": "{\"eventVersion\":\"1.02\",\"userIdentity\":{\"type\":\"Root\",\"principalId\":\"111122223333\",\"arn\":\"arn:aws:iam::111122223333:root\",\"accountId\":\"111122223333\"},\"eventTime\":\"2015-02-20T23:55:29Z\",\"eventSource\":\"signin.amazonaws.com\",\"eventName\":\"ConsoleLogin\",\"awsRegion\":\"us-east-2\",\"sourceIPAddress\":\"203.0.113.4\",\"userAgent\":\"Mozilla/5.0\",\"requestParameters\":null,\"responseElements\":{\"ConsoleLogin\":\"Success\"},\"additionalEventData\":{\"MobileVersion\":\"No\",\"LoginTo\":\"https://console.aws.amazon.com/console/home\",\"MFAUsed\":\"No\"},\"eventID\":\"0ebbaee4-6e67-431d-8225-ba0d81df5972\",\"eventType\":\"AwsApiCall\",\"recipientAccountId\":\"111122223333\"}",
+   "EventName": "ConsoleLogin",
+   "Resources": []
+  }
+ ]
+}

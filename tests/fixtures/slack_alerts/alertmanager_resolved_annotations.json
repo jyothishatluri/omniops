@@ -1,0 +1,37 @@
+{
+  "platform": "prometheus",
+  "description": "Alertmanager resolved notification using the Prometheus documentation's CommonAnnotations Slack text (send_resolved: true) for the InstanceDown example rule.",
+  "provenance": "prometheus.io notification template examples ('Accessing annotations in CommonAnnotations': text \"<!channel> \\nsummary: {{ .CommonAnnotations.summary }}\\ndescription: {{ .CommonAnnotations.description }}\") with the docs' InstanceDown rule (severity: page); title is the default __subject with group_by [alertname]; color 'good' when resolved.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B03ALERTMG",
+    "username": "Alertmanager",
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "good",
+        "fallback": "[RESOLVED] InstanceDown (web-1:9100 node page) | http://alertmanager.monitoring.svc:9093/#/alerts?receiver=default-receiver",
+        "title": "[RESOLVED] InstanceDown (web-1:9100 node page)",
+        "title_link": "http://alertmanager.monitoring.svc:9093/#/alerts?receiver=default-receiver",
+        "text": "<!channel> \nsummary: Instance web-1:9100 down\ndescription: web-1:9100 of job node has been down for more than 5 minutes.",
+        "mrkdwn_in": ["fallback", "pretext", "text"]
+      }
+    ],
+    "ts": "1792506084.000600",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792506084.000600",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "prometheus",
+    "rule_id": "InstanceDown",
+    "rule_name": "InstanceDown",
+    "status": "resolved",
+    "raw_status": "RESOLVED",
+    "is_recovery": true,
+    "group": "(web-1:9100 node page)",
+    "summary": "Instance web-1:9100 down"
+  }
+}

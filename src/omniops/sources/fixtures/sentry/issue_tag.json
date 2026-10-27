@@ -1,0 +1,24 @@
+{
+ "key": "flavors",
+ "name": "Flavors",
+ "uniqueValues": 2,
+ "totalValues": 3,
+ "topValues": [
+  {
+   "key": "strawberry",
+   "name": "Strawberry",
+   "value": "strawberry",
+   "count": 2,
+   "lastSeen": "2024-01-01T00:00:00Z",
+   "firstSeen": "2024-01-01T00:00:00Z"
+  },
+  {
+   "key": "vanilla",
+   "name": "Vanilla",
+   "value": "vanilla",
+   "count": 1,
+   "lastSeen": "2024-01-01T00:00:00Z",
+   "firstSeen": "2024-01-01T00:00:00Z"
+  }
+ ]
+}

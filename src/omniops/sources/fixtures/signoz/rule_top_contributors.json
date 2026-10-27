@@ -1,0 +1,23 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "fingerprint": 11298547832123940211,
+      "count": 14,
+      "labels": [
+        {"key": {"name": "service.name"}, "value": "checkout"},
+        {"key": {"name": "host.name"}, "value": "ip-10-0-0-1"}
+      ],
+      "relatedTracesLink": "/traces-explorer?compositeQuery=%7B%7D",
+      "relatedLogsLink": "/logs/logs-explorer?compositeQuery=%7B%7D"
+    },
+    {
+      "fingerprint": 4128874452001736619,
+      "count": 2,
+      "labels": [
+        {"key": {"name": "service.name"}, "value": "checkout"},
+        {"key": {"name": "host.name"}, "value": "ip-10-0-0-2"}
+      ]
+    }
+  ]
+}

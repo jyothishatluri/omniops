@@ -1,0 +1,8 @@
+{
+  "from": "1571011200",
+  "metrics": [
+    "system.cpu.idle",
+    "system.mem.free",
+    "aws.ec2.cpuutilization"
+  ]
+}

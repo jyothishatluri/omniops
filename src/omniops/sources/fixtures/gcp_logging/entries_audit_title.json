@@ -1,0 +1,20 @@
+{
+  "entries": [
+    {
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "status": {},
+        "authenticationInfo": {"principalEmail": "deployer@my-project.iam.gserviceaccount.com"},
+        "serviceName": "run.googleapis.com",
+        "methodName": "google.cloud.run.v2.Services.UpdateService",
+        "resourceName": "projects/my-project/locations/us-central1/services/checkout"
+      },
+      "insertId": "-a1b2c3d4e5",
+      "resource": {"type": "cloud_run_revision", "labels": {"project_id": "my-project", "service_name": "checkout", "location": "us-central1", "revision_name": "", "configuration_name": ""}},
+      "timestamp": "2026-10-20T13:58:12.345678Z",
+      "severity": "NOTICE",
+      "logName": "projects/my-project/logs/cloudaudit.googleapis.com%2Factivity",
+      "receiveTimestamp": "2026-10-20T13:58:13.001Z"
+    }
+  ]
+}

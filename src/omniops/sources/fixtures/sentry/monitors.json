@@ -1,0 +1,39 @@
+[
+ {
+  "id": "b8f5a8f4-2f3c-4d1e-9a3b-6c1d2e3f4a5b",
+  "name": "Nightly billing job",
+  "slug": "nightly-billing-job",
+  "status": "active",
+  "isMuted": false,
+  "isUpserting": false,
+  "config": {
+   "schedule_type": "crontab",
+   "schedule": "0 2 * * *",
+   "checkin_margin": 5,
+   "max_runtime": 30,
+   "timezone": "UTC",
+   "failure_issue_threshold": 1,
+   "recovery_threshold": 1,
+   "alert_rule_id": null
+  },
+  "dateCreated": "2024-01-01T00:00:00Z",
+  "project": {"id": "2", "slug": "pump-station", "name": "Pump Station", "platform": "python"},
+  "environments": [
+   {
+    "name": "production",
+    "status": "error",
+    "isMuted": false,
+    "dateCreated": "2024-01-01T00:00:00Z",
+    "lastCheckIn": "2024-01-02T02:31:00Z",
+    "nextCheckIn": "2024-01-03T02:00:00Z",
+    "nextCheckInLatest": "2024-01-03T02:05:00Z",
+    "activeIncident": {
+     "startingTimestamp": "2024-01-02T02:31:00Z",
+     "resolvingTimestamp": null,
+     "brokenNotice": null
+    }
+   }
+  ],
+  "owner": {"type": "team", "id": "2", "name": "powerful-abolitionist"}
+ }
+]

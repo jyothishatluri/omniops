@@ -1,0 +1,63 @@
+{
+ "TimeSeriesServiceStatistics": [
+  {
+   "Timestamp": 1790852400.0,
+   "ServiceSummaryStatistics": {
+    "OkCount": 1180,
+    "ErrorStatistics": {
+     "ThrottleCount": 0,
+     "OtherCount": 4,
+     "TotalCount": 4
+    },
+    "FaultStatistics": {
+     "OtherCount": 2,
+     "TotalCount": 2
+    },
+    "TotalCount": 1186,
+    "TotalResponseTime": 142.32
+   },
+   "ResponseTimeHistogram": [
+    {
+     "Value": 0.08,
+     "Count": 900
+    },
+    {
+     "Value": 0.25,
+     "Count": 280
+    },
+    {
+     "Value": 1.2,
+     "Count": 6
+    }
+   ]
+  },
+  {
+   "Timestamp": 1790852460.0,
+   "ServiceSummaryStatistics": {
+    "OkCount": 402,
+    "ErrorStatistics": {
+     "ThrottleCount": 12,
+     "OtherCount": 3,
+     "TotalCount": 15
+    },
+    "FaultStatistics": {
+     "OtherCount": 611,
+     "TotalCount": 611
+    },
+    "TotalCount": 1028,
+    "TotalResponseTime": 3105.6
+   },
+   "ResponseTimeHistogram": [
+    {
+     "Value": 0.09,
+     "Count": 380
+    },
+    {
+     "Value": 5.0,
+     "Count": 648
+    }
+   ]
+  }
+ ],
+ "ContainsOldGroupVersions": false
+}

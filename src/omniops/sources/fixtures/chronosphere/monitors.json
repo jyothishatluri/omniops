@@ -1,0 +1,42 @@
+{
+ "page": {
+  "next_token": ""
+ },
+ "monitors": [
+  {
+   "slug": "checkout-error-rate",
+   "name": "Checkout error rate",
+   "created_at": "2026-03-02T10:00:00Z",
+   "updated_at": "2026-09-30T17:12:00Z",
+   "collection_slug": "checkout",
+   "labels": {
+    "team": "payments",
+    "priority": "sev-1"
+   },
+   "annotations": {
+    "runbook": "https://runbooks.example.com/checkout-5xx"
+   },
+   "signal_grouping": {
+    "label_names": [
+     "service"
+    ]
+   },
+   "series_conditions": {
+    "defaults": {
+     "critical": {
+      "conditions": [
+       {
+        "op": "GEQ",
+        "value": 0.05,
+        "sustain_secs": 300
+       }
+      ]
+     }
+    }
+   },
+   "notification_policy_slug": "payments-oncall",
+   "interval_secs": 60,
+   "prometheus_query": "sum by (service) (rate(http_requests_total{code=~\"5..\"}[5m])) / sum by (service) (rate(http_requests_total[5m]))"
+  }
+ ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": 2699850,
+  "name": "High 5xx rate on {{service.name}}",
+  "type": "query alert",
+  "query": "sum(last_5m):sum:trace.http.request.errors{env:prod} by {service}.as_count() > 50",
+  "overall_state": "Alert",
+  "options": {"thresholds": {"critical": 50, "warning": 20}},
+  "state": {
+    "groups": {
+      "service:checkout": {"name": "service:checkout", "status": "Alert", "last_triggered_ts": 1790851800, "last_resolved_ts": 1790800000, "last_notified_ts": 1790851805, "last_nodata_ts": 0},
+      "service:cart": {"name": "service:cart", "status": "OK", "last_triggered_ts": 1790700000, "last_resolved_ts": 1790703600, "last_notified_ts": 1790703601, "last_nodata_ts": 0}
+    }
+  }
+}

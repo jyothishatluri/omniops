@@ -1,0 +1,75 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "Computer",
+          "type": "string"
+        },
+        {
+          "name": "PodNamespace",
+          "type": "string"
+        },
+        {
+          "name": "PodName",
+          "type": "string"
+        },
+        {
+          "name": "ContainerName",
+          "type": "string"
+        },
+        {
+          "name": "ContainerId",
+          "type": "string"
+        },
+        {
+          "name": "LogLevel",
+          "type": "string"
+        },
+        {
+          "name": "LogSource",
+          "type": "string"
+        },
+        {
+          "name": "Message",
+          "type": "string"
+        },
+        {
+          "name": "_ResourceId",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:42:07.2210000Z",
+          "aks-nodepool1-12345678-vmss000002",
+          "checkout",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "checkout-api",
+          "3f1d2c9a8b7e6f5a4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f10",
+          "ERROR",
+          "stderr",
+          "{\"level\":\"error\",\"msg\":\"payment provider unavailable\",\"status\":503}",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.containerservice/managedclusters/aks-shop-prod"
+        ],
+        [
+          "2026-10-01T11:42:01.0040000Z",
+          "aks-nodepool1-12345678-vmss000001",
+          "checkout",
+          "checkout-api-7d9c6b5f4-m9q2z",
+          "checkout-api",
+          "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+          "INFO",
+          "stdout",
+          "GET /api/orders/8812 200 42ms",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.containerservice/managedclusters/aks-shop-prod"
+        ]
+      ]
+    }
+  ]
+}

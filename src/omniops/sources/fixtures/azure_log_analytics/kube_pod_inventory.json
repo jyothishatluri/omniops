@@ -1,0 +1,141 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "ClusterName",
+          "type": "string"
+        },
+        {
+          "name": "Namespace",
+          "type": "string"
+        },
+        {
+          "name": "Name",
+          "type": "string"
+        },
+        {
+          "name": "ContainerName",
+          "type": "string"
+        },
+        {
+          "name": "RestartsInWindow",
+          "type": "int"
+        },
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "PodStatus",
+          "type": "string"
+        },
+        {
+          "name": "ContainerStatus",
+          "type": "string"
+        },
+        {
+          "name": "ContainerStatusReason",
+          "type": "string"
+        },
+        {
+          "name": "ContainerLastStatus",
+          "type": "string"
+        },
+        {
+          "name": "ContainerRestartCount",
+          "type": "int"
+        },
+        {
+          "name": "PodRestartCount",
+          "type": "int"
+        },
+        {
+          "name": "Computer",
+          "type": "string"
+        },
+        {
+          "name": "ControllerKind",
+          "type": "string"
+        },
+        {
+          "name": "ControllerName",
+          "type": "string"
+        },
+        {
+          "name": "ServiceName",
+          "type": "string"
+        },
+        {
+          "name": "PodIp",
+          "type": "string"
+        },
+        {
+          "name": "PodUid",
+          "type": "string"
+        },
+        {
+          "name": "PodCreationTimeStamp",
+          "type": "datetime"
+        },
+        {
+          "name": "ContainerStartTime",
+          "type": "datetime"
+        },
+        {
+          "name": "_ResourceId",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "aks-shop-prod",
+          "checkout",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "5f0b6c3e-1a2b-4c5d-8e9f-0a1b2c3d4e5f/checkout-api",
+          6,
+          "2026-10-01T11:59:12Z",
+          "Running",
+          "waiting",
+          "CrashLoopBackOff",
+          "OOMKilled",
+          14,
+          14,
+          "aks-nodepool1-12345678-vmss000002",
+          "ReplicaSet",
+          "checkout-api-7d9c6b5f4",
+          "checkout-api",
+          "10.244.1.23",
+          "5f0b6c3e-1a2b-4c5d-8e9f-0a1b2c3d4e5f",
+          "2026-09-30T08:12:44Z",
+          "2026-10-01T11:57:03Z",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.containerservice/managedclusters/aks-shop-prod"
+        ],
+        [
+          "aks-shop-prod",
+          "checkout",
+          "checkout-api-7d9c6b5f4-q9m4z",
+          "8a7b6c5d-4e3f-4a1b-9c8d-7e6f5a4b3c2d/checkout-api",
+          0,
+          "2026-10-01T11:59:12Z",
+          "Running",
+          "running",
+          "",
+          "",
+          0,
+          0,
+          "aks-nodepool1-12345678-vmss000001",
+          "ReplicaSet",
+          "checkout-api-7d9c6b5f4",
+          "checkout-api",
+          "10.244.0.17",
+          "8a7b6c5d-4e3f-4a1b-9c8d-7e6f5a4b3c2d",
+          "2026-09-30T08:12:44Z",
+          "2026-09-30T08:12:51Z",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.containerservice/managedclusters/aks-shop-prod"
+        ]
+      ]
+    }
+  ]
+}

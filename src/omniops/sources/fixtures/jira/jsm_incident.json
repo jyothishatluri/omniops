@@ -1,0 +1,43 @@
+{
+  "summary": "Mia create this incident",
+  "reporter": {
+    "accountId": "99:27935d01-92a7-4687-8272-a9b8d3b2ae2e",
+    "accountType": "ATLASSIAN_ACCOUNT",
+    "displayName": "Mia Krystof"
+  },
+  "priority": {
+    "name": "Medium",
+    "id": "3"
+  },
+  "status": {
+    "id": "1",
+    "name": "Open",
+    "statusCategory": {
+      "id": 2,
+      "key": "new",
+      "name": "To Do"
+    }
+  },
+  "participants": {
+    "fieldId": "customfield_10000",
+    "value": []
+  },
+  "majorIncident": {
+    "fieldId": "customfield_10001",
+    "value": null
+  },
+  "responders": {
+    "fieldId": "customfield_10002",
+    "value": [
+      {
+        "ari": "ari:cloud:identity::user/99:27935d01-92a7-4687-8272-a9b8d3b2ae2e",
+        "name": "Mia Krystof",
+        "type": "user"
+      }
+    ]
+  },
+  "affectedServices": {
+    "fieldId": "customfield_10003",
+    "value": []
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "dashboard": {
+    "id": 8,
+    "editable": true,
+    "schemaVersion": 41,
+    "version": 1,
+    "refresh": "",
+    "timezone": "browser",
+    "tags": [],
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "service",
+          "type": "query",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "query": {
+            "query": "label_values(http_requests_total, job)",
+            "refId": "StandardVariableQuery"
+          },
+          "includeAll": true,
+          "multi": true,
+          "current": {}
+        }
+      ]
+    },
+    "annotations": {
+      "list": []
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Request Rate",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{job=~\"${service:regex}\"}[5m]))",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Recent Errors",
+        "type": "logs",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        },
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "targets": [
+          {
+            "expr": "{job=~\"${service:regex}\"} | json | status >= 500",
+            "refId": "A"
+          }
+        ]
+      }
+    ],
+    "uid": "service-overview-variable-audit",
+    "title": "Service Overview Variable Audit"
+  },
+  "meta": {
+    "isStarred": false,
+    "url": "/d/service-overview-variable-audit/service-overview-variable-audit",
+    "folderId": 0,
+    "folderUid": "",
+    "slug": "service-overview-variable-audit"
+  }
+}

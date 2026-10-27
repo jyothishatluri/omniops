@@ -1,0 +1,74 @@
+{
+ "kind": "EventList",
+ "apiVersion": "events.k8s.io/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "webhook-relay-7b9d5c6f8-h4j2k.18a7f40112233445",
+    "namespace": "batch",
+    "uid": "f1e2d3c4-0000-4000-8000-000000000001",
+    "creationTimestamp": "2026-10-01T11:41:30Z"
+   },
+   "eventTime": "2026-10-01T11:41:30.123456Z",
+   "series": {
+    "count": 41,
+    "lastObservedTime": "2026-10-01T11:59:12.654321Z"
+   },
+   "reportingController": "kubelet",
+   "reportingInstance": "incident-bench-worker",
+   "action": "",
+   "reason": "Unhealthy",
+   "regarding": {
+    "kind": "Pod",
+    "namespace": "batch",
+    "name": "webhook-relay-7b9d5c6f8-h4j2k",
+    "uid": "0a1b2c3d-0000-4000-8000-000000000002",
+    "apiVersion": "v1",
+    "fieldPath": "spec.containers{main}"
+   },
+   "note": "Readiness probe failed: dial tcp 10.244.1.30:9999: connect: connection refused",
+   "type": "Warning",
+   "deprecatedSource": {
+    "component": "kubelet",
+    "host": "incident-bench-worker"
+   },
+   "deprecatedFirstTimestamp": "2026-10-01T11:41:30Z",
+   "deprecatedLastTimestamp": "2026-10-01T11:59:12Z",
+   "deprecatedCount": 41
+  },
+  {
+   "metadata": {
+    "name": "webhook-relay-7b9d5c6f8-h4j2k.18a7f40223344556",
+    "namespace": "batch",
+    "uid": "f1e2d3c4-0000-4000-8000-000000000002",
+    "creationTimestamp": "2026-10-01T11:42:31Z"
+   },
+   "eventTime": null,
+   "reportingController": "kubelet",
+   "reportingInstance": "incident-bench-worker",
+   "action": "",
+   "reason": "Killing",
+   "regarding": {
+    "kind": "Pod",
+    "namespace": "batch",
+    "name": "webhook-relay-7b9d5c6f8-h4j2k",
+    "uid": "0a1b2c3d-0000-4000-8000-000000000002",
+    "apiVersion": "v1",
+    "fieldPath": "spec.containers{main}"
+   },
+   "note": "Container main failed liveness probe, will be restarted",
+   "type": "Normal",
+   "deprecatedSource": {
+    "component": "kubelet",
+    "host": "incident-bench-worker"
+   },
+   "deprecatedFirstTimestamp": "2026-10-01T11:42:31Z",
+   "deprecatedLastTimestamp": "2026-10-01T11:58:31Z",
+   "deprecatedCount": 9
+  }
+ ]
+}

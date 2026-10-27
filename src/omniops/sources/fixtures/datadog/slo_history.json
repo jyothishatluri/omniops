@@ -1,0 +1,165 @@
+{
+  "data": {
+    "from_ts": 1615323990,
+    "group_by": [],
+    "groups": [
+      {
+        "error_budget_remaining": {
+          "<any-key>": "number"
+        },
+        "errors": [
+          {
+            "error_message": "",
+            "error_type": ""
+          }
+        ],
+        "group": "name",
+        "history": [
+          [
+            1579212382,
+            0
+          ]
+        ],
+        "monitor_modified": 1615867200,
+        "monitor_type": "string",
+        "name": "string",
+        "precision": 2,
+        "preview": true,
+        "sli_value": 99.99,
+        "span_precision": 2,
+        "uptime": 99.99
+      }
+    ],
+    "monitors": [
+      {
+        "error_budget_remaining": {
+          "<any-key>": "number"
+        },
+        "errors": [
+          {
+            "error_message": "",
+            "error_type": ""
+          }
+        ],
+        "group": "name",
+        "history": [
+          [
+            1579212382,
+            0
+          ]
+        ],
+        "monitor_modified": 1615867200,
+        "monitor_type": "string",
+        "name": "string",
+        "precision": 2,
+        "preview": true,
+        "sli_value": 99.99,
+        "span_precision": 2,
+        "uptime": 99.99
+      }
+    ],
+    "overall": {
+      "error_budget_remaining": {
+        "<any-key>": "number"
+      },
+      "errors": [
+        {
+          "error_message": "",
+          "error_type": ""
+        }
+      ],
+      "group": "name",
+      "history": [
+        [
+          1579212382,
+          0
+        ]
+      ],
+      "monitor_modified": 1615867200,
+      "monitor_type": "string",
+      "name": "string",
+      "precision": {
+        "<any-key>": "number"
+      },
+      "preview": true,
+      "sli_value": 99.99,
+      "span_precision": 2,
+      "uptime": 99.99
+    },
+    "series": {
+      "denominator": {
+        "count": 0,
+        "metadata": {
+          "aggr": "string",
+          "expression": "string",
+          "metric": "string",
+          "query_index": "integer",
+          "scope": "string",
+          "unit": [
+            {
+              "family": "bytes",
+              "id": 2,
+              "name": "byte",
+              "plural": "bytes",
+              "scale_factor": 1,
+              "short_name": "B"
+            }
+          ]
+        },
+        "sum": 0,
+        "values": [
+          []
+        ]
+      },
+      "interval": 0,
+      "message": "",
+      "numerator": {
+        "count": 0,
+        "metadata": {
+          "aggr": "string",
+          "expression": "string",
+          "metric": "string",
+          "query_index": "integer",
+          "scope": "string",
+          "unit": [
+            {
+              "family": "bytes",
+              "id": 2,
+              "name": "byte",
+              "plural": "bytes",
+              "scale_factor": 1,
+              "short_name": "B"
+            }
+          ]
+        },
+        "sum": 0,
+        "values": [
+          []
+        ]
+      },
+      "query": "",
+      "res_type": "",
+      "resp_version": 0,
+      "times": [
+        []
+      ]
+    },
+    "thresholds": {
+      "<any-key>": {
+        "target": 99.9,
+        "target_display": "99.9",
+        "timeframe": "30d",
+        "warning": 90,
+        "warning_display": "90.0"
+      }
+    },
+    "to_ts": 1615928790,
+    "type": "metric",
+    "type_id": 0
+  },
+  "errors": [
+    {
+      "error": "string"
+    }
+  ]
+}

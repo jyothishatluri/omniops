@@ -1,0 +1,30 @@
+{
+  "platform": "kibana",
+  "description": "Elastic Kibana alerting rule (Elasticsearch query) with a Slack connector (webhook, text only) using the rule type's default action message.",
+  "provenance": "Kibana source x-pack/platform/plugins/shared/stack_alerts/public/rule_types/es_query/index.ts defaultActionMessage: \"Elasticsearch query rule '{{rule.name}}' is active:\\n\\n- Value: '{{context.value}}'\\n- Conditions Met: '{{context.conditions}}' over '{{rule.params.timeWindowSize}}''{{rule.params.timeWindowUnit}}'\\n- Timestamp: '{{context.date}}'\\n- Link: '{{context.link}}'\"; Elastic docs: Slack connector (webhook = plain text; Web API = text or Block Kit) and rule action variables (dates in ISO 8601). context.link opens Discover at /app/discover#/viewAlert/<rule id>?from=<iso>&to=<iso>&checksum=<c>.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B13KIBANA1",
+    "username": "Kibana",
+    "text": "Elasticsearch query rule 'Checkout errors' is active:\n\n- Value: '153'\n- Conditions Met: 'Number of matching documents is greater than 100' over '5''m'\n- Timestamp: '2026-10-20T14:02:00.412Z'\n- Link: '<https://kibana.acme.example/app/discover#/viewAlert/3583a470-74f6-11ed-9801-35303b735aef?from=2026-10-20T13:57:00.412Z&amp;to=2026-10-20T14:02:00.412Z&amp;checksum=9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e>'",
+    "ts": "1792504922.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504922.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "kibana",
+    "rule_id": "3583a470-74f6-11ed-9801-35303b735aef",
+    "rule_name": "Checkout errors",
+    "status": "firing",
+    "raw_status": "active",
+    "value": "153",
+    "threshold": "Number of matching documents is greater than 100 over 5m",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "window_start": "2026-10-20T13:57:00Z",
+    "window_end": "2026-10-20T14:02:00Z",
+    "tags": {"rule_type": "Elasticsearch query"},
+    "anchor": {"source": "link_window", "window_start": "2026-10-20T13:47:00Z", "window_end": "2026-10-20T14:07:00Z"}
+  }
+}

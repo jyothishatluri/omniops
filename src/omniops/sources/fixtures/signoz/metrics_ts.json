@@ -1,0 +1,37 @@
+{
+  "status": "success",
+  "data": {
+    "type": "time_series",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "aggregations": [
+            {
+              "index": 0,
+              "alias": "",
+              "meta": {"unit": "s"},
+              "series": [
+                {
+                  "labels": [{"key": {"name": "service.name"}, "value": "adservice"}],
+                  "values": [
+                    {"timestamp": 1742602620000, "value": 0.012},
+                    {"timestamp": 1742602680000, "value": "NaN"}
+                  ]
+                },
+                {
+                  "labels": [{"key": {"name": "service.name"}, "value": "cartservice"}],
+                  "values": [
+                    {"timestamp": 1742602620000, "value": 0.251}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 18000, "bytesScanned": 1440000, "durationMs": 48, "stepIntervals": {"A": 60}},
+    "warning": {"message": "Encountered warnings", "url": "", "warnings": [{"message": "no data found for the metric jvm.gc.duration.bucket in the last hour of the query range"}]}
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "took": 14,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 1,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+      {
+        "_index": "otel-v1-apm-span-000006",
+        "_type": "_doc",
+        "_id": "fe0e3811627189df",
+        "_score": 1,
+        "_source": {
+          "traceId": "0000000000000000856bfa5aeba5ec77",
+          "spanId": "fe0e3811627189df",
+          "traceState": "",
+          "parentSpanId": "856bfa5aeba5ec77",
+          "name": "/getcart",
+          "kind": "SPAN_KIND_UNSPECIFIED",
+          "startTime": "2021-05-18T18:58:44.695Z",
+          "endTime": "2021-05-18T18:58:44.760Z",
+          "durationInNanos": 65000000,
+          "serviceName": "cartservice",
+          "events": [],
+          "links": [],
+          "droppedAttributesCount": 0,
+          "droppedEventsCount": 0,
+          "droppedLinksCount": 0,
+          "traceGroup": "/cart",
+          "traceGroupFields.endTime": "2021-05-18T18:58:44.983Z",
+          "traceGroupFields.statusCode": 0,
+          "traceGroupFields.durationInNanos": 387000000,
+          "span.attributes.http@method": "GET",
+          "span.attributes.http@url": "http://cartservice/GetCart",
+          "span.attributes.instance": "cartservice-d847fdcf5-j6s2f",
+          "span.attributes.version": "v5",
+          "span.attributes.region": "us-east-1",
+          "resource.attributes.service@name": "cartservice",
+          "span.attributes.net@host@ip": "172.22.0.8",
+          "status.code": 0
+        },
+        "fields": {
+          "startTime": [
+            "2021-05-18T18:58:44.695Z"
+          ],
+          "endTime": [
+            "2021-05-18T18:58:44.760Z"
+          ]
+        }
+      }
+    ]
+  }
+}

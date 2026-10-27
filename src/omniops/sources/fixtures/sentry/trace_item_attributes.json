@@ -1,0 +1,18 @@
+[
+ {
+  "key": "device.class",
+  "name": "device.class",
+  "attributeSource": {
+   "source_type": "sentry"
+  },
+  "attributeType": "string"
+ },
+ {
+  "key": "tags[Batch Size,number]",
+  "name": "Batch Size",
+  "attributeSource": {
+   "source_type": "user"
+  },
+  "attributeType": "number"
+ }
+]

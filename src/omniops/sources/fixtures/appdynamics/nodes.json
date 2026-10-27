@@ -1,0 +1,4 @@
+[
+  {"id": 7, "name": "Node_8000", "type": "Tomcat 5.x", "tierId": 12, "tierName": "ECommerce Server", "machineId": 3, "machineName": "TIER1TOMCAT", "machineOSType": "Linux", "machineAgentPresent": true, "machineAgentVersion": "Machine Agent v4.2.0.0 GA Build Date 2015-12-18 18:47:15", "appAgentPresent": true, "appAgentVersion": "Server Agent v4.2.0.0 GA #10145 r514d60d3122bd992e7152820d2ca5fb5ff4e45c1 8409-master-build", "agentType": "APP_AGENT"},
+  {"id": 10, "name": "Node_8002", "type": "Tomcat 5.x", "tierId": 14, "tierName": "Inventory Server", "machineId": 6, "machineName": "TIER3TOMCAT", "machineOSType": "Linux", "machineAgentPresent": true, "machineAgentVersion": "Machine Agent v4.2.0.0 GA Build Date 2015-12-18 18:47:15", "appAgentPresent": true, "appAgentVersion": "Server Agent v4.2.0.0 GA #10145 r514d60d3122bd992e7152820d2ca5fb5ff4e45c1 8409-master-build", "agentType": "APP_AGENT"}
+]

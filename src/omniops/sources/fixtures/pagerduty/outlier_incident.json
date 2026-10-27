@@ -1,0 +1,22 @@
+{
+ "outlier_incident": {
+  "incident": {
+   "id": "PR2P3RW",
+   "created_at": "2020-11-18T13:08:14Z",
+   "self": "https://api.pagerduty.com/incidents/PR2P3RW",
+   "title": "[LINUX]Used disk space is more than 5 GB on volume /var/log : PROBLEM for ce51323",
+   "occurrence": {
+    "count": 10,
+    "frequency": 0.04,
+    "category": "rare",
+    "since": "2020-09-23T13:08:14Z",
+    "until": "2021-01-18T13:08:14Z"
+   }
+  },
+  "incident_template": {
+   "id": "PX3P1PX",
+   "cluster_id": "P2B3X5",
+   "mined_text": "[LINUX]Used disk space is more than <MEASUREMENT> on volume <*> : PROBLEM for <*>"
+  }
+ }
+}

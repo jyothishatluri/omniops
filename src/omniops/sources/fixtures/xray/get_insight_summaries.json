@@ -1,0 +1,34 @@
+{
+ "InsightSummaries": [
+  {
+   "InsightId": "8b8e3a2c4f5d6e7f8a9b0c1d2e3f4a5b",
+   "GroupARN": "arn:aws:xray:us-east-1:123456789012:group/Default/AFLWCDIYC5MWQ4JXWZOECH3GQANSIEUCKXPDE6RJUBJRPYW3BEXQ",
+   "GroupName": "Default",
+   "RootCauseServiceId": {
+    "Name": "orders-db",
+    "Names": ["orders-db"],
+    "Type": "remote",
+    "AccountId": "123456789012"
+   },
+   "Categories": ["FAULT"],
+   "State": "ACTIVE",
+   "StartTime": 1790855280.0,
+   "Summary": "Fault rate of orders-db is higher than expected, affecting checkout-api",
+   "ClientRequestImpactStatistics": {
+    "FaultCount": 412,
+    "OkCount": 3088,
+    "TotalCount": 3500
+   },
+   "RootCauseServiceRequestImpactStatistics": {
+    "FaultCount": 640,
+    "OkCount": 2860,
+    "TotalCount": 3500
+   },
+   "TopAnomalousServices": [
+    {"ServiceId": {"Name": "orders-db", "Names": ["orders-db"], "Type": "remote", "AccountId": "123456789012"}},
+    {"ServiceId": {"Name": "checkout-api", "Names": ["checkout-api"], "Type": "AWS::ECS::Container", "AccountId": "123456789012"}}
+   ],
+   "LastUpdateTime": 1790856000.0
+  }
+ ]
+}

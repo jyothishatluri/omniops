@@ -1,0 +1,50 @@
+{
+  "platform": "sumologic",
+  "description": "Sumo Logic monitor notification through a Slack webhook connection with Sumo's default Slack payload (pretext plus fields).",
+  "provenance": "Sumo Logic docs, Webhook connection for Slack: default payload {\"attachments\":[{\"pretext\":\"{{TriggerType}} Alert: {{Name}}\",\"fields\":[Alert URL {{AlertResponseUrl}}, Description, Trigger Time {{TriggerTime}}, Time Range {{TriggerTimeRange}}, Trigger Condition, Trigger Value, Query <{{QueryURL}}|{{Query}}>],\"mrkdwn_in\":[\"text\",\"pretext\"],\"color\":\"#29A1E6\"}]}; TriggerType Critical/Warning/MissingData/ResolvedCritical/...; times rendered 'MM/dd/yyyy hh:mm:ss a z'; QueryURL carries startTime/endTime epoch ms.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B15SUMOLOG",
+    "username": "Sumo Logic",
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "29A1E6",
+        "fallback": "Critical Alert: Checkout 5xx errors",
+        "pretext": "Critical Alert: Checkout 5xx errors",
+        "fields": [
+          {"title": "Alert URL", "value": "https://service.sumologic.com/alert/alertResponse/0000000004A7F3B2", "short": false},
+          {"title": "Description", "value": "5xx responses from checkout above 50 in 15 minutes", "short": false},
+          {"title": "Trigger Time", "value": "10/20/2026 02:02:00 PM UTC", "short": false},
+          {"title": "Time Range", "value": "10/20/2026 01:47:00 PM UTC - 10/20/2026 02:02:00 PM UTC", "short": false},
+          {"title": "Trigger Condition", "value": "Greater than 50", "short": false},
+          {"title": "Trigger Value", "value": "212", "short": false},
+          {"title": "Query", "value": "<https://service.sumologic.com/ui/#/search/create?query=_sourceCategory%3Dprod%2Fcheckout%20status%3D5%2A%20%7C%20count&amp;startTime=1792504020000&amp;endTime=1792504920000|_sourceCategory=prod/checkout status=5* | count>", "short": false}
+        ],
+        "mrkdwn_in": ["text", "pretext"]
+      }
+    ],
+    "ts": "1792504981.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504981.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "sumologic",
+    "rule_name": "Checkout 5xx errors",
+    "title": "Critical Alert: Checkout 5xx errors",
+    "status": "firing",
+    "raw_status": "Critical",
+    "severity": "Critical",
+    "threshold": "Greater than 50",
+    "value": "212",
+    "query": "_sourceCategory=prod/checkout status=5* | count",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "window_start": "2026-10-20T13:47:00Z",
+    "window_end": "2026-10-20T14:02:00Z",
+    "incident_id": "0000000004A7F3B2",
+    "url": "https://service.sumologic.com/alert/alertResponse/0000000004A7F3B2"
+  }
+}

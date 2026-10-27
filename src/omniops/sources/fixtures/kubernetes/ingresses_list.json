@@ -1,0 +1,59 @@
+{
+ "kind": "IngressList",
+ "apiVersion": "networking.k8s.io/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "frontend",
+    "namespace": "shop",
+    "uid": "06c63748-0000-4000-8000-000000000016",
+    "creationTimestamp": "2026-10-01T08:00:00Z"
+   },
+   "spec": {
+    "ingressClassName": "nginx",
+    "rules": [
+     {
+      "host": "shop.example.test",
+      "http": {
+       "paths": [
+        {
+         "path": "/",
+         "pathType": "Prefix",
+         "backend": {
+          "service": {
+           "name": "frontend-proxy",
+           "port": {
+            "number": 8080
+           }
+          }
+         }
+        }
+       ]
+      }
+     }
+    ],
+    "tls": [
+     {
+      "hosts": [
+       "shop.example.test"
+      ],
+      "secretName": "shop-tls"
+     }
+    ]
+   },
+   "status": {
+    "loadBalancer": {
+     "ingress": [
+      {
+       "ip": "172.18.0.10"
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

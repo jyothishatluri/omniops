@@ -1,0 +1,53 @@
+{
+ "results": [
+  [
+   {
+    "field": "LogEvent1-field1-name",
+    "value": "LogEvent1-field1-value"
+   },
+   {
+    "field": "LogEvent1-field2-name",
+    "value": "LogEvent1-field2-value"
+   },
+   {
+    "field": "LogEvent1-fieldX-name",
+    "value": "LogEvent1-fieldX-value"
+   }
+  ],
+  [
+   {
+    "field": "LogEvent2-field1-name",
+    "value": "LogEvent2-field1-value"
+   },
+   {
+    "field": "LogEvent2-field2-name",
+    "value": "LogEvent2-field2-value"
+   },
+   {
+    "field": "LogEvent2-fieldX-name",
+    "value": "LogEvent2-fieldX-value"
+   }
+  ],
+  [
+   {
+    "field": "LogEventZ-field1-name",
+    "value": "LogEventZ-field1-value"
+   },
+   {
+    "field": "LogEventZ-field2-name",
+    "value": "LogEventZ-field2-value"
+   },
+   {
+    "field": "LogEventZ-fieldX-name",
+    "value": "LogEventZ-fieldX-value"
+   }
+  ]
+ ],
+ "statistics": {
+  "bytesScanned": 81349723,
+  "recordsMatched": 360851,
+  "recordsScanned": 610956
+ },
+ "status": "Complete",
+ "nextToken": "eEXAMPLEtoken"
+}

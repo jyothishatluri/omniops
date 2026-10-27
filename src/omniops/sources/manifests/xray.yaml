@@ -1,0 +1,846 @@
+# AWS X-Ray (distributed tracing) reached directly over HTTPS (no MCP, no SDK).
+#
+# Protocol: REST-JSON (service model protocol rest-json, API version 2016-04-12). Each operation is
+# a POST to its own path with a JSON body, e.g.
+#   POST https://xray.<region>.amazonaws.com/TraceSummaries   Content-Type: application/json
+#   auth: SigV4, signing name "xray"
+# Request timestamps are epoch SECONDS ("StartTime ... in Unix time seconds"); response timestamps
+# and segment start_time/end_time are epoch seconds with a fractional part; Duration/ResponseTime
+# are SECONDS (converted to *_ms columns here).
+# Trace IDs look like 1-5759e988-bd862e3fe1be46a994272793: the second field is the trace start time
+# in epoch seconds (8 hex digits) - used as a fallback ts.
+# Segment documents arrive as JSON strings; the engine parses them (expand parse: true) so segment
+# fields are real columns.
+# Research notes: docs/sources/xray.md
+source: xray
+display_name: AWS X-Ray
+vendor: Amazon Web Services
+description: >-
+  X-Ray traces: trace summaries with filter expressions and root-cause analytics, full traces
+  (parsed segment and subsegment documents), the service graph (nodes and edges with
+  request/error/fault/latency statistics), per-service time series statistics, X-Ray Insights
+  anomalies, groups, and Transaction Search trace retrieval.
+docs_url: https://docs.aws.amazon.com/xray/latest/api/Welcome.html
+categories: [traces, apm]
+base_url: >-
+  {{ env.AWS_ENDPOINT_URL_XRAY if (env.AWS_ENDPOINT_URL_XRAY and env.AWS_ENDPOINT_URL_XRAY != 'auto') else
+     ('https://xray.' ~ env.AWS_REGION ~ ('.amazonaws.com.cn' if (env.AWS_REGION or '').startswith('cn-') else '.amazonaws.com')) }}
+env:
+  - {name: AWS_REGION, description: "Region to query, e.g. us-east-1. Traces are stored in the region where they were recorded."}
+  - {name: AWS_ENDPOINT_URL_XRAY, default: auto, description: "Optional endpoint override (VPC endpoint, FIPS https://xray-fips.<region>.amazonaws.com, LocalStack). 'auto' = https://xray.<region>.amazonaws.com"}
+  - {name: AWS_PROFILE, description: "Optional named profile; credentials come from the standard AWS chain (not read by templates)."}
+  - {name: AWS_ACCESS_KEY_ID, description: "Optional static key (AWS credential chain)", secret: true}
+  - {name: AWS_SECRET_ACCESS_KEY, description: "Optional static secret (AWS credential chain)", secret: true}
+  - {name: AWS_SESSION_TOKEN, description: "Optional session token (AWS credential chain)", secret: true}
+required_env: [AWS_REGION]
+auth:
+  type: aws_sigv4
+  service: xray
+  region: "{{ env.AWS_REGION }}"
+headers:
+  Content-Type: application/json
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 300
+  retry_body_patterns: ["ThrottledException"]
+  notes: "Throttling returns HTTP 429 ThrottledException (retried by the engine). Trace queries over long windows paginate heavily: keep windows short and use filter expressions."
+retention:
+  traces: 30d
+  spans: 30d
+ui_base_url: "https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}"
+pitfalls:
+  - "Traces and the service map are retained for 30 days; older windows return nothing (missing data, not absence)."
+  - "X-Ray is sampled (default rule: first request each second plus 5% of the rest, per host). Counts from traces are samples, not totals - use CloudWatch metrics for volumes and rates."
+  - "If CloudWatch Transaction Search is enabled, all spans go to the aws/spans log group but only a percentage (default 1%) is indexed as X-Ray trace summaries: xray_trace_summaries sees few traces and BatchGetTraces cannot find them. Use xray_retrieved_traces for known ids and cloudwatch_logs_insights on log_group 'aws/spans' for search."
+  - "Service names are what the SDK/agent reports (segment name), often not the deploy name; list them from xray_service_graph first."
+  - "Durations: Duration/ResponseTime and filter-expression keywords (duration, responsetime) are in SECONDS; *_ms columns are converted."
+query_languages:
+  xray_filter_expression: >-
+    X-Ray filter expressions: service("checkout-api") { fault } | edge("frontend", "checkout-api") { error }
+    | fault | error | throttle | ok | partial | responsetime > 2 | duration >= 5 AND duration <= 8 |
+    http.status = 503 | http.url CONTAINS "/checkout" | http.method = "POST" | user = "u-123" |
+    annotation[order_id] = "o-42" (or annotation.order_id) | rootcause.fault.service { name = "orders-db" } |
+    rootcause.fault.exception { last and message = "connection refused" } | rootcause.responsetime.service { last and type = "AWS::DynamoDB" }.
+    Combine with AND / OR / NOT and parentheses; strings in double quotes; times in seconds.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: xray_trace_summaries
+    title: Trace search (GetTraceSummaries)
+    description: >-
+      One row per trace that started in the window (or was active in it with
+      time_range_type = 'Event'), newest first, optionally narrowed by `service` (traces passing
+      through that service: service("name")) and/or an X-Ray `filter_expression` (fault, error,
+      responsetime > 2, http.status = 503, annotation[key] = "v", rootcause.fault.service {...}).
+      Columns: entry service, HTTP method/URL/status, duration, fault/error/throttle flags,
+      annotations, and root-cause services and exception messages computed by X-Ray.
+      Use trace_id with xray_trace_segments for the full trace.
+    kind: traces
+    request:
+      method: POST
+      path: /TraceSummaries
+      body:
+        StartTime: "{{ time.start | epoch_s }}"
+        EndTime: "{{ time.end | epoch_s }}"
+        TimeRangeType: "{{ filters.time_range_type }}"
+        FilterExpression: >-
+          {{ ([('service(' ~ (filters.service | quote) ~ ')') if filters.service else None,
+               ('(' ~ filters.filter_expression ~ ')') if filters.filter_expression else None] | compact | join(' AND ')) or None }}
+        Sampling: "{{ true if filters.sampling else None }}"
+    filters:
+      - {column: service, ops: ["=", "in"], max_fan_out: 10, description: "Only traces that pass through this X-Ray service name (pushed as service(\"name\")); IN fans out", examples: ["checkout-api"]}
+      - {column: filter_expression, description: "X-Ray filter expression (see query_languages.xray_filter_expression); AND-ed with service", examples: ["fault OR error"]}
+      - {column: time_range_type, description: "TraceId (default: trace start time in window) | Event (traces updated in window) | Service (segment end time)"}
+      - {column: sampling, type: BOOLEAN, description: "true = return only a sample of matching summaries (faster on huge windows)"}
+    time: {column: ts, default_lookback: 30m, max_window: 24h, retention: 30d}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.TraceSummaries[*]"
+    columns:
+      - {name: trace_id, path: Id}
+      - {name: ts, type: TIMESTAMP, expr: "_.StartTime or _.MatchedEventTime or (_.Id.split('-')[1] | int(0, 16))", transform: epoch_s, description: "Trace start (StartTime; falls back to the epoch encoded in the trace id)"}
+      - {name: duration_ms, type: DOUBLE, path: Duration, transform: s_to_ms, description: "Earliest segment start to last segment end"}
+      - {name: response_time_ms, type: DOUBLE, path: ResponseTime, transform: s_to_ms, description: "Root segment start to end"}
+      - {name: has_fault, type: BOOLEAN, path: HasFault, description: "Root segment has a 5xx"}
+      - {name: has_error, type: BOOLEAN, path: HasError, description: "Root segment has a 4xx"}
+      - {name: has_throttle, type: BOOLEAN, path: HasThrottle, description: "Some segment has a 429"}
+      - {name: is_partial, type: BOOLEAN, path: IsPartial, description: "Some segment still in progress"}
+      - {name: status_code, type: BIGINT, path: Http.HttpStatus}
+      - {name: http_method, path: Http.HttpMethod}
+      - {name: http_url, path: Http.HttpURL}
+      - {name: client_ip, path: Http.ClientIp}
+      - {name: user_agent, path: Http.UserAgent}
+      - {name: entry_service, path: EntryPoint.Name, description: "Root service of the trace"}
+      - {name: entry_service_type, path: EntryPoint.Type}
+      - {name: services, path: "ServiceIds[*].Name", transform: join, transform_arg: ",", description: "All services in the trace (comma-separated)"}
+      - {name: fault_root_cause_services, path: "FaultRootCauses[*].Services[*].Name", transform: join, transform_arg: ",", description: "Services X-Ray blames for the fault"}
+      - {name: fault_root_cause_exceptions, path: "FaultRootCauses[*].Services[*].EntityPath[*].Exceptions[*].Message", transform: join, transform_arg: " | ", description: "Exception messages on the fault root-cause path"}
+      - {name: error_root_cause_services, path: "ErrorRootCauses[*].Services[*].Name", transform: join, transform_arg: ","}
+      - {name: response_time_root_cause_services, path: "ResponseTimeRootCauses[*].Services[*].Name", transform: join, transform_arg: ","}
+      - {name: fault_root_causes, type: JSON, path: FaultRootCauses, description: "Full fault root cause: services, entity path, exceptions (name, message), ClientImpacting"}
+      - {name: error_root_causes, type: JSON, path: ErrorRootCauses}
+      - {name: response_time_root_causes, type: JSON, path: ResponseTimeRootCauses, description: "Entity path with coverage (share of response time)"}
+      - {name: annotations, type: JSON, path: Annotations, description: "Indexed annotations: {key: [{AnnotationValue: {StringValue|NumberValue|BooleanValue}}]}"}
+      - {name: users, path: "Users[*].UserName", transform: join, transform_arg: ","}
+      - {name: resource_arns, path: "ResourceARNs[*].ARN", transform: join, transform_arg: ","}
+      - {name: instance_ids, path: "InstanceIds[*].Id", transform: join, transform_arg: ","}
+      - {name: availability_zones, path: "AvailabilityZones[*].Name", transform: join, transform_arg: ","}
+      - {name: matched_event_time, type: TIMESTAMP, path: MatchedEventTime, transform: epoch_s}
+      - {name: revision, type: BIGINT, path: Revision}
+      - {name: service, filter_only: true}
+      - {name: filter_expression, filter_only: true}
+      - {name: time_range_type, filter_only: true}
+      - {name: sampling, type: BOOLEAN, filter_only: true}
+    max_rows: 5000
+    sort_hint: "newest first: the first page holds the traces closest to the end of the window"
+    pitfalls:
+      - "Results are sampled traces only; never compute error rates from row counts."
+      - "service(\"x\") matches traces that touch x anywhere; entry_service is only the root. To find traces where x itself faulted use service(\"x\") { fault }."
+      - "Pagination stops after 5 pages: on busy services narrow the window to minutes and add a filter expression, otherwise you get only the newest slice."
+      - "With time_range_type = 'Event' traces that started before the window are returned; filtering ts in SQL would drop them."
+      - "Root-cause columns are null when the trace has no fault/error/latency issue."
+    examples:
+      - sql: >-
+          SELECT trace_id, ts, http_method, http_url, status_code, duration_ms, fault_root_cause_services, fault_root_cause_exceptions
+          FROM xray_trace_summaries
+          WHERE service = 'checkout-api' AND filter_expression = 'fault'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:45:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 50
+        description: Faulting traces through checkout-api in the incident window, with the service and exception X-Ray blames.
+      - sql: >-
+          SELECT fault_root_cause_services AS blamed, count(*) AS traces, round(avg(duration_ms)) AS avg_ms
+          FROM xray_trace_summaries
+          WHERE filter_expression = 'fault OR error'
+          GROUP BY 1 ORDER BY traces DESC
+        description: Which downstream services are blamed most often for failing traces (sampled).
+      - sql: >-
+          SELECT http_url, quantile_cont(duration_ms, 0.99) AS p99_ms, count(*) AS sampled
+          FROM xray_trace_summaries
+          WHERE service = 'checkout-api' AND filter_expression = 'responsetime > 2'
+          GROUP BY http_url ORDER BY p99_ms DESC LIMIT 10
+        description: Slow endpoints (response time over 2 s) for one service.
+    fixtures:
+      - file: get_trace_summaries.json
+        filters: {service: scorekeep}
+        expect_rows: 2
+        expect_columns:
+          trace_id: 1-59602606-a43a1ac52fc7ee0eea12a82c
+          ts: "2017-07-08T00:23:34Z"
+          status_code: 200
+          http_method: POST
+          duration_ms: 84.0
+          has_fault: false
+          service: scorekeep
+        note: >-
+          Verbatim "Example GetTraceSummaries output" from the X-Ray developer guide, Getting data
+          from AWS X-Ray (https://docs.aws.amazon.com/xray/latest/devguide/xray-api-gettingdata.html);
+          the API reference page (https://docs.aws.amazon.com/xray/latest/api/API_GetTraceSummaries.html)
+          gives the schema only. The example has no StartTime, so ts comes from the trace id epoch.
+      - file: get_trace_summaries_fault.json
+        filters: {service: checkout-api, filter_expression: fault}
+        expect_rows: 1
+        expect_columns:
+          trace_id: 1-6abe4853-5d0c3b2f8e1a4c7d9b6e2f10
+          ts: "2026-10-01T11:47:31Z"
+          status_code: 502
+          has_fault: true
+          entry_service: checkout-api
+          fault_root_cause_services: orders-db
+          fault_root_cause_exceptions: "connection refused"
+        note: >-
+          Built strictly from the GetTraceSummaries response schema (TraceSummary with StartTime,
+          EntryPoint, ServiceIds, FaultRootCauses[].Services[].EntityPath[].Exceptions[]) at
+          https://docs.aws.amazon.com/xray/latest/api/API_GetTraceSummaries.html (no documented example
+          carries root causes). Values are illustrative.
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#xray:traces/query
+
+  # ------------------------------------------------------------------------------------------
+  - name: xray_trace_segments
+    title: Full trace by id, one row per segment (BatchGetTraces)
+    description: >-
+      All segments of one trace (trace_id required; IN fans out one request per trace, up to 20).
+      Segment documents are parsed: service (segment name), origin (AWS::Lambda::Function,
+      AWS::DynamoDB::Table...), ts/end_ts, duration_ms, HTTP method/url/status, fault (5xx) / error
+      (4xx) / throttle (429) flags, the first exception message, annotations, aws metadata, and the
+      whole parsed `document` (JSON, with nested subsegments). Inferred segments (DynamoDB, SNS,
+      external HTTP) are included with inferred = true. Use xray_trace_subsegments for the
+      downstream calls inside a segment.
+    kind: spans
+    request:
+      method: POST
+      path: /Traces
+      body:
+        TraceIds: "{{ filters.trace_id | as_list }}"
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "X-Ray trace id, e.g. 1-59602603-23fc5b688855d396af79b496", examples: ["1-59602603-23fc5b688855d396af79b496"]}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.Traces[*]"
+      expand:
+        - {explode: Segments, as: s}
+        - {explode: "@s.Document", parse: true, as: doc}
+      errors:
+        - path: "$.UnprocessedTraceIds"
+          non_empty: true
+          message: "$.UnprocessedTraceIds"
+          hint: >-
+            X-Ray could not return these traces: they are older than 30 days, were never sampled, or
+            Transaction Search is enabled (then use xray_retrieved_traces). Not an empty trace.
+    columns:
+      - {name: trace_id, path: Id}
+      - {name: span_id, path: "@s.Id", description: "Segment id"}
+      - {name: parent_id, path: "@doc.parent_id", description: "Id of the (sub)segment that called this one; null for the root"}
+      - {name: service, path: "@doc.name", description: "Segment name = the service (or the inferred downstream resource)"}
+      - {name: origin, path: "@doc.origin", description: "AWS::Lambda::Function | AWS::ECS::Container | AWS::EC2::Instance | AWS::DynamoDB::Table | AWS::SNS ..."}
+      - {name: inferred, type: BOOLEAN, expr: "doc.inferred or false", description: "true = segment synthesized by X-Ray from a caller's subsegment"}
+      - {name: ts, type: TIMESTAMP, path: "@doc.start_time", transform: epoch_s, description: "Segment start (UTC)"}
+      - {name: end_ts, type: TIMESTAMP, path: "@doc.end_time", transform: epoch_s}
+      - {name: duration_ms, type: DOUBLE, expr: "(((doc.end_time - doc.start_time) * 1000) | round(3)) if (doc.end_time and doc.start_time) else None", description: "end_time - start_time"}
+      - {name: in_progress, type: BOOLEAN, path: "@doc.in_progress"}
+      - {name: status_code, type: BIGINT, path: "@doc.http.response.status"}
+      - {name: http_method, path: "@doc.http.request.method"}
+      - {name: http_url, path: "@doc.http.request.url"}
+      - {name: fault, type: BOOLEAN, expr: "doc.fault or false", description: "5xx on this segment"}
+      - {name: error, type: BOOLEAN, expr: "doc.error or false", description: "4xx on this segment"}
+      - {name: throttle, type: BOOLEAN, expr: "doc.throttle or false", description: "429 on this segment"}
+      - {name: exception, path: "@doc.cause.exceptions[0].message", description: "First exception message recorded on the segment itself (subsegment exceptions: xray_trace_subsegments)"}
+      - {name: exceptions, type: JSON, path: "@doc.cause.exceptions", description: "[{id, message, type, remote, stack}]"}
+      - {name: resource_arn, path: "@doc.resource_arn"}
+      - {name: user, path: "@doc.user"}
+      - {name: version, path: "@doc.service.version", description: "Application version reported by the SDK (service.version)"}
+      - {name: annotations, type: JSON, path: "@doc.annotations"}
+      - {name: aws, type: JSON, path: "@doc.aws", description: "AWS resource data (ec2, ecs, eks, elastic_beanstalk, operation, table_name, request_id...)"}
+      - {name: subsegment_count, type: BIGINT, expr: "(doc.subsegments or []) | length", description: "Number of first-level subsegments (see xray_trace_subsegments)"}
+      - {name: document, type: JSON, path: "@doc", description: "The whole parsed segment document; nested subsegments under $.subsegments"}
+      - {name: trace_duration_ms, type: DOUBLE, path: Duration, transform: s_to_ms}
+      - {name: limit_exceeded, type: BOOLEAN, path: LimitExceeded, description: "Trace exceeded the trace document size limit; segments may be missing"}
+    max_rows: 2000
+    sort_hint: "segment order as returned (not chronological): ORDER BY ts"
+    pitfalls:
+      - "Subsegments (downstream calls, SQL, custom code blocks) are nested inside the parent segment document, not separate rows: use xray_trace_subsegments, or json_extract(document, '$.subsegments')."
+      - "fault = 5xx, error = 4xx, throttle = 429. A segment can be fine while one of its subsegments faulted: check xray_trace_subsegments before concluding."
+      - "Unknown or expired trace ids fail loudly (UnprocessedTraceIds) instead of returning 0 rows."
+      - "BatchGetTraces accepts at most 5 ids per call; this table sends one id per request (fan-out up to 20)."
+    examples:
+      - sql: >-
+          SELECT service, origin, ts, round(duration_ms, 1) AS ms, status_code, fault, error, throttle, exception
+          FROM xray_trace_segments
+          WHERE trace_id = '1-59602603-23fc5b688855d396af79b496'
+          ORDER BY ts
+        description: Waterfall of one trace with per-segment latency, status and exceptions.
+      - sql: >-
+          SELECT trace_id, service, origin, exception
+          FROM xray_trace_segments
+          WHERE trace_id IN ('1-59602603-23fc5b688855d396af79b496', '1-59602606-a43a1ac52fc7ee0eea12a82c')
+            AND (fault OR throttle)
+        description: Which segments faulted or were throttled across a handful of sample traces.
+      - sql: >-
+          SELECT service, version, aws->'ecs'->>'container' AS container, aws->'ec2'->>'instance_id' AS instance
+          FROM xray_trace_segments WHERE trace_id = '1-59602603-23fc5b688855d396af79b496' AND NOT inferred
+        description: Which build and host/container served each instrumented segment.
+    fixtures:
+      - file: batch_get_traces.json
+        filters: {trace_id: 1-59602603-23fc5b688855d396af79b496}
+        expect_rows: 5
+        expect_columns:
+          trace_id: 1-59602603-23fc5b688855d396af79b496
+          span_id: 1fb07842d944e714
+          parent_id: 0c544c1b1bbff948
+          service: random-name
+          origin: "AWS::Lambda"
+          ts: "2017-07-08T00:23:31Z"
+          status_code: 200
+          fault: false
+          inferred: false
+          trace_duration_ms: 3232.0
+        note: >-
+          Verbatim "Example BatchGetTraces output" from the X-Ray developer guide
+          (https://docs.aws.amazon.com/xray/latest/devguide/xray-api-gettingdata.html); schema per
+          https://docs.aws.amazon.com/xray/latest/api/API_BatchGetTraces.html, segment fields per
+          https://docs.aws.amazon.com/xray/latest/devguide/xray-api-segmentdocuments.html
+      - file: batch_get_traces_unprocessed.json
+        filters: {trace_id: 1-58406520-a006649127e371903a2de979}
+        expect_error: "1-58406520-a006649127e371903a2de979"
+        note: >-
+          Built strictly from the BatchGetTraces response schema (Traces empty, UnprocessedTraceIds
+          listing the requested id; the id is the documented trace-id format example). Proves an
+          unprocessed id is a loud error, not an empty trace.
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#xray:traces/{{ filters.trace_id }}
+
+  # ------------------------------------------------------------------------------------------
+  - name: xray_trace_subsegments
+    title: Downstream calls inside a trace (BatchGetTraces, first-level subsegments)
+    description: >-
+      One row per first-level subsegment of every segment of a trace (trace_id required; IN fans
+      out): the downstream AWS SDK calls (namespace 'aws': DynamoDB UpdateItem, SQS SendMessage,
+      Lambda Invoke), remote HTTP / SQL calls (namespace 'remote') and custom code blocks, with
+      their timing, HTTP status, fault/error/throttle flags, AWS operation and resource, sanitized
+      SQL and exception. Answers "which dependency call made this request slow or fail".
+    kind: spans
+    request:
+      method: POST
+      path: /Traces
+      body:
+        TraceIds: "{{ filters.trace_id | as_list }}"
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "X-Ray trace id", examples: ["1-59602603-23fc5b688855d396af79b496"]}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.Traces[*]"
+      expand:
+        - {explode: Segments, as: s}
+        - {explode: "@s.Document", parse: true, as: doc}
+        - {explode: "@doc.subsegments", as: sub}
+      errors:
+        - {path: "$.UnprocessedTraceIds", non_empty: true, message: "$.UnprocessedTraceIds", hint: "X-Ray could not return these traces (expired, unsampled, or Transaction Search enabled)"}
+    columns:
+      - {name: trace_id, path: Id}
+      - {name: segment_id, path: "@s.Id"}
+      - {name: service, path: "@doc.name", description: "The calling segment (service)"}
+      - {name: span_id, path: "@sub.id", description: "Subsegment id (an inferred downstream segment has it as parent_id)"}
+      - {name: name, path: "@sub.name", description: "Downstream resource / operation name (DynamoDB, api.example.com, ## UserModel.saveUser)"}
+      - {name: namespace, path: "@sub.namespace", description: "aws (AWS SDK call) | remote (HTTP/SQL) | null (custom code block)"}
+      - {name: ts, type: TIMESTAMP, path: "@sub.start_time", transform: epoch_s}
+      - {name: duration_ms, type: DOUBLE, expr: "(((sub.end_time - sub.start_time) * 1000) | round(3)) if (sub.end_time and sub.start_time) else None"}
+      - {name: status_code, type: BIGINT, path: "@sub.http.response.status"}
+      - {name: http_method, path: "@sub.http.request.method"}
+      - {name: http_url, path: "@sub.http.request.url"}
+      - {name: fault, type: BOOLEAN, expr: "sub.fault or false"}
+      - {name: error, type: BOOLEAN, expr: "sub.error or false"}
+      - {name: throttle, type: BOOLEAN, expr: "sub.throttle or false"}
+      - {name: aws_operation, path: "@sub.aws.operation", description: "AWS API operation (UpdateItem, Publish, Invoke...)"}
+      - {name: resource, expr: "sub.aws.table_name or sub.aws.queue_url or sub.aws.function_name or sub.aws.topic_arn or (sub.aws.resource_names | join(',') if sub.aws.resource_names else None) or sub.http.request.url or (sub.sql.url if sub.sql else None)", description: "Downstream resource: table, queue, function, topic, URL or DB URL"}
+      - {name: retries, type: BIGINT, path: "@sub.aws.retries"}
+      - {name: sql_query, path: "@sub.sql.sanitized_query"}
+      - {name: exception, path: "@sub.cause.exceptions[0].message"}
+      - {name: child_subsegments, type: JSON, path: "@sub.subsegments", description: "Deeper nested subsegments (not expanded)"}
+      - {name: subsegment, type: JSON, path: "@sub", description: "The whole subsegment"}
+    max_rows: 5000
+    sort_hint: "document order; ORDER BY ts for a timeline"
+    pitfalls:
+      - "Only FIRST-level subsegments become rows; calls nested under a custom subsegment (e.g. ## UserModel.saveUser -> DynamoDB) are in child_subsegments (JSON)."
+      - "Durations are measured by the caller: a slow subsegment with a fast inferred target segment points at network/connection pool time."
+    examples:
+      - sql: >-
+          SELECT service, name, namespace, aws_operation, resource, round(duration_ms, 1) AS ms, status_code, fault, throttle, exception
+          FROM xray_trace_subsegments WHERE trace_id = '1-59602603-23fc5b688855d396af79b496'
+          ORDER BY duration_ms DESC
+        description: Slowest and failing downstream calls of one trace.
+      - sql: >-
+          SELECT aws_operation, resource, count(*) AS calls, max(duration_ms) AS worst_ms, count(*) FILTER (WHERE fault OR throttle) AS failed
+          FROM xray_trace_subsegments
+          WHERE trace_id IN ('1-59602603-23fc5b688855d396af79b496', '1-59602606-a43a1ac52fc7ee0eea12a82c') AND namespace = 'aws'
+          GROUP BY 1, 2 ORDER BY worst_ms DESC
+        description: AWS dependency calls across several sampled traces.
+    fixtures:
+      - file: batch_get_traces.json
+        filters: {trace_id: 1-59602603-23fc5b688855d396af79b496}
+        expect_rows: 5
+        expect_columns:
+          trace_id: 1-59602603-23fc5b688855d396af79b496
+          segment_id: 194fcc8747581230
+          service: Scorekeep
+          span_id: 0c544c1b1bbff948
+          name: Lambda
+          namespace: aws
+          aws_operation: Invoke
+          resource: random-name
+          status_code: 200
+          fault: false
+        note: >-
+          Verbatim "Example BatchGetTraces output" from the X-Ray developer guide
+          (https://docs.aws.amazon.com/xray/latest/devguide/xray-api-gettingdata.html): 5 first-level
+          subsegments across the Scorekeep and random-name segments.
+
+  # ------------------------------------------------------------------------------------------
+  - name: xray_service_graph
+    title: Service map nodes (GetServiceGraph)
+    description: >-
+      One row per service node in the X-Ray service map for the window: the service name and type
+      (AWS::Lambda::Function, AWS::DynamoDB::Table, client, remote...), whether it is a root, and
+      its request/error(4xx)/throttle/fault(5xx) counts and average response time from sampled
+      traces, plus the names of the services it calls (downstream_services). Use it to list
+      instrumented services and to spot the node with the highest fault rate. For per-edge numbers
+      use xray_service_edges.
+    kind: entities
+    request:
+      method: POST
+      path: /ServiceGraph
+      body:
+        StartTime: "{{ time.start | epoch_s }}"
+        EndTime: "{{ time.end | epoch_s }}"
+        GroupName: "{{ filters.group_name }}"
+        GroupARN: "{{ filters.group_arn if not filters.group_name else None }}"
+    filters:
+      - {column: group_name, description: "X-Ray group name (a saved filter expression); default: the whole account"}
+      - {column: group_arn, description: "X-Ray group ARN (alternative to group_name)"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h, retention: 30d}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.Services[*]"
+    columns:
+      - {name: service, path: Name}
+      - {name: service_type, path: Type, description: "client | AWS::EC2::Instance | AWS::Lambda::Function | AWS::DynamoDB::Table | remote | ..."}
+      - {name: names, type: JSON, path: Names}
+      - {name: reference_id, type: BIGINT, path: ReferenceId}
+      - {name: root, type: BOOLEAN, path: Root, description: "First service to process requests"}
+      - {name: state, path: State}
+      - {name: account_id, path: AccountId}
+      - {name: first_seen, type: TIMESTAMP, path: StartTime, transform: epoch_s}
+      - {name: last_seen, type: TIMESTAMP, path: EndTime, transform: epoch_s}
+      - {name: ok_count, type: BIGINT, path: SummaryStatistics.OkCount}
+      - {name: error_count, type: BIGINT, path: SummaryStatistics.ErrorStatistics.TotalCount, description: "4xx"}
+      - {name: throttle_count, type: BIGINT, path: SummaryStatistics.ErrorStatistics.ThrottleCount, description: "429"}
+      - {name: fault_count, type: BIGINT, path: SummaryStatistics.FaultStatistics.TotalCount, description: "5xx"}
+      - {name: total_count, type: BIGINT, path: SummaryStatistics.TotalCount}
+      - {name: avg_response_ms, type: DOUBLE, expr: "((_.SummaryStatistics.TotalResponseTime / _.SummaryStatistics.TotalCount) * 1000) if (_.SummaryStatistics and _.SummaryStatistics.TotalCount) else None"}
+      - {name: fault_rate, type: DOUBLE, expr: "(_.SummaryStatistics.FaultStatistics.TotalCount / _.SummaryStatistics.TotalCount) if (_.SummaryStatistics and _.SummaryStatistics.TotalCount and _.SummaryStatistics.FaultStatistics) else None", description: "fault_count / total_count (sampled)"}
+      - {name: downstream_services, expr: "root.Services | selectattr('ReferenceId', 'in', (_.Edges or []) | map(attribute='ReferenceId') | list) | map(attribute='Name') | join(',')", description: "Names of the services this node calls"}
+      - {name: response_time_histogram, type: JSON, path: ResponseTimeHistogram, description: "[{Value: seconds, Count}]"}
+      - {name: duration_histogram, type: JSON, path: DurationHistogram}
+      - {name: group_name, filter_only: true}
+      - {name: group_arn, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window of the graph (WHERE ts BETWEEN ...)"}
+    max_rows: 2000
+    pitfalls:
+      - "Counts come from sampled traces only; compare rates, not absolute volumes, and use CloudWatch metrics for totals."
+      - "client and remote (uninstrumented) nodes have no SummaryStatistics; their counts are null."
+      - "The same service can appear as several nodes (one per type, e.g. AWS::Lambda and AWS::Lambda::Function)."
+    examples:
+      - sql: >-
+          SELECT service, service_type, total_count, fault_count, round(fault_rate * 100, 2) AS fault_pct, round(avg_response_ms) AS avg_ms, downstream_services
+          FROM xray_service_graph
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:30:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY fault_rate DESC NULLS LAST LIMIT 15
+        description: Services ranked by fault rate in the incident window.
+      - sql: >-
+          SELECT DISTINCT service, service_type FROM xray_service_graph WHERE root = true
+        description: Entry-point services (what users hit first).
+    tests:
+      - {sql: "SELECT service, service_type FROM xray_service_graph", min_rows: 0}
+    fixtures:
+      - file: get_service_graph.json
+        expect_rows: 4
+        expect_columns: {service: xray-sample.elasticbeanstalk.com, service_type: client, reference_id: 0, downstream_services: xray-sample.elasticbeanstalk.com, first_seen: "2018-06-06T20:39:27Z"}
+        note: >-
+          Verbatim "Example GetServiceGraph output" from the X-Ray developer guide
+          (https://docs.aws.amazon.com/xray/latest/devguide/xray-api-gettingdata.html); schema per
+          https://docs.aws.amazon.com/xray/latest/api/API_GetServiceGraph.html
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#xray:service-map/map
+
+  # ------------------------------------------------------------------------------------------
+  - name: xray_service_edges
+    title: Service map edges (GetServiceGraph)
+    description: >-
+      One row per call edge source_service -> target_service in the X-Ray service map for the
+      window, with the edge's ok/error(4xx)/throttle/fault(5xx)/total counts and average client
+      response time as seen by the caller. Use it to answer "which dependency is failing / slow for
+      whom" and to walk the dependency chain from the alerting service.
+    kind: entities
+    request:
+      method: POST
+      path: /ServiceGraph
+      body:
+        StartTime: "{{ time.start | epoch_s }}"
+        EndTime: "{{ time.end | epoch_s }}"
+        GroupName: "{{ filters.group_name }}"
+        GroupARN: "{{ filters.group_arn if not filters.group_name else None }}"
+    filters:
+      - {column: group_name, description: "X-Ray group name; default: the whole account"}
+      - {column: group_arn, description: "X-Ray group ARN"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h, retention: 30d}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.Services[*]"
+      expand:
+        - {explode: Edges, as: e}
+    columns:
+      - {name: source_service, path: Name}
+      - {name: source_type, path: Type}
+      - {name: source_reference_id, type: BIGINT, path: ReferenceId}
+      - {name: target_reference_id, type: BIGINT, path: "@e.ReferenceId"}
+      - {name: target_service, expr: "root.Services | selectattr('ReferenceId', 'equalto', e.ReferenceId) | map(attribute='Name') | first"}
+      - {name: target_type, expr: "root.Services | selectattr('ReferenceId', 'equalto', e.ReferenceId) | map(attribute='Type') | first"}
+      - {name: edge_type, path: "@e.EdgeType", description: "null for synchronous calls; 'link' for asynchronous (e.g. SQS/SNS) edges"}
+      - {name: first_seen, type: TIMESTAMP, path: "@e.StartTime", transform: epoch_s}
+      - {name: last_seen, type: TIMESTAMP, path: "@e.EndTime", transform: epoch_s}
+      - {name: ok_count, type: BIGINT, path: "@e.SummaryStatistics.OkCount"}
+      - {name: error_count, type: BIGINT, path: "@e.SummaryStatistics.ErrorStatistics.TotalCount", description: "4xx"}
+      - {name: throttle_count, type: BIGINT, path: "@e.SummaryStatistics.ErrorStatistics.ThrottleCount"}
+      - {name: fault_count, type: BIGINT, path: "@e.SummaryStatistics.FaultStatistics.TotalCount", description: "5xx"}
+      - {name: total_count, type: BIGINT, path: "@e.SummaryStatistics.TotalCount"}
+      - {name: avg_response_ms, type: DOUBLE, expr: "((e.SummaryStatistics.TotalResponseTime / e.SummaryStatistics.TotalCount) * 1000) if (e.SummaryStatistics and e.SummaryStatistics.TotalCount) else None"}
+      - {name: response_time_histogram, type: JSON, path: "@e.ResponseTimeHistogram"}
+      - {name: received_event_age_histogram, type: JSON, path: "@e.ReceivedEventAgeHistogram", description: "Async (link) edges: age of events when received (queue lag)"}
+      - {name: aliases, type: JSON, path: "@e.Aliases"}
+      - {name: group_name, filter_only: true}
+      - {name: group_arn, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window of the graph"}
+    max_rows: 5000
+    pitfalls:
+      - "Edge statistics are measured by the caller: a timeout to the target shows up as a fault on this edge even if the target never saw the request."
+      - "Asynchronous edges (edge_type = 'link') carry no response-time histogram; their lag is in received_event_age_histogram."
+      - "Counts are from sampled traces."
+    examples:
+      - sql: >-
+          SELECT source_service, target_service, target_type, total_count, fault_count, error_count, throttle_count, round(avg_response_ms) AS avg_ms
+          FROM xray_service_edges
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:30:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND (fault_count > 0 OR throttle_count > 0)
+          ORDER BY fault_count DESC
+        description: Failing dependencies during the incident (who calls what, and how it fails).
+      - sql: >-
+          SELECT target_service, target_type, total_count, round(avg_response_ms) AS avg_ms
+          FROM xray_service_edges WHERE source_service = 'checkout-api' ORDER BY avg_ms DESC
+        description: Downstream calls of one service, slowest first.
+    fixtures:
+      - file: get_service_graph.json
+        expect_rows: 3
+        expect_columns:
+          source_service: xray-sample.elasticbeanstalk.com
+          source_type: client
+          target_reference_id: 2
+          target_service: xray-sample.elasticbeanstalk.com
+          target_type: "AWS::EC2::Instance"
+          ok_count: 3
+          error_count: 1
+          total_count: 4
+          avg_response_ms: 68.25
+        note: >-
+          Verbatim "Example GetServiceGraph output" from the X-Ray developer guide
+          (https://docs.aws.amazon.com/xray/latest/devguide/xray-api-gettingdata.html); 3 edges across 4 nodes.
+
+  # ------------------------------------------------------------------------------------------
+  - name: xray_service_statistics
+    title: Service statistics over time (GetTimeSeriesServiceStatistics)
+    description: >-
+      Per-period ok / error(4xx) / throttle / fault(5xx) / total counts and average response time
+      for one service or edge selected by `service` (pushed as service("name")) or an
+      `entity_selector` expression (service("x"), edge("a", "b"), id(...)); without either X-Ray
+      returns edge statistics for the whole group. One row per period (`period` seconds; default 60
+      for windows up to 6h, 300 up to 48h, else 3600). Good for "when did faults start for this
+      service" straight from trace data.
+    kind: timeseries
+    request:
+      method: POST
+      path: /TimeSeriesServiceStatistics
+      body:
+        StartTime: "{{ time.start | epoch_s }}"
+        EndTime: "{{ time.end | epoch_s }}"
+        EntitySelectorExpression: "{{ filters.entity_selector or (('service(' ~ (filters.service | quote) ~ ')') if filters.service else None) }}"
+        GroupName: "{{ filters.group_name }}"
+        Period: "{{ (filters.period | int) if filters.period else (60 if time.range_s <= 21600 else (300 if time.range_s <= 172800 else 3600)) }}"
+        ForecastStatistics: "{{ true if filters.forecast else None }}"
+    filters:
+      - {column: service, ops: ["=", "in"], max_fan_out: 10, description: "X-Ray service name (pushed as service(\"name\")); IN fans out", examples: ["checkout-api"]}
+      - {column: entity_selector, description: "Raw EntitySelectorExpression (max 500 chars), e.g. edge(\"frontend\", \"checkout-api\") (overrides service)"}
+      - {column: group_name, description: "X-Ray group name (case-sensitive)"}
+      - {column: period, type: BIGINT, description: "Aggregation period in seconds (60, 300 or 3600 are the values the console uses)", examples: ["60"]}
+      - {column: forecast, type: BOOLEAN, description: "Also return forecast fault-count bands (needs an id() entity selector)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, retention: 30d}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.TimeSeriesServiceStatistics[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: Timestamp, transform: epoch_s}
+      - {name: scope, expr: "'service' if _.ServiceSummaryStatistics else ('edge' if _.EdgeSummaryStatistics else None)", description: "Whether the row holds service or edge statistics"}
+      - {name: ok_count, type: BIGINT, expr: "(_.ServiceSummaryStatistics or _.EdgeSummaryStatistics or {}).OkCount"}
+      - {name: error_count, type: BIGINT, expr: "((_.ServiceSummaryStatistics or _.EdgeSummaryStatistics or {}).ErrorStatistics or {}).TotalCount", description: "4xx"}
+      - {name: throttle_count, type: BIGINT, expr: "((_.ServiceSummaryStatistics or _.EdgeSummaryStatistics or {}).ErrorStatistics or {}).ThrottleCount"}
+      - {name: fault_count, type: BIGINT, expr: "((_.ServiceSummaryStatistics or _.EdgeSummaryStatistics or {}).FaultStatistics or {}).TotalCount", description: "5xx"}
+      - {name: total_count, type: BIGINT, expr: "(_.ServiceSummaryStatistics or _.EdgeSummaryStatistics or {}).TotalCount"}
+      - {name: avg_response_ms, type: DOUBLE, expr: "(((_.ServiceSummaryStatistics or _.EdgeSummaryStatistics).TotalResponseTime / (_.ServiceSummaryStatistics or _.EdgeSummaryStatistics).TotalCount) * 1000) if (_.ServiceSummaryStatistics or _.EdgeSummaryStatistics or {}).TotalCount else None"}
+      - {name: forecast_fault_high, type: BIGINT, path: ServiceForecastStatistics.FaultCountHigh}
+      - {name: forecast_fault_low, type: BIGINT, path: ServiceForecastStatistics.FaultCountLow}
+      - {name: response_time_histogram, type: JSON, path: ResponseTimeHistogram}
+      - {name: service, filter_only: true}
+      - {name: entity_selector, filter_only: true}
+      - {name: group_name, filter_only: true}
+      - {name: period, type: BIGINT, filter_only: true}
+      - {name: forecast, type: BOOLEAN, filter_only: true}
+    max_rows: 20000
+    sort_hint: "ascending by time"
+    zero_fill: false
+    pitfalls:
+      - "Statistics come from sampled traces; trends are meaningful, absolute counts are not totals."
+      - "Periods without traces are absent (no zero rows)."
+      - "Without service/entity_selector the rows are EDGE statistics for the group (scope = 'edge')."
+    examples:
+      - sql: >-
+          SELECT ts, total_count, fault_count, round(100.0 * fault_count / nullif(total_count, 0), 1) AS fault_pct, round(avg_response_ms) AS avg_ms
+          FROM xray_service_statistics
+          WHERE service = 'checkout-api'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Minute-by-minute fault rate and latency of one service from traces.
+      - sql: >-
+          SELECT min(ts) AS first_faulty_minute FROM xray_service_statistics
+          WHERE service = 'checkout-api' AND fault_count > 0
+        description: When faults first appeared for a service in the window.
+    fixtures:
+      - file: get_time_series_service_statistics.json
+        filters: {service: checkout-api, period: 60}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:00:00Z", scope: service, ok_count: 1180, error_count: 4, fault_count: 2, total_count: 1186, service: checkout-api, period: 60}
+        note: >-
+          Built strictly from the response schema of
+          https://docs.aws.amazon.com/xray/latest/api/API_GetTimeSeriesServiceStatistics.html
+          (the docs give no example response); values are illustrative.
+
+  # ------------------------------------------------------------------------------------------
+  - name: xray_insights
+    title: X-Ray Insights anomalies (GetInsightSummaries)
+    description: >-
+      Anomalies that X-Ray Insights detected for a group (default group 'Default'): one row per
+      insight that STARTED in the window, with its state (ACTIVE / CLOSED), summary text, the root
+      cause service, client and root-cause request impact (fault/ok/total counts), categories and
+      the top anomalous services. Only groups with Insights enabled produce rows (see xray_groups).
+      A fast "what did AWS itself flag" check at the start of an investigation.
+    kind: incidents
+    request:
+      method: POST
+      path: /InsightSummaries
+      body:
+        StartTime: "{{ time.start | epoch_s }}"
+        EndTime: "{{ time.end | epoch_s }}"
+        GroupName: "{{ None if filters.group_arn else (filters.group_name or 'Default') }}"
+        GroupARN: "{{ filters.group_arn }}"
+        States: "{{ [filters.state] if filters.state else None }}"
+        MaxResults: 100
+    filters:
+      - {column: group_name, description: "X-Ray group name (default 'Default')", examples: ["Default"]}
+      - {column: group_arn, description: "X-Ray group ARN (alternative to group_name)"}
+      - {column: state, ops: ["=", "in"], description: "ACTIVE | CLOSED (IN fans out)", examples: ["ACTIVE"]}
+    time: {column: ts, default_lookback: 24h, max_window: 30d, retention: 30d}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.InsightSummaries[*]"
+    columns:
+      - {name: id, path: InsightId}
+      - {name: ts, type: TIMESTAMP, path: StartTime, transform: epoch_s, description: "When the anomaly started"}
+      - {name: end_ts, type: TIMESTAMP, path: EndTime, transform: epoch_s, description: "When it ended (null while active)"}
+      - {name: last_update, type: TIMESTAMP, path: LastUpdateTime, transform: epoch_s}
+      - {name: state, path: State, description: "ACTIVE | CLOSED"}
+      - {name: title, path: Summary, description: "Human-readable summary of the insight"}
+      - {name: categories, path: "Categories[*]", transform: join, transform_arg: ",", description: "e.g. FAULT"}
+      - {name: service, path: RootCauseServiceId.Name, description: "Root cause service"}
+      - {name: service_type, path: RootCauseServiceId.Type}
+      - {name: root_cause_fault_count, type: BIGINT, path: RootCauseServiceRequestImpactStatistics.FaultCount}
+      - {name: root_cause_total_count, type: BIGINT, path: RootCauseServiceRequestImpactStatistics.TotalCount}
+      - {name: client_fault_count, type: BIGINT, path: ClientRequestImpactStatistics.FaultCount, description: "Faulted client requests (user impact)"}
+      - {name: client_total_count, type: BIGINT, path: ClientRequestImpactStatistics.TotalCount}
+      - {name: top_anomalous_services, path: "TopAnomalousServices[*].ServiceId.Name", transform: join, transform_arg: ","}
+      - {name: group_name, path: GroupName}
+      - {name: group_arn, path: GroupARN}
+    max_rows: 1000
+    pitfalls:
+      - "Only insights that STARTED inside the window are returned (StartTime/EndTime bound the start); widen the window backwards for long-running anomalies."
+      - "Insights must be enabled on the group (InsightsConfiguration.InsightsEnabled); otherwise 0 rows means 'not enabled', not 'healthy'."
+      - "Start and end of the window cannot be more than 30 days old."
+    examples:
+      - sql: >-
+          SELECT ts, end_ts, state, service, title, client_fault_count, client_total_count, top_anomalous_services
+          FROM xray_insights
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 06:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: X-Ray-detected anomalies around the incident and the root-cause service.
+      - sql: >-
+          SELECT ts, service, title FROM xray_insights WHERE state = 'ACTIVE'
+        description: Anomalies still open now.
+    fixtures:
+      - file: get_insight_summaries.json
+        expect_rows: 1
+        expect_columns:
+          id: 8b8e3a2c4f5d6e7f8a9b0c1d2e3f4a5b
+          ts: "2026-10-01T11:48:00Z"
+          state: ACTIVE
+          service: orders-db
+          client_fault_count: 412
+          categories: FAULT
+          top_anomalous_services: "orders-db,checkout-api"
+        note: >-
+          Built strictly from the GetInsightSummaries response schema (InsightSummaries[] of InsightId,
+          GroupARN, GroupName, RootCauseServiceId, Categories, State, StartTime, EndTime, Summary,
+          ClientRequestImpactStatistics, RootCauseServiceRequestImpactStatistics, TopAnomalousServices,
+          LastUpdateTime) at https://docs.aws.amazon.com/xray/latest/api/API_GetInsightSummaries.html
+          (no documented example). Values are illustrative.
+
+  # ------------------------------------------------------------------------------------------
+  - name: xray_groups
+    title: X-Ray groups (GetGroups)
+    description: >-
+      X-Ray groups: name, ARN, the filter expression that defines the group, and whether Insights
+      (and Insights notifications) are enabled. Use it to pick group_name for xray_service_graph,
+      xray_service_statistics and xray_insights.
+    kind: entities
+    request:
+      method: POST
+      path: /Groups
+      body: {}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.Groups[*]"
+    columns:
+      - {name: group_name, path: GroupName}
+      - {name: group_arn, path: GroupARN}
+      - {name: filter_expression, path: FilterExpression}
+      - {name: insights_enabled, type: BOOLEAN, path: InsightsConfiguration.InsightsEnabled}
+      - {name: notifications_enabled, type: BOOLEAN, path: InsightsConfiguration.NotificationsEnabled}
+    examples:
+      - sql: "SELECT group_name, filter_expression, insights_enabled FROM xray_groups ORDER BY group_name"
+        description: Groups and whether X-Ray Insights runs on them.
+    fixtures:
+      - file: get_groups.json
+        expect_rows: 2
+        expect_columns: {group_name: Default, insights_enabled: true}
+        note: >-
+          Built strictly from the GetGroups response schema (Groups[] of FilterExpression, GroupARN,
+          GroupName, InsightsConfiguration {InsightsEnabled, NotificationsEnabled}) at
+          https://docs.aws.amazon.com/xray/latest/api/API_GetGroups.html (no documented example).
+
+  # ------------------------------------------------------------------------------------------
+  - name: xray_retrieved_traces
+    title: Full traces from Transaction Search (StartTraceRetrieval -> ListRetrievedTraces)
+    description: >-
+      Full traces for accounts with CloudWatch Transaction Search enabled (spans stored in the
+      aws/spans log group, where BatchGetTraces cannot see them). trace_id is required (= or IN, up
+      to 100 ids in ONE retrieval); the ts window bounds the retrieval. One row per span with the
+      same parsed columns as xray_trace_segments (X-Ray format); trace_format = 'OTEL' returns
+      OpenTelemetry span JSON instead (then only `document` is populated). The engine starts the
+      retrieval and polls until RetrievalStatus = COMPLETE.
+    kind: spans
+    steps:
+      - name: start
+        method: POST
+        path: /StartTraceRetrieval
+        body:
+          TraceIds: "{{ filters.trace_id | as_list }}"
+          StartTime: "{{ time.start | epoch_s }}"
+          EndTime: "{{ time.end | epoch_s }}"
+        capture: {retrieval_token: "$.RetrievalToken"}
+      - name: results
+        method: POST
+        path: /ListRetrievedTraces
+        body:
+          RetrievalToken: "{{ captures.retrieval_token }}"
+          TraceFormat: "{{ filters.trace_format or 'XRAY' }}"
+        poll:
+          until: "response.RetrievalStatus == 'COMPLETE'"
+          fail_if: "response.RetrievalStatus in ['FAILED', 'CANCELLED', 'TIMEOUT']"
+          interval_s: 2
+          timeout_s: 120
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], fan_out: false, description: "Trace id(s); IN sends up to 100 ids in one retrieval", examples: ["1-59602603-23fc5b688855d396af79b496"]}
+      - {column: trace_format, description: "XRAY (default) | OTEL"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h, retention: 30d}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 20}
+    response:
+      rows_path: "$.Traces[*]"
+      expand:
+        - {explode: Spans, as: s}
+        - {explode: "@s.Document", parse: true, as: doc}
+    columns:
+      - {name: trace_id, path: Id}
+      - {name: span_id, path: "@s.Id"}
+      - {name: parent_id, path: "@doc.parent_id"}
+      - {name: service, path: "@doc.name"}
+      - {name: origin, path: "@doc.origin"}
+      - {name: span_start, type: TIMESTAMP, path: "@doc.start_time", transform: epoch_s, description: "Span start (X-Ray format)"}
+      - {name: duration_ms, type: DOUBLE, expr: "(((doc.end_time - doc.start_time) * 1000) | round(3)) if (doc.end_time and doc.start_time) else None"}
+      - {name: status_code, type: BIGINT, path: "@doc.http.response.status"}
+      - {name: fault, type: BOOLEAN, expr: "doc.fault or false"}
+      - {name: error, type: BOOLEAN, expr: "doc.error or false"}
+      - {name: exception, path: "@doc.cause.exceptions[0].message"}
+      - {name: document, type: JSON, path: "@doc", description: "Parsed span document (X-Ray segment format or OTEL span JSON)"}
+      - {name: trace_duration_ms, type: DOUBLE, path: Duration, transform: s_to_ms}
+      - {name: trace_ts, type: TIMESTAMP, expr: "_.Id.split('-')[1] | int(0, 16)", transform: epoch_s, description: "Trace start encoded in the trace id"}
+      - {name: retrieval_status, path: "$.RetrievalStatus"}
+      - {name: trace_format, path: "$.TraceFormat"}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Retrieval window"}
+    max_rows: 5000
+    positive_control: false
+    pitfalls:
+      - "Only works when Transaction Search is enabled; otherwise use xray_trace_segments."
+      - "The retrieval window must contain the spans: widen ts if a known trace comes back empty."
+      - "Retrievals time out after 60 minutes server-side; the engine waits at most 120 s. ListRetrievedTraces returns at most 5 traces per page."
+      - "With trace_format = 'OTEL' the parsed columns are null; read document (OpenTelemetry span JSON)."
+    examples:
+      - sql: >-
+          SELECT trace_id, span_id, service, span_start, round(duration_ms, 1) AS ms, status_code, fault, exception
+          FROM xray_retrieved_traces
+          WHERE trace_id IN ('1-59602603-23fc5b688855d396af79b496', '1-59602606-a43a1ac52fc7ee0eea12a82c')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY trace_id, span_start
+        description: Spans of two traces retrieved from Transaction Search in one call.
+    fixtures:
+      - file: list_retrieved_traces.json
+        filters: {trace_id: 1-59602603-23fc5b688855d396af79b496}
+        expect_rows: 2
+        expect_columns: {trace_id: 1-59602603-23fc5b688855d396af79b496, span_id: 1fb07842d944e714, service: random-name, retrieval_status: COMPLETE, trace_format: XRAY, trace_duration_ms: 3232.0, trace_ts: "2017-07-08T00:23:31Z"}
+        note: >-
+          Built strictly from the ListRetrievedTraces response schema
+          (https://docs.aws.amazon.com/xray/latest/api/API_ListRetrievedTraces.html; no example response
+          is documented). The span documents are processed segment documents copied from the X-Ray
+          developer guide BatchGetTraces example.
+
+roles:
+  traces:
+    table: xray_trace_summaries
+    query_language: xray_filter_expression
+    filters:
+      service: "{{ service }}"
+      filter_expression: "{{ 'fault OR error' if error_only else '' }}"
+    columns: {ts: ts, trace_id: trace_id, service: entry_service, duration_ms: duration_ms, status_code: status_code, resource: http_url}
+    notes: "Sampled traces; fault_root_cause_services / fault_root_cause_exceptions tell which service X-Ray blames."
+  trace_detail:
+    table: xray_trace_segments
+    columns: {trace_id: trace_id, span_id: span_id, parent_id: parent_id, service: service, ts: ts, duration_ms: duration_ms, status_code: status_code, message: exception}
+    notes: "One row per segment; downstream calls are in xray_trace_subsegments; with Transaction Search enabled use xray_retrieved_traces."
+  service_map:
+    table: xray_service_edges
+    columns: {source: source_service, target: target_service, errors: fault_count, requests: total_count}
+  services:
+    table: xray_service_graph
+    columns: {service: service, type: service_type}

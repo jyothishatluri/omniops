@@ -1,0 +1,41 @@
+{
+ "queryLanguage": "CWLI",
+ "results": [
+  [
+   {
+    "field": "ts",
+    "value": "2026-10-01 11:55:00.000"
+   },
+   {
+    "field": "value",
+    "value": "3"
+   }
+  ],
+  [
+   {
+    "field": "ts",
+    "value": "2026-10-01 11:56:00.000"
+   },
+   {
+    "field": "value",
+    "value": "41"
+   }
+  ],
+  [
+   {
+    "field": "ts",
+    "value": "2026-10-01 11:57:00.000"
+   },
+   {
+    "field": "value",
+    "value": "118"
+   }
+  ]
+ ],
+ "statistics": {
+  "recordsMatched": 162.0,
+  "recordsScanned": 51240.0,
+  "bytesScanned": 10485760.0
+ },
+ "status": "Complete"
+}

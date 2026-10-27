@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "data": {
+    "attributes": [
+      {"key": "service.name", "valueCount": 3, "values": ["frontend", "checkout", "cartservice"]},
+      {"key": "status.code", "valueCount": 2, "values": ["STATUS_CODE_UNSET", "STATUS_CODE_ERROR"]}
+    ],
+    "totalKeys": 2
+  }
+}

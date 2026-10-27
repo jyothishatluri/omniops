@@ -1,0 +1,38 @@
+{
+ "status": "success",
+ "data": {
+  "resultType": "vector",
+  "result": [
+   {
+    "metric": {
+     "__name__": "count(*)",
+     "level": "info"
+    },
+    "value": [
+     1704153600,
+     "20395342"
+    ]
+   },
+   {
+    "metric": {
+     "__name__": "count(*)",
+     "level": "warn"
+    },
+    "value": [
+     1704153600,
+     "1239222"
+    ]
+   },
+   {
+    "metric": {
+     "__name__": "count(*)",
+     "level": "error"
+    },
+    "value": [
+     1704153600,
+     "832"
+    ]
+   }
+  ]
+ }
+}

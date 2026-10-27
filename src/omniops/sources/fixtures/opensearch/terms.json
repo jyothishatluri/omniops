@@ -1,0 +1,22 @@
+{
+  "aggregations": {
+    "t": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": [
+        {
+          "key": "200",
+          "doc_count": 12832
+        },
+        {
+          "key": "404",
+          "doc_count": 801
+        },
+        {
+          "key": "503",
+          "doc_count": 441
+        }
+      ]
+    }
+  }
+}

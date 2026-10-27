@@ -1,0 +1,88 @@
+{
+ "metadata": {
+  "resourceVersion": "51240"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "flagd-values.18a7f2b0000000a1",
+    "namespace": "argocd",
+    "uid": "c1d2e3f4-0000-4000-8000-f2b0000000a1",
+    "creationTimestamp": "2026-10-01T11:39:41Z"
+   },
+   "involvedObject": {
+    "kind": "Application",
+    "namespace": "argocd",
+    "name": "flagd-values",
+    "uid": "a1b2c3d4-0000-4000-8000-0000000000a1",
+    "apiVersion": "argoproj.io/v1alpha1",
+    "resourceVersion": "51230"
+   },
+   "reason": "OperationCompleted",
+   "message": "Sync operation to 4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3 succeeded",
+   "source": {
+    "component": "argocd-application-controller"
+   },
+   "firstTimestamp": "2026-10-01T11:39:41Z",
+   "lastTimestamp": "2026-10-01T11:39:41Z",
+   "count": 1,
+   "type": "Normal",
+   "reportingComponent": "",
+   "reportingInstance": ""
+  },
+  {
+   "metadata": {
+    "name": "flagd-values.18a7f2a0000000a2",
+    "namespace": "argocd",
+    "uid": "c1d2e3f4-0000-4000-8000-f2a0000000a2",
+    "creationTimestamp": "2026-10-01T11:39:38Z"
+   },
+   "involvedObject": {
+    "kind": "Application",
+    "namespace": "argocd",
+    "name": "flagd-values",
+    "uid": "a1b2c3d4-0000-4000-8000-0000000000a1",
+    "apiVersion": "argoproj.io/v1alpha1",
+    "resourceVersion": "51230"
+   },
+   "reason": "OperationStarted",
+   "message": "Initiated automated sync to '4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3'",
+   "source": {
+    "component": "argocd-application-controller"
+   },
+   "firstTimestamp": "2026-10-01T11:39:38Z",
+   "lastTimestamp": "2026-10-01T11:39:38Z",
+   "count": 1,
+   "type": "Normal",
+   "reportingComponent": "",
+   "reportingInstance": ""
+  },
+  {
+   "metadata": {
+    "name": "flagd-values.18a7f290000000a3",
+    "namespace": "argocd",
+    "uid": "c1d2e3f4-0000-4000-8000-f290000000a3",
+    "creationTimestamp": "2026-10-01T11:39:30Z"
+   },
+   "involvedObject": {
+    "kind": "Application",
+    "namespace": "argocd",
+    "name": "flagd-values",
+    "uid": "a1b2c3d4-0000-4000-8000-0000000000a1",
+    "apiVersion": "argoproj.io/v1alpha1",
+    "resourceVersion": "51230"
+   },
+   "reason": "ResourceUpdated",
+   "message": "Updated sync status: Synced -> OutOfSync",
+   "source": {
+    "component": "argocd-application-controller"
+   },
+   "firstTimestamp": "2026-10-01T11:39:30Z",
+   "lastTimestamp": "2026-10-01T11:39:30Z",
+   "count": 1,
+   "type": "Normal",
+   "reportingComponent": "",
+   "reportingInstance": ""
+  }
+ ]
+}

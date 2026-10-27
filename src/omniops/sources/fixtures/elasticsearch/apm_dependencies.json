@@ -1,0 +1,76 @@
+{
+  "took": 7,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 4200,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+  },
+  "aggregations": {
+    "t": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": [
+        {
+          "key": "checkout-api",
+          "doc_count": 4000,
+          "d": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "postgresql",
+                "doc_count": 3000,
+                "failures": {
+                  "doc_count": 12
+                },
+                "latency_avg": {
+                  "value": 3781.0
+                }
+              },
+              {
+                "key": "payments:443",
+                "doc_count": 1000,
+                "failures": {
+                  "doc_count": 40
+                },
+                "latency_avg": {
+                  "value": 32592.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "key": "payments",
+          "doc_count": 200,
+          "d": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "redis",
+                "doc_count": 200,
+                "failures": {
+                  "doc_count": 0
+                },
+                "latency_avg": {
+                  "value": 350.0
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

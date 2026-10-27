@@ -1,0 +1,66 @@
+{
+ "queryResult": [
+  {
+   "rowId": "A",
+   "timeSeriesList": {
+    "timeSeries": [
+     {
+      "metricDefinition": {
+       "metric": "CPU_Total",
+       "dimensions": {
+        "_sourceHost": "us2-alert-1",
+        "_sourceCategory": "alert"
+       }
+      },
+      "points": {
+       "timestamps": [
+        1623258710000,
+        1623258770000
+       ],
+       "values": [
+        1.5,
+        2.25
+       ]
+      }
+     },
+     {
+      "metricDefinition": {
+       "metric": "CPU_Total",
+       "dimensions": {
+        "_sourceHost": "us2-alert-2",
+        "_sourceCategory": "alert"
+       }
+      },
+      "points": {
+       "timestamps": [
+        1623258710000
+       ],
+       "values": [
+        0.75
+       ]
+      }
+     }
+    ],
+    "unit": "1/second",
+    "timeShiftLabel": "",
+    "resultContext": {
+     "quantizationGranularity": 60000,
+     "rollup": "Avg",
+     "actualQueryTimeRange": {
+      "start": "2021-06-09T17:11:00Z",
+      "end": "2021-06-09T17:21:00Z"
+     }
+    }
+   }
+  }
+ ],
+ "errors": {
+  "id": "AXDUI-DGH5I-TJ045",
+  "errors": [
+   {
+    "code": "metrics:incomplete_results",
+    "message": "Incomplete results"
+   }
+  ]
+ }
+}

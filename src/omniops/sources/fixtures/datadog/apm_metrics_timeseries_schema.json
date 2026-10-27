@@ -1,0 +1,14 @@
+{
+  "data": {
+    "id": "0",
+    "type": "timeseries_response",
+    "attributes": {
+      "series": [
+        {"group_tags": ["resource_name:post_/api/checkout"], "query_index": 0, "unit": null},
+        {"group_tags": ["resource_name:get_/api/cart"], "query_index": 0, "unit": null}
+      ],
+      "times": [1790852400000, 1790852460000, 1790852520000],
+      "values": [[2.0, 48.0, 51.0], [0.0, 1.0, null]]
+    }
+  }
+}

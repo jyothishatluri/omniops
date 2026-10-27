@@ -1,0 +1,18 @@
+{
+  "data": {
+    "id": "0",
+    "type": "scalar_response",
+    "attributes": {
+      "columns": [
+        {
+          "name": "a",
+          "values": [],
+          "type": "number",
+          "meta": {
+            "unit": null
+          }
+        }
+      ]
+    }
+  }
+}

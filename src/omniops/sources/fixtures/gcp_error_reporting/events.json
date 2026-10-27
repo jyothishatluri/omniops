@@ -1,0 +1,26 @@
+{
+  "errorEvents": [
+    {
+      "eventTime": "2026-10-20T14:02:05.123Z",
+      "serviceContext": {"service": "checkout", "version": "checkout-00042-xyz", "resourceType": "cloud_run_revision"},
+      "message": "java.lang.NullPointerException: cart is null\n\tat com.example.cart.CartService.reserve(CartService.java:88)",
+      "context": {
+        "httpRequest": {"method": "POST", "url": "https://shop.example.com/api/checkout?token=abc123secret", "userAgent": "Mozilla/5.0", "referrer": "https://shop.example.com/cart", "responseStatusCode": 500, "remoteIp": "203.0.113.10"},
+        "user": "user-4821",
+        "reportLocation": {"filePath": "CartService.java", "lineNumber": 88, "functionName": "com.example.cart.CartService.reserve"},
+        "sourceReferences": [{"repository": "https://github.com/example/shop", "revisionId": "9f3c2e1"}]
+      }
+    },
+    {
+      "eventTime": "2026-10-20T13:58:40Z",
+      "serviceContext": {"service": "checkout", "version": "checkout-00042-xyz", "resourceType": "cloud_run_revision"},
+      "message": "java.lang.NullPointerException: cart is null\n\tat com.example.cart.CartService.reserve(CartService.java:88)",
+      "context": {
+        "httpRequest": {"method": "POST", "url": "https://shop.example.com/api/checkout", "responseStatusCode": 500},
+        "reportLocation": {"filePath": "CartService.java", "lineNumber": 88, "functionName": "com.example.cart.CartService.reserve"}
+      }
+    }
+  ],
+  "nextPageToken": "",
+  "timeRangeBegin": "2026-10-20T08:03:00Z"
+}

@@ -1,0 +1,54 @@
+{
+  "totalRecords": 2,
+  "count": 2,
+  "data": [
+    {
+      "id": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api/providers/Microsoft.Resources/changes/08584238477460987162_d5b3a1c2-7e4f-4a10-9b2c-3d4e5f60718a_1931453551_1727779867",
+      "changeTime": "2026-10-01T10:51:07.347Z",
+      "changeType": "Update",
+      "targetResourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Web/sites/checkout-api",
+      "targetResourceType": "microsoft.web/sites",
+      "resourceGroup": "rg-shop-prod",
+      "subscriptionId": "11111111-2222-3333-4444-555555555555",
+      "changedBy": "deploy-pipeline@contoso.com",
+      "changedByType": "User",
+      "clientType": "Azure CLI",
+      "operation": "microsoft.web/sites/config/write",
+      "correlationId": "7f3c2b1a-0d9e-4c8b-a7f6-e5d4c3b2a190",
+      "changesCount": 2,
+      "changes": {
+        "properties.siteConfig.appSettings.PAYMENTS_TIMEOUT_MS": {
+          "newValue": "30000",
+          "previousValue": "5000"
+        },
+        "properties.siteConfig.numberOfWorkers": {
+          "newValue": "2",
+          "previousValue": "4"
+        }
+      }
+    },
+    {
+      "id": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Sql/servers/sql-shop-prod/databases/orders/providers/Microsoft.Resources/changes/08584238470001234567_aa11bb22-cc33-dd44-ee55-ff6677889900_1931450000_1727775000",
+      "changeTime": "2026-10-01T09:40:12.000Z",
+      "changeType": "Update",
+      "targetResourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Sql/servers/sql-shop-prod/databases/orders",
+      "targetResourceType": "microsoft.sql/servers/databases",
+      "resourceGroup": "rg-shop-prod",
+      "subscriptionId": "11111111-2222-3333-4444-555555555555",
+      "changedBy": "System",
+      "changedByType": "System",
+      "clientType": "Unspecified",
+      "operation": "Unspecified",
+      "correlationId": "00000000-0000-0000-0000-000000000000",
+      "changesCount": 1,
+      "changes": {
+        "properties.currentServiceObjectiveName": {
+          "newValue": "S2",
+          "previousValue": "S3"
+        }
+      }
+    }
+  ],
+  "facets": [],
+  "resultTruncated": "false"
+}

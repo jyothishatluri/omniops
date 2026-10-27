@@ -1,0 +1,331 @@
+# Google Cloud Error Reporting API v1beta1 reached directly over HTTPS.
+#
+#   base:   https://clouderrorreporting.googleapis.com
+#   groups: GET /v1beta1/projects/{p}[/locations/{l}]/groupStats  (error groups with counts)
+#   events: GET /v1beta1/projects/{p}[/locations/{l}]/events?groupId=...  (individual occurrences)
+#   group:  GET /v1beta1/projects/{p}[/locations/{l}]/groups/{groupId}  (resolution status, issues)
+#   auth:   OAuth2 scope https://www.googleapis.com/auth/cloud-platform (roles/errorreporting.viewer)
+#   time:   NO start/end parameters: timeRange.period is an enum relative to NOW (PERIOD_1_HOUR,
+#           PERIOD_6_HOURS, PERIOD_1_DAY, PERIOD_1_WEEK, PERIOD_30_DAYS). The engine picks the smallest
+#           period that reaches back to the window start and SQL trims to the window where rows have
+#           times (events, timed counts). Timestamps in responses are RFC 3339; counts are int64 strings.
+#   quota:  60 error-event and 60 error-group requests per minute per user; data kept 30 days.
+# Research notes: docs/sources/gcp_error_reporting.md
+source: gcp_error_reporting
+display_name: Google Cloud Error Reporting
+vendor: Google Cloud
+description: >-
+  Error Reporting v1beta1: error groups with counts, affected users/services, first/last seen and a
+  representative stack trace; per-group occurrence counts over time; individual error events; the
+  error group record (resolution status incl. MUTED, tracking issues).
+docs_url: https://docs.cloud.google.com/error-reporting/reference/rest
+categories: [errors]
+base_url: "{{ env.GCP_ERROR_REPORTING_BASE_URL }}"
+env:
+  - {name: GCP_PROJECT_ID, description: "Project id whose errors are read."}
+  - {name: GCP_CREDENTIALS_FILE, description: "Optional service-account JSON key path; Application Default Credentials otherwise. Needs roles/errorreporting.viewer."}
+  - {name: GCP_ERROR_REPORTING_LOCATION, description: "Optional location: unset = global (projects/P), a region such as us-central1, or '-' for all regions (projects/P/locations/-)."}
+  - {name: GCP_ERROR_REPORTING_BASE_URL, default: "https://clouderrorreporting.googleapis.com", description: "API endpoint override."}
+required_env: [GCP_PROJECT_ID]
+auth:
+  type: gcp_service_account
+  scope: https://www.googleapis.com/auth/cloud-platform
+  credentials_file: "{{ env.GCP_CREDENTIALS_FILE }}"
+rate_limit:
+  concurrency: 2
+  requests_per_minute: 55
+  notes: "60 error event data requests and 60 error group metadata requests per minute per user (adjustable quota); 429 RESOURCE_EXHAUSTED when exceeded."
+retention:
+  events: 30d
+  timeseries: 30d
+errors:
+  - {path: "$.error.message", non_empty: true, message: "$.error.message", hint: "Google API error (permission, quota or invalid parameter)"}
+ui_base_url: "https://console.cloud.google.com"
+pitfalls:
+  - "Time ranges are fixed periods ending NOW (1 h, 6 h, 1 day, 1 week, 30 days): counts for an incident two days ago include everything since then. Use gcp_error_reporting_group_counts (timed buckets) or gcp_error_reporting_events to look at the incident window itself."
+  - "Data is kept 30 days; all counts are approximate (events are sampled before counting)."
+  - "Groups marked MUTED are excluded from group stats by default; RESOLVED groups that recur flip back to OPEN."
+  - "service / version / resource_type filters are EXACT matches on the reported serviceContext (Cloud Run service name, GKE container, App Engine module, Cloud Functions name; version = revision/deployment)."
+  - "Errors only appear here when logs carry a stack trace (or are reported via the API): exceptions logged without a stack trace are missing - search gcp_logging_entries too."
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_error_reporting_groups
+    title: Error groups with counts (groupStats.list)
+    description: >-
+      One row per error group: title (first line of the representative stack trace), message (full
+      representative stack trace), count and affected_users in the requested period, first_seen /
+      last_seen (all time), resolution state, affected services/versions, the first affected service and
+      the representative's request/location. Sorted by count (order_by: COUNT_DESC default, LAST_SEEN_DESC,
+      CREATED_DESC, AFFECTED_USERS_DESC). Filter by service, version, resource_type or group_id. New errors
+      of a deploy: order_by = 'CREATED_DESC' and first_seen inside the window.
+    kind: events
+    request:
+      method: GET
+      path: "/v1beta1/projects/{{ env.GCP_PROJECT_ID }}{{ ('/locations/' ~ env.GCP_ERROR_REPORTING_LOCATION) if env.GCP_ERROR_REPORTING_LOCATION else '' }}/groupStats"
+      query:
+        groupId: "{{ (filters.group_id | as_list) if filters.group_id else none }}"
+        serviceFilter.service: "{{ filters.service }}"
+        serviceFilter.version: "{{ filters.version }}"
+        serviceFilter.resourceType: "{{ filters.resource_type }}"
+        timeRange.period: >-
+          {{ filters.period or ('PERIOD_1_HOUR' if (now_utc() - time.start).total_seconds() <= 3720 else
+             ('PERIOD_6_HOURS' if (now_utc() - time.start).total_seconds() <= 21720 else
+             ('PERIOD_1_DAY' if (now_utc() - time.start).total_seconds() <= 86520 else
+             ('PERIOD_1_WEEK' if (now_utc() - time.start).total_seconds() <= 604920 else 'PERIOD_30_DAYS')))) }}
+        order: "{{ filters.order_by or 'COUNT_DESC' }}"
+        pageSize: 100
+    filters:
+      - {column: service, description: "Exact serviceContext.service", examples: ["checkout"]}
+      - {column: version, description: "Exact serviceContext.version (revision / deployment)"}
+      - {column: resource_type, description: "Exact serviceContext.resourceType, e.g. cloud_run_revision, k8s_container, gae_app, cloud_function"}
+      - {column: group_id, ops: ["=", "in"], fan_out: false, description: "Error group id(s) (groupId[])"}
+      - {column: state, ops: ["=", "in"], fan_out: false, description: "OPEN | ACKNOWLEDGED | RESOLVED | MUTED (applied in SQL)"}
+      - {column: order_by, description: "COUNT_DESC (default) | LAST_SEEN_DESC | CREATED_DESC | AFFECTED_USERS_DESC"}
+      - {column: period, description: "Override the period: PERIOD_1_HOUR | PERIOD_6_HOURS | PERIOD_1_DAY | PERIOD_1_WEEK | PERIOD_30_DAYS"}
+    time: {column: ts, default_lookback: 6h, max_window: 30d, reapply: false, control_lookback: 24h}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.errorGroupStats[*]"
+    columns:
+      - {name: group_id, path: "group.groupId"}
+      - {name: id, path: "group.name", description: "projects/P/groups/ID (or .../locations/L/groups/ID)"}
+      - {name: title, expr: "((_.representative.message or '').strip().split('\\n') | first)[:300] if _.representative.message else none", transform: redact, description: "First line of the representative stack trace (exception type + message)"}
+      - {name: message, path: "representative.message", transform: redact, description: "Representative stack trace / logged message"}
+      - {name: count, type: BIGINT, path: count, description: "Approximate occurrences in the requested period (int64 string in the API)"}
+      - {name: affected_users, type: BIGINT, path: affectedUsersCount}
+      - {name: first_seen, type: TIMESTAMP, path: firstSeenTime, transform: auto_time, description: "First occurrence ever seen (ignores the period)"}
+      - {name: last_seen, type: TIMESTAMP, path: lastSeenTime, transform: auto_time, description: "Last occurrence ever seen (ignores the period)"}
+      - {name: state, expr: "_.group.resolutionStatus or 'OPEN'", description: "OPEN | ACKNOWLEDGED | RESOLVED | MUTED (unspecified = OPEN)"}
+      - {name: service, expr: "(_.affectedServices[0].service if _.affectedServices else none) or _.representative.serviceContext.service"}
+      - {name: version, expr: "(_.affectedServices[0].version if _.affectedServices else none) or _.representative.serviceContext.version"}
+      - {name: resource_type, expr: "(_.affectedServices[0].resourceType if _.affectedServices else none) or _.representative.serviceContext.resourceType"}
+      - {name: services, type: JSON, path: affectedServices, description: "[{service, version, resourceType}] with non-zero counts (may be truncated)"}
+      - {name: num_affected_services, type: BIGINT, path: numAffectedServices}
+      - {name: tracking_issues, type: JSON, path: "group.trackingIssues", description: "[{url}] linked issues"}
+      - {name: representative_ts, type: TIMESTAMP, path: "representative.eventTime", transform: auto_time}
+      - {name: function, path: "representative.context.reportLocation.functionName"}
+      - {name: file, path: "representative.context.reportLocation.filePath"}
+      - {name: line, type: BIGINT, path: "representative.context.reportLocation.lineNumber"}
+      - {name: status_code, type: BIGINT, path: "representative.context.httpRequest.responseStatusCode"}
+      - {name: request_url, path: "representative.context.httpRequest.url", transform: redact}
+      - {name: url, expr: "('https://console.cloud.google.com/errors/detail/' ~ _.group.groupId ~ '?project=' ~ _.group.name.split('/')[1]) if (_.group.groupId and _.group.name) else none", description: "Error Reporting UI page of the group"}
+      - {name: time_range_begin, type: TIMESTAMP, path: "$.timeRangeBegin", transform: auto_time, description: "Start of the period the counts cover (may be later if older data was deleted)"}
+      - {name: order_by, filter_only: true}
+      - {name: period, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window: selects the period (counts cover period start -> now)"}
+    sort_hint: "count desc by default (order_by changes it)"
+    pitfalls:
+      - "count covers period start -> now, not just the incident window (see time_range_begin)."
+      - "first_seen inside the incident window = an error that is NEW (likely introduced by a deploy); last_seen before the window = not part of this incident."
+    examples:
+      - sql: >-
+          SELECT title, service, version, count, first_seen, last_seen, state, url
+          FROM gcp_error_reporting_groups
+          WHERE ts >= TIMESTAMP '2026-10-20 13:00:00' ORDER BY count DESC LIMIT 20
+        description: Top error groups since the incident started.
+      - sql: >-
+          SELECT title, service, version, first_seen, count FROM gcp_error_reporting_groups
+          WHERE service = 'checkout' AND order_by = 'CREATED_DESC'
+            AND first_seen >= TIMESTAMP '2026-10-20 13:30:00'
+            AND ts >= TIMESTAMP '2026-10-20 13:00:00'
+        description: Errors that first appeared after a checkout deploy (new error groups).
+    tests:
+      - {sql: "SELECT count(*) AS n FROM gcp_error_reporting_groups", min_rows: 0}
+    fixtures:
+      - file: group_stats.json
+        expect_rows: 2
+        expect_columns: {group_id: CNSgkpnppqKCUw, title: "java.lang.NullPointerException: cart is null", count: 1240, affected_users: 87, service: checkout, version: checkout-00042-xyz, state: OPEN, first_seen: "2026-10-20T13:58:40Z", line: 88, status_code: 500, url: "https://console.cloud.google.com/errors/detail/CNSgkpnppqKCUw?project=my-project"}
+        note: "Built strictly from the documented ListGroupStatsResponse / ErrorGroupStats / ErrorGroup / ErrorEvent / ErrorContext schema (count, affectedUsersCount and timed counts as int64 strings; RFC 3339 times; resolutionStatus enum); the docs give no example response. Values illustrative."
+      - file: google_error.json
+        expect_error: "Error Reporting API has not been used"
+        note: "Google API error envelope {error: {code, message, status}} answered with 200 by a proxy; proves the source-level error rule fires. Message illustrative."
+    ui_link: "https://console.cloud.google.com/errors?project={{ env.GCP_PROJECT_ID }}"
+    docs_url: https://docs.cloud.google.com/error-reporting/reference/rest/v1beta1/projects.groupStats/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_error_reporting_group_counts
+    title: Error group occurrences over time (groupStats timedCounts)
+    description: >-
+      Occurrence counts per error group per time bucket (ts = bucket start, count) - shows exactly when an
+      error started, spiked or stopped inside the window. Bucket width follows the period's recommended
+      minimum (1 h -> 1 min, 6 h -> 10 min, 1 day -> 1 h, 1 week -> 6 h, 30 days -> 1 day) unless bucket_s is
+      given. Same filters as gcp_error_reporting_groups.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/v1beta1/projects/{{ env.GCP_PROJECT_ID }}{{ ('/locations/' ~ env.GCP_ERROR_REPORTING_LOCATION) if env.GCP_ERROR_REPORTING_LOCATION else '' }}/groupStats"
+      query:
+        groupId: "{{ (filters.group_id | as_list) if filters.group_id else none }}"
+        serviceFilter.service: "{{ filters.service }}"
+        serviceFilter.version: "{{ filters.version }}"
+        serviceFilter.resourceType: "{{ filters.resource_type }}"
+        timeRange.period: >-
+          {{ 'PERIOD_1_HOUR' if (now_utc() - time.start).total_seconds() <= 3720 else
+             ('PERIOD_6_HOURS' if (now_utc() - time.start).total_seconds() <= 21720 else
+             ('PERIOD_1_DAY' if (now_utc() - time.start).total_seconds() <= 86520 else
+             ('PERIOD_1_WEEK' if (now_utc() - time.start).total_seconds() <= 604920 else 'PERIOD_30_DAYS'))) }}
+        timedCountDuration: >-
+          {{ ((filters.bucket_s | int) ~ 's') if filters.bucket_s else
+             ('60s' if (now_utc() - time.start).total_seconds() <= 3720 else
+             ('600s' if (now_utc() - time.start).total_seconds() <= 21720 else
+             ('3600s' if (now_utc() - time.start).total_seconds() <= 86520 else
+             ('21600s' if (now_utc() - time.start).total_seconds() <= 604920 else '86400s')))) }}
+        order: "{{ filters.order_by or 'COUNT_DESC' }}"
+        pageSize: 50
+    filters:
+      - {column: service, description: "Exact serviceContext.service", examples: ["checkout"]}
+      - {column: version, description: "Exact serviceContext.version"}
+      - {column: resource_type, description: "Exact serviceContext.resourceType"}
+      - {column: group_id, ops: ["=", "in"], fan_out: false, description: "Error group id(s)"}
+      - {column: order_by, description: "Which groups come first: COUNT_DESC (default) | LAST_SEEN_DESC | CREATED_DESC | AFFECTED_USERS_DESC"}
+      - {column: bucket_s, type: BIGINT, description: "Bucket width in seconds (timedCountDuration); smaller than the recommended minimum may be adjusted or rejected"}
+    time: {column: ts, default_lookback: 6h, max_window: 30d, control_lookback: 24h}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 2}
+    response:
+      rows_path: "$.errorGroupStats[*]"
+      expand:
+        - {explode: timedCounts, as: tc}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@tc.startTime", transform: auto_time, description: "Bucket start (inclusive)"}
+      - {name: end_ts, type: TIMESTAMP, path: "@tc.endTime", transform: auto_time, description: "Bucket end (exclusive)"}
+      - {name: count, type: BIGINT, path: "@tc.count", description: "Approximate occurrences in the bucket"}
+      - {name: value, type: DOUBLE, path: "@tc.count", description: "Same as count (canonical value column)"}
+      - {name: group_id, path: "group.groupId"}
+      - {name: title, expr: "((_.representative.message or '').strip().split('\\n') | first)[:300] if _.representative.message else none", transform: redact}
+      - {name: service, expr: "(_.affectedServices[0].service if _.affectedServices else none) or _.representative.serviceContext.service"}
+      - {name: version, expr: "(_.affectedServices[0].version if _.affectedServices else none) or _.representative.serviceContext.version"}
+      - {name: resource_type, expr: "(_.affectedServices[0].resourceType if _.affectedServices else none) or _.representative.serviceContext.resourceType"}
+      - {name: first_seen, type: TIMESTAMP, path: firstSeenTime, transform: auto_time}
+      - {name: order_by, filter_only: true}
+      - {name: bucket_s, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Buckets are aligned to end at now (ALIGNMENT_EQUAL_AT_END); buckets without events may be absent - treat missing buckets as zero."
+      - "Only the first 100 groups (by order_by) are returned; filter by service or group_id for a specific error."
+    examples:
+      - sql: >-
+          SELECT ts, title, count FROM gcp_error_reporting_group_counts
+          WHERE service = 'checkout' AND ts BETWEEN TIMESTAMP '2026-10-20 13:30:00' AND TIMESTAMP '2026-10-20 14:30:00'
+          ORDER BY ts, count DESC
+        description: When each checkout error started and peaked.
+      - sql: >-
+          SELECT group_id, min(ts) AS first_bucket, sum(count) AS total FROM gcp_error_reporting_group_counts
+          WHERE ts >= TIMESTAMP '2026-10-20 13:00:00' GROUP BY group_id ORDER BY first_bucket
+        description: Order in which error groups appeared during the window.
+    fixtures:
+      - file: group_stats.json
+        filters: {service: checkout}
+        expect_rows: 4
+        expect_columns: {ts: "2026-10-20T13:58:00Z", end_ts: "2026-10-20T13:59:00Z", count: 40, value: 40.0, group_id: CNSgkpnppqKCUw, service: checkout}
+        note: "Same schema-built ListGroupStatsResponse as gcp_error_reporting_groups (TimedCount: count int64 string, startTime inclusive, endTime exclusive, ascending). Values illustrative."
+    docs_url: https://docs.cloud.google.com/error-reporting/reference/rest/v1beta1/projects.groupStats/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_error_reporting_events
+    title: Error events of one group (events.list)
+    description: >-
+      Individual occurrences of one error group (group_id required; IN fans out, max 5):
+      event time, service/version, full stack trace (message), HTTP request (method, url, status, user agent,
+      remote ip), user and source location. Use to see exact times, which revision/version threw and which
+      requests failed.
+    kind: events
+    request:
+      method: GET
+      path: "/v1beta1/projects/{{ env.GCP_PROJECT_ID }}{{ ('/locations/' ~ env.GCP_ERROR_REPORTING_LOCATION) if env.GCP_ERROR_REPORTING_LOCATION else '' }}/events"
+      query:
+        groupId: "{{ filters.group_id }}"
+        serviceFilter.service: "{{ filters.service }}"
+        serviceFilter.version: "{{ filters.version }}"
+        serviceFilter.resourceType: "{{ filters.resource_type }}"
+        timeRange.period: >-
+          {{ 'PERIOD_1_HOUR' if (now_utc() - time.start).total_seconds() <= 3720 else
+             ('PERIOD_6_HOURS' if (now_utc() - time.start).total_seconds() <= 21720 else
+             ('PERIOD_1_DAY' if (now_utc() - time.start).total_seconds() <= 86520 else
+             ('PERIOD_1_WEEK' if (now_utc() - time.start).total_seconds() <= 604920 else 'PERIOD_30_DAYS'))) }}
+        pageSize: 100
+    filters:
+      - {column: group_id, required: true, ops: ["=", "in"], max_fan_out: 5, description: "Error group id (from gcp_error_reporting_groups.group_id)", examples: ["CNSgkpnppqKCUw"]}
+      - {column: service, description: "Exact serviceContext.service"}
+      - {column: version, description: "Exact serviceContext.version"}
+      - {column: resource_type, description: "Exact serviceContext.resourceType"}
+    time: {column: ts, default_lookback: 6h, max_window: 30d, control_lookback: 24h}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.errorEvents[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: eventTime, transform: auto_time}
+      - {name: group_id, filter_only: true}
+      - {name: service, path: "serviceContext.service"}
+      - {name: version, path: "serviceContext.version"}
+      - {name: resource_type, path: "serviceContext.resourceType"}
+      - {name: title, expr: "((_.message or '').strip().split('\\n') | first)[:300] if _.message else none", transform: redact}
+      - {name: message, path: message, transform: redact, description: "Stack trace / logged message"}
+      - {name: http_method, path: "context.httpRequest.method"}
+      - {name: request_url, path: "context.httpRequest.url", transform: redact}
+      - {name: status_code, type: BIGINT, path: "context.httpRequest.responseStatusCode"}
+      - {name: user_agent, path: "context.httpRequest.userAgent"}
+      - {name: remote_ip, path: "context.httpRequest.remoteIp"}
+      - {name: user, path: "context.user"}
+      - {name: function, path: "context.reportLocation.functionName"}
+      - {name: file, path: "context.reportLocation.filePath"}
+      - {name: line, type: BIGINT, path: "context.reportLocation.lineNumber"}
+      - {name: source_references, type: JSON, path: "context.sourceReferences", description: "[{repository, revisionId}] - the deployed commit"}
+    sort_hint: "order not documented by the API; ORDER BY ts yourself"
+    examples:
+      - sql: >-
+          SELECT ts, version, status_code, request_url, title FROM gcp_error_reporting_events
+          WHERE group_id = 'CNSgkpnppqKCUw' AND ts >= TIMESTAMP '2026-10-20 13:30:00' ORDER BY ts
+        description: Occurrences of one error group during the incident, with the failing requests.
+      - sql: >-
+          SELECT version, count(*) AS n, min(ts) AS first_ts FROM gcp_error_reporting_events
+          WHERE group_id = 'CNSgkpnppqKCUw' GROUP BY version ORDER BY first_ts
+        description: Which version/revision started throwing the error.
+    fixtures:
+      - file: events.json
+        filters: {group_id: CNSgkpnppqKCUw}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-20T14:02:05.123Z", service: checkout, version: checkout-00042-xyz, title: "java.lang.NullPointerException: cart is null", status_code: 500, http_method: POST, function: com.example.cart.CartService.reserve, line: 88, group_id: CNSgkpnppqKCUw}
+        note: "Built strictly from the documented ListEventsResponse / ErrorEvent / ServiceContext / ErrorContext (HttpRequestContext, SourceLocation, SourceReference) schema; the docs give no example response. Values illustrative."
+    docs_url: https://docs.cloud.google.com/error-reporting/reference/rest/v1beta1/projects.events/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_error_reporting_group
+    title: One error group by id (groups.get)
+    description: >-
+      The error group record itself (group_id required; IN fans out, max 10): resolution state (OPEN,
+      ACKNOWLEDGED, RESOLVED, MUTED) and linked tracking issues. Unlike gcp_error_reporting_groups this also
+      returns MUTED groups (which groupStats hides by default) and needs no time range.
+    kind: entities
+    request:
+      method: GET
+      path: "/v1beta1/projects/{{ env.GCP_PROJECT_ID }}{{ ('/locations/' ~ env.GCP_ERROR_REPORTING_LOCATION) if (env.GCP_ERROR_REPORTING_LOCATION and env.GCP_ERROR_REPORTING_LOCATION != '-') else '' }}/groups/{{ filters.group_id }}"
+      accept_status: [404]
+    filters:
+      - {column: group_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Error group id (gcp_error_reporting_groups.group_id)", examples: ["CNSgkpnppqKCUw"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: group_id, path: groupId}
+      - {name: id, path: name, description: "projects/P/groups/ID (or projects/P/locations/L/groups/ID)"}
+      - {name: state, expr: "_.resolutionStatus if (_.resolutionStatus and _.resolutionStatus != 'RESOLUTION_STATUS_UNSPECIFIED') else ('OPEN' if _.name else none)", description: "OPEN | ACKNOWLEDGED | RESOLVED | MUTED (unspecified is treated as OPEN)"}
+      - {name: tracking_issues, type: JSON, path: trackingIssues, description: "[{url}] linked issues"}
+      - {name: tracking_url, expr: "_.trackingIssues[0].url if _.trackingIssues else none", description: "First linked issue URL"}
+      - {name: url, expr: "('https://console.cloud.google.com/errors/detail/' ~ _.groupId ~ '?project=' ~ _.name.split('/')[1]) if (_.groupId and _.name) else none"}
+    pitfalls:
+      - "A 404 (unknown group id, or a group stored in another location) returns 0 rows; set GCP_ERROR_REPORTING_LOCATION to the region the group lives in (the '-' wildcard is not valid for get)."
+      - "MUTED groups are hidden from gcp_error_reporting_groups by default: a group that is missing there but present here was muted."
+    examples:
+      - sql: "SELECT group_id, state, tracking_url, url FROM gcp_error_reporting_group WHERE group_id = 'CNSgkpnppqKCUw'"
+        description: Is this error already acknowledged, muted or tracked in an issue?
+    fixtures:
+      - file: group_get.json
+        filters: {group_id: CNSgkpnppqKCUw}
+        expect_rows: 1
+        expect_columns: {group_id: CNSgkpnppqKCUw, state: ACKNOWLEDGED, tracking_url: "https://issues.example.com/PAY-1234", url: "https://console.cloud.google.com/errors/detail/CNSgkpnppqKCUw?project=my-project"}
+        note: "Built strictly from the documented ErrorGroup schema (projects.groups.get: name, groupId, trackingIssues [{url}], resolutionStatus enum); the docs give no example response. Values illustrative."
+    docs_url: https://docs.cloud.google.com/error-reporting/reference/rest/v1beta1/projects.groups/get
+
+roles:
+  errors:
+    table: gcp_error_reporting_groups
+    filters: {service: "{{ service or '' }}"}
+    columns: {id: group_id, title: title, message: message, count: count, ts: last_seen, first_seen: first_seen, service: service, version: version, state: state, url: url}

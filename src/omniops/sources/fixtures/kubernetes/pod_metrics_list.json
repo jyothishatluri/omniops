@@ -1,0 +1,28 @@
+{
+ "kind": "PodMetricsList",
+ "apiVersion": "metrics.k8s.io/v1beta1",
+ "metadata": {
+  "selfLink": "/apis/metrics.k8s.io/v1beta1/namespaces/kube-system/pods"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "kube-scheduler-minikube",
+    "namespace": "kube-system",
+    "selfLink": "/apis/metrics.k8s.io/v1beta1/namespaces/kube-system/pods/kube-scheduler-minikube",
+    "creationTimestamp": "2022-01-27T19:25:00Z"
+   },
+   "timestamp": "2022-01-27T19:24:31Z",
+   "window": "30s",
+   "containers": [
+    {
+     "name": "kube-scheduler",
+     "usage": {
+      "cpu": "9559630n",
+      "memory": "22244Ki"
+     }
+    }
+   ]
+  }
+ ]
+}

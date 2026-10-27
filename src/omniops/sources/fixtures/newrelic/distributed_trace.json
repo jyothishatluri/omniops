@@ -1,0 +1,44 @@
+{
+  "data": {
+    "actor": {
+      "distributedTracing": {
+        "trace": {
+          "id": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "timestamp": 1759322400123,
+          "durationMs": 1840.5,
+          "entityCount": 2,
+          "spans": [
+            {
+              "id": "00f067aa0ba902b7",
+              "name": "WebTransaction/SpringController/checkout (POST)",
+              "parentId": null,
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "timestamp": 1759322400123,
+              "durationMs": 1840.5,
+              "entityGuid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "clientType": null,
+              "processBoundary": "ENTRY",
+              "attributes": {"service.name": "checkout-service", "http.statusCode": 500, "error": true, "error.class": "java.net.SocketTimeoutException"},
+              "spanAnomalies": []
+            },
+            {
+              "id": "a2fb4a1d1a96d312",
+              "name": "External/payments-api/POST",
+              "parentId": "00f067aa0ba902b7",
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "timestamp": 1759322400140,
+              "durationMs": 1801.2,
+              "entityGuid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "clientType": "EXTERNAL",
+              "processBoundary": "EXIT",
+              "attributes": {"service.name": "checkout-service", "http.url": "https://payments-api/charge", "span.kind": "client"},
+              "spanAnomalies": [
+                {"anomalousValue": 1801.2, "anomalyType": "DURATION", "averageMeasure": 120.4}
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

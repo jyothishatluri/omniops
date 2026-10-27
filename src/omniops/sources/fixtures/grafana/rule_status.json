@@ -1,0 +1,85 @@
+{
+  "status": "success",
+  "data": {
+    "groups": [
+      {
+        "name": "payment-alerts",
+        "file": "Payments",
+        "folderUid": "a1b2c3d4",
+        "interval": 60,
+        "lastEvaluation": "2026-10-01T11:59:30Z",
+        "evaluationTime": 0.021,
+        "totals": {
+          "alerting": 1,
+          "recording": 1
+        },
+        "rules": [
+          {
+            "state": "firing",
+            "name": "PaymentServiceHighErrorRate",
+            "uid": "pay-err-rate",
+            "folderUid": "a1b2c3d4",
+            "query": "sum(rate(http_requests_total{job=\"payment-service\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"payment-service\"}[5m]))",
+            "duration": 300,
+            "keepFiringFor": 0,
+            "annotations": {
+              "summary": "payment-service 5xx ratio above 5%",
+              "runbook_url": "https://runbooks.example.com/payments/5xx"
+            },
+            "labels": {
+              "severity": "critical",
+              "service": "payment-service"
+            },
+            "alerts": [
+              {
+                "labels": {
+                  "alertname": "PaymentServiceHighErrorRate",
+                  "grafana_folder": "Payments",
+                  "severity": "critical",
+                  "service": "payment-service"
+                },
+                "annotations": {
+                  "summary": "payment-service 5xx ratio above 5%"
+                },
+                "state": "Alerting",
+                "activeAt": "2026-10-01T11:42:00Z",
+                "value": "1.2e-01"
+              }
+            ],
+            "totals": {
+              "alerting": 1
+            },
+            "totalsFiltered": {
+              "alerting": 1
+            },
+            "health": "ok",
+            "type": "alerting",
+            "lastEvaluation": "2026-10-01T11:59:30Z",
+            "evaluationTime": 0.012,
+            "activeAt": "2026-10-01T11:42:00Z",
+            "isPaused": false,
+            "queriedDatasourceUIDs": [
+              "prometheus"
+            ]
+          },
+          {
+            "name": "http_requests:rate5m:sum",
+            "uid": "rec-http-rate",
+            "folderUid": "a1b2c3d4",
+            "query": "sum(rate(http_requests_total[5m]))",
+            "labels": {},
+            "health": "ok",
+            "type": "recording",
+            "lastEvaluation": "2026-10-01T11:59:30Z",
+            "evaluationTime": 0.004,
+            "isPaused": false
+          }
+        ]
+      }
+    ],
+    "totals": {
+      "alerting": 1
+    },
+    "groupNextToken": ""
+  }
+}

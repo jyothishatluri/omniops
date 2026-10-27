@@ -1,0 +1,41 @@
+{
+ "QueryStatus": "FINISHED",
+ "QueryStatistics": {
+  "ResultsCount": 2,
+  "TotalResultsCount": 2,
+  "BytesScanned": 27044
+ },
+ "QueryResultRows": [
+  [
+   {
+    "eventTime": "2026-10-01 11:41:07.000"
+   },
+   {
+    "eventSource": "lambda.amazonaws.com"
+   },
+   {
+    "eventName": "UpdateFunctionCode20150331v2"
+   },
+   {
+    "user_arn": "arn:aws:sts::123456789012:assumed-role/deploy-role/ci-session"
+   }
+  ],
+  [
+   {
+    "eventTime": "2026-10-01 11:38:52.000"
+   },
+   {
+    "eventSource": "ecs.amazonaws.com"
+   },
+   {
+    "eventName": "UpdateService"
+   },
+   {
+    "user_arn": "arn:aws:sts::123456789012:assumed-role/deploy-role/ci-session"
+   },
+   {
+    "errorCode": "AccessDeniedException"
+   }
+  ]
+ ]
+}

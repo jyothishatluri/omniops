@@ -1,0 +1,42 @@
+{
+ "totalCount": 1808,
+ "nextPageKey": "___a7acX3q0AAAAGAQAJYnVpbHRpbjoqAQA",
+ "metrics": [
+  {
+   "metricId": "builtin:host.cpu.idle",
+   "unit": "Percent",
+   "aggregationTypes": [
+    "auto",
+    "avg",
+    "max",
+    "min"
+   ]
+  },
+  {
+   "metricId": "builtin:host.cpu.load",
+   "unit": "Ratio",
+   "aggregationTypes": [
+    "auto",
+    "avg",
+    "max",
+    "min"
+   ]
+  },
+  {
+   "metricId": "builtin:service.errors.server.count",
+   "unit": "Count",
+   "aggregationTypes": [
+    "auto",
+    "value"
+   ]
+  },
+  {
+   "metricId": "builtin:service.keyRequest.count.client",
+   "unit": "Count",
+   "aggregationTypes": [
+    "auto",
+    "value"
+   ]
+  }
+ ]
+}

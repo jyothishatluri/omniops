@@ -1,0 +1,70 @@
+{
+  "maintenanceWindows": [
+    {
+      "created_at": "2025-02-25T10:00:00.000Z",
+      "created_by": "elastic",
+      "enabled": true,
+      "id": "f0cb1780-537a-4e34-8adf-3b4336862858",
+      "schedule": {
+        "custom": {
+          "duration": "2h",
+          "recurring": {
+            "every": "1w",
+            "occurrences": 10,
+            "onWeekDay": [
+              "MO",
+              "WE"
+            ]
+          },
+          "start": "2025-03-01T08:00:00.000Z",
+          "timezone": "Europe/Amsterdam"
+        }
+      },
+      "scope": {
+        "alerting": {
+          "query": {
+            "kql": "kibana.alert.tags: \"infra\""
+          }
+        }
+      },
+      "status": "upcoming",
+      "title": "Weekly Maintenance Window",
+      "updated_at": "2025-02-25T10:00:00.000Z",
+      "updated_by": "elastic"
+    },
+    {
+      "created_at": "2025-03-10T09:00:00.000Z",
+      "created_by": "elastic",
+      "enabled": true,
+      "id": "a1c94560-6e3b-4ea1-9065-8e3f1b8c5f29",
+      "schedule": {
+        "custom": {
+          "duration": "1h",
+          "recurring": {
+            "end": "2025-12-31T00:00:00.000Z",
+            "every": "2w",
+            "onWeekDay": [
+              "FR"
+            ]
+          },
+          "start": "2025-04-01T10:00:00.000Z",
+          "timezone": "US/Eastern"
+        }
+      },
+      "scope": {
+        "alerting": {
+          "query": {
+            "kql": "kibana.alert.tags: \"database\""
+          }
+        }
+      },
+      "status": "upcoming",
+      "title": "Database Upgrade Window",
+      "updated_at": "2025-03-15T14:30:00.000Z",
+      "updated_by": "elastic"
+    }
+  ],
+  "page": 1,
+  "per_page": 10,
+  "total": 2
+}

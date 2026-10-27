@@ -1,0 +1,38 @@
+{
+  "platform": "cloudwatch",
+  "description": "The same CloudWatch alarm returning to OK (ALARM -> OK), delivered by Amazon Q Developer in chat applications.",
+  "provenance": "Same as cloudwatch_alarm; CloudWatch's OK reason text reads '... was not greater than or equal to the threshold (25.0) (minimum 1 datapoint for ALARM -> OK transition).'",
+  "event": {
+    "type": "message",
+    "user": "U09AWSQ001",
+    "bot_id": "B09AMAZONQ",
+    "app_id": "A09AMAZONQ",
+    "bot_profile": {"id": "B09AMAZONQ", "app_id": "A09AMAZONQ", "name": "Amazon Q", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "good",
+        "fallback": "CloudWatch Alarm | checkout-5xx-high | us-east-1 | Account: 123456789012",
+        "title": ":white_check_mark: CloudWatch Alarm | checkout-5xx-high | us-east-1 | Account: 123456789012",
+        "title_link": "https://console.aws.amazon.com/cloudwatch/home?region=us-east-1#alarmsV2:alarm/checkout-5xx-high",
+        "text": "Threshold Crossed: 1 out of the last 1 datapoints [3.0 (20/10/26 14:21:00)] was not greater than or equal to the threshold (25.0) (minimum 1 datapoint for ALARM -&gt; OK transition).",
+        "footer": "Amazon CloudWatch"
+      }
+    ],
+    "ts": "1792506117.000700",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792506117.000700",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "cloudwatch",
+    "rule_id": "checkout-5xx-high",
+    "status": "resolved",
+    "raw_status": "OK",
+    "is_recovery": true,
+    "value": "3.0",
+    "triggered_at": "2026-10-20T14:21:00Z",
+    "same_key_as": "cloudwatch_alarm.json"
+  }
+}

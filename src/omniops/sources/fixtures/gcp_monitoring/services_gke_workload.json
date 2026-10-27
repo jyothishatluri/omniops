@@ -1,0 +1,18 @@
+{
+  "services": [
+    {
+      "name": "projects/123456789012/services/gke-workload-payments",
+      "displayName": "payments-api",
+      "gkeWorkload": {
+        "projectId": "my-project",
+        "location": "us-central1",
+        "clusterName": "prod-gke",
+        "namespaceName": "payments",
+        "topLevelControllerType": "Deployment",
+        "topLevelControllerName": "payments-api"
+      },
+      "telemetry": {"resourceName": "//container.googleapis.com/projects/my-project/locations/us-central1/clusters/prod-gke/k8s/namespaces/payments/apps/deployments/payments-api"},
+      "userLabels": {"team": "payments"}
+    }
+  ]
+}

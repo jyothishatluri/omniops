@@ -1,0 +1,276 @@
+{
+ "metadata": {
+  "resourceVersion": "51240"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "flagd-values",
+    "namespace": "argocd",
+    "uid": "a1b2c3d4-0000-4000-8000-0000000000a1",
+    "resourceVersion": "51234",
+    "generation": 7,
+    "creationTimestamp": "2026-10-01T07:59:50Z",
+    "labels": {
+     "app.kubernetes.io/part-of": "arena"
+    }
+   },
+   "spec": {
+    "source": {
+     "repoURL": "https://github.com/example-org/platform-config.git",
+     "path": "arena-faults/flagd-values",
+     "targetRevision": "main"
+    },
+    "destination": {
+     "name": "in-cluster",
+     "namespace": "shop"
+    },
+    "project": "default",
+    "syncPolicy": {
+     "automated": {
+      "prune": true,
+      "selfHeal": true
+     }
+    }
+   },
+   "status": {
+    "resources": [
+     {
+      "version": "v1",
+      "kind": "ConfigMap",
+      "namespace": "shop",
+      "name": "flagd-config",
+      "status": "Synced"
+     }
+    ],
+    "sync": {
+     "status": "Synced",
+     "comparedTo": {
+      "source": {
+       "repoURL": "https://github.com/example-org/platform-config.git",
+       "path": "arena-faults/flagd-values",
+       "targetRevision": "main"
+      },
+      "destination": {
+       "name": "in-cluster",
+       "namespace": "shop"
+      }
+     },
+     "revision": "4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3"
+    },
+    "health": {
+     "status": "Healthy",
+     "lastTransitionTime": "2026-10-01T08:00:12Z"
+    },
+    "history": [
+     {
+      "revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b",
+      "deployedAt": "2026-10-01T08:00:12Z",
+      "id": 0,
+      "source": {
+       "repoURL": "https://github.com/example-org/platform-config.git",
+       "path": "arena-faults/flagd-values",
+       "targetRevision": "main"
+      },
+      "deployStartedAt": "2026-10-01T08:00:05Z",
+      "initiatedBy": {
+       "automated": true
+      }
+     },
+     {
+      "revision": "4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3",
+      "deployedAt": "2026-10-01T11:39:41Z",
+      "id": 1,
+      "source": {
+       "repoURL": "https://github.com/example-org/platform-config.git",
+       "path": "arena-faults/flagd-values",
+       "targetRevision": "main"
+      },
+      "deployStartedAt": "2026-10-01T11:39:38Z",
+      "initiatedBy": {
+       "automated": true
+      }
+     }
+    ],
+    "reconciledAt": "2026-10-01T11:59:02Z",
+    "operationState": {
+     "operation": {
+      "sync": {
+       "revision": "4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3",
+       "syncStrategy": {
+        "hook": {}
+       }
+      },
+      "initiatedBy": {
+       "automated": true
+      },
+      "retry": {
+       "limit": 5
+      }
+     },
+     "phase": "Succeeded",
+     "message": "successfully synced (all tasks run)",
+     "syncResult": {
+      "resources": [
+       {
+        "group": "",
+        "version": "v1",
+        "kind": "ConfigMap",
+        "namespace": "shop",
+        "name": "flagd-config",
+        "status": "Synced",
+        "message": "configmap/flagd-config configured",
+        "hookPhase": "Running",
+        "syncPhase": "Sync"
+       }
+      ],
+      "revision": "4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3",
+      "source": {
+       "repoURL": "https://github.com/example-org/platform-config.git",
+       "path": "arena-faults/flagd-values",
+       "targetRevision": "main"
+      }
+     },
+     "startedAt": "2026-10-01T11:39:38Z",
+     "finishedAt": "2026-10-01T11:39:41Z"
+    },
+    "sourceType": "Kustomize",
+    "summary": {},
+    "resourceHealthSource": "appTree",
+    "controllerNamespace": "argocd"
+   }
+  },
+  {
+   "metadata": {
+    "name": "recommendation",
+    "namespace": "argocd",
+    "uid": "a1b2c3d4-0000-4000-8000-0000000000a2",
+    "resourceVersion": "51240",
+    "generation": 3,
+    "creationTimestamp": "2026-10-01T07:59:50Z"
+   },
+   "spec": {
+    "source": {
+     "repoURL": "https://github.com/example-org/service-manifests.git",
+     "path": "arena-apps/components/recommendation",
+     "targetRevision": "main"
+    },
+    "destination": {
+     "name": "in-cluster",
+     "namespace": "shop"
+    },
+    "project": "default",
+    "syncPolicy": {
+     "automated": {
+      "prune": true,
+      "selfHeal": true
+     },
+     "syncOptions": [
+      "CreateNamespace=true"
+     ]
+    }
+   },
+   "status": {
+    "resources": [
+     {
+      "version": "v1",
+      "kind": "Service",
+      "namespace": "shop",
+      "name": "recommendation",
+      "status": "Synced"
+     },
+     {
+      "group": "apps",
+      "version": "v1",
+      "kind": "Deployment",
+      "namespace": "shop",
+      "name": "recommendation",
+      "status": "Synced"
+     }
+    ],
+    "sync": {
+     "status": "Synced",
+     "revision": "c0ffee1234567890abcdef1234567890abcdef12"
+    },
+    "health": {
+     "status": "Degraded",
+     "message": "Deployment \"recommendation\" exceeded its progress deadline",
+     "lastTransitionTime": "2026-10-01T11:51:02Z"
+    },
+    "history": [
+     {
+      "revision": "c0ffee1234567890abcdef1234567890abcdef12",
+      "deployedAt": "2026-10-01T08:00:30Z",
+      "id": 0,
+      "source": {
+       "repoURL": "https://github.com/example-org/service-manifests.git",
+       "path": "arena-apps/components/recommendation",
+       "targetRevision": "main"
+      },
+      "deployStartedAt": "2026-10-01T08:00:20Z",
+      "initiatedBy": {
+       "automated": true
+      }
+     }
+    ],
+    "reconciledAt": "2026-10-01T11:59:05Z",
+    "operationState": {
+     "operation": {
+      "sync": {
+       "revision": "c0ffee1234567890abcdef1234567890abcdef12"
+      },
+      "initiatedBy": {
+       "automated": true
+      }
+     },
+     "phase": "Succeeded",
+     "message": "successfully synced (all tasks run)",
+     "syncResult": {
+      "resources": [
+       {
+        "group": "",
+        "version": "v1",
+        "kind": "Service",
+        "namespace": "shop",
+        "name": "recommendation",
+        "status": "Synced",
+        "message": "service/recommendation created",
+        "hookPhase": "Running",
+        "syncPhase": "Sync"
+       },
+       {
+        "group": "apps",
+        "version": "v1",
+        "kind": "Deployment",
+        "namespace": "shop",
+        "name": "recommendation",
+        "status": "Synced",
+        "message": "deployment.apps/recommendation created",
+        "hookPhase": "Running",
+        "syncPhase": "Sync",
+        "images": [
+         "ghcr.io/open-telemetry/demo:2.0.2-recommendation"
+        ]
+       }
+      ],
+      "revision": "c0ffee1234567890abcdef1234567890abcdef12",
+      "source": {
+       "repoURL": "https://github.com/example-org/service-manifests.git",
+       "path": "arena-apps/components/recommendation",
+       "targetRevision": "main"
+      }
+     },
+     "startedAt": "2026-10-01T08:00:20Z",
+     "finishedAt": "2026-10-01T08:00:30Z"
+    },
+    "sourceType": "Kustomize",
+    "summary": {
+     "images": [
+      "ghcr.io/open-telemetry/demo:2.0.2-recommendation"
+     ]
+    },
+    "resourceHealthSource": "appTree"
+   }
+  }
+ ]
+}

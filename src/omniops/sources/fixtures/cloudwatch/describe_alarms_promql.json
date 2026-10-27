@@ -1,0 +1,43 @@
+{
+ "MetricAlarms": [
+  {
+   "AlarmName": "checkout-p99-latency",
+   "AlarmArn": "arn:aws:cloudwatch:us-east-1:123456789012:alarm:checkout-p99-latency",
+   "AlarmDescription": "p99 request duration above 2 s per service",
+   "AlarmConfigurationUpdatedTimestamp": 1790784312.0,
+   "ActionsEnabled": true,
+   "OKActions": [],
+   "AlarmActions": ["arn:aws:sns:us-east-1:123456789012:oncall-page"],
+   "InsufficientDataActions": [],
+   "StateValue": "ALARM",
+   "StateReason": "1 contributor(s) breaching",
+   "StateUpdatedTimestamp": 1790855610.0,
+   "StateTransitionedTimestamp": 1790855520.0,
+   "EvaluationInterval": 60,
+   "EvaluationCriteria": {
+    "PromQLCriteria": {
+     "Query": "histogram_quantile(0.99, sum by (\"@resource.service.name\") (sum_over_time({\"http.server.request.duration\"}[5m]))) > 2",
+     "PendingPeriod": 120,
+     "RecoveryPeriod": 300
+    }
+   }
+  }
+ ],
+ "CompositeAlarms": [
+  {
+   "AlarmName": "checkout-composite",
+   "AlarmArn": "arn:aws:cloudwatch:us-east-1:123456789012:alarm:checkout-composite",
+   "AlarmRule": "ALARM(\"checkout-p99-latency\") OR ALARM(\"checkout-5xx\")",
+   "ActionsEnabled": true,
+   "AlarmActions": ["arn:aws:sns:us-east-1:123456789012:oncall-page"],
+   "OKActions": [],
+   "InsufficientDataActions": [],
+   "StateValue": "ALARM",
+   "StateReason": "arn:aws:cloudwatch:us-east-1:123456789012:alarm:checkout-p99-latency transitioned to ALARM",
+   "StateUpdatedTimestamp": 1790855521.0,
+   "StateTransitionedTimestamp": 1790855521.0,
+   "AlarmConfigurationUpdatedTimestamp": 1790784312.0,
+   "ActionsSuppressedBy": "None"
+  }
+ ]
+}

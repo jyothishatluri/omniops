@@ -1,0 +1,68 @@
+{
+ "id": "0000000000000003",
+ "name": "Search errors",
+ "description": "Errors in the search service",
+ "version": 3,
+ "createdAt": "2026-09-01T10:00:00Z",
+ "createdBy": "0000000000000A1B",
+ "modifiedAt": "2026-09-30T08:12:00Z",
+ "modifiedBy": "0000000000000A1B",
+ "parentId": "0000000000000002",
+ "contentType": "Monitor",
+ "type": "MonitorsLibraryMonitor",
+ "isSystem": false,
+ "isMutable": true,
+ "permissions": [
+  "Read",
+  "Delete"
+ ],
+ "monitorType": "Logs",
+ "evaluationDelay": "5m",
+ "alertName": "Search errors on {{ResultsJson.service}}",
+ "notificationGroupFields": [
+  "service",
+  "env"
+ ],
+ "queries": [
+  {
+   "rowId": "A",
+   "query": "_sourceCategory=search error"
+  }
+ ],
+ "triggers": [
+  {
+   "detectionMethod": "LogsStaticCondition",
+   "timeRange": "15m",
+   "triggerType": "Critical",
+   "threshold": 50,
+   "thresholdType": "GreaterThanOrEqual"
+  },
+  {
+   "detectionMethod": "LogsStaticCondition",
+   "timeRange": "15m",
+   "triggerType": "ResolvedCritical",
+   "threshold": 50,
+   "thresholdType": "LessThan"
+  }
+ ],
+ "timeZone": "America/Los_Angeles",
+ "notifications": [
+  {
+   "notification": {
+    "connectionType": "Slack",
+    "connectionId": "0000000000000005"
+   },
+   "runForTriggerTypes": [
+    "Critical"
+   ]
+  }
+ ],
+ "isDisabled": false,
+ "status": [
+  "Critical"
+ ],
+ "groupNotifications": true,
+ "warnings": {},
+ "playbook": "This issue typically happens when database calls are timing out. Look at ServiceA's dashboard to investigate further",
+ "automatedPlaybookIds": []
+}

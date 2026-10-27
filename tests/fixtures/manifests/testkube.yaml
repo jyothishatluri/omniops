@@ -1,0 +1,93 @@
+# TEST-ONLY manifest: a minimal Kubernetes-API-shaped source for the seed / specialist tests.
+# It is loaded only when a test points OMNIOPS_MANIFEST_DIRS at tests/fixtures/manifests.
+source: testkube
+display_name: Test Kubernetes
+description: TEST-ONLY Kubernetes-like API (pods, events, pod logs) for offline tests.
+categories: [kubernetes]
+base_url: "{{ env.TESTKUBE_URL }}"
+env:
+  - {name: TESTKUBE_URL, description: "Base URL of the mocked API server"}
+required_env: [TESTKUBE_URL]
+tables:
+  - name: testkube_pods
+    title: Pods
+    description: One row per pod with phase, node and raw container statuses; without a namespace filter, every namespace.
+    kind: entities
+    request:
+      method: GET
+      path: "{{ '/api/v1/namespaces/' ~ filters.namespace ~ '/pods' if filters.namespace else '/api/v1/pods' }}"
+    filters:
+      - {column: namespace, examples: [shop]}
+    response: {rows_path: "$.items[*]"}
+    columns:
+      - {name: namespace, path: metadata.namespace}
+      - {name: pod, path: metadata.name}
+      - {name: phase, path: status.phase}
+      - {name: node, path: spec.nodeName}
+      - {name: container_statuses, type: JSON, path: status.containerStatuses}
+    examples:
+      - {sql: "SELECT pod, phase FROM testkube_pods WHERE namespace = 'shop'"}
+    positive_control: false
+
+  - name: testkube_events
+    title: Events
+    description: Kubernetes events in a namespace (Warning and Normal).
+    kind: events
+    request:
+      method: GET
+      path: "{{ '/api/v1/namespaces/' ~ filters.namespace ~ '/events' if filters.namespace else '/api/v1/events' }}"
+    filters:
+      - {column: namespace, examples: [shop]}
+    time: {column: ts, default_lookback: 1h}
+    response: {rows_path: "$.items[*]"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: lastTimestamp, transform: auto_time}
+      - {name: namespace, path: metadata.namespace}
+      - {name: type, path: type}
+      - {name: reason, path: reason}
+      - {name: object, path: involvedObject.name}
+      - {name: kind, path: involvedObject.kind}
+      - {name: message, path: message}
+      - {name: count, type: BIGINT, path: count}
+    examples:
+      - {sql: "SELECT ts, reason, object, message FROM testkube_events WHERE namespace = 'shop'"}
+    positive_control: false
+
+  - name: testkube_pod_logs
+    title: Pod logs
+    description: Log lines of one pod container; previous=true reads the last terminated container.
+    kind: logs
+    request:
+      method: GET
+      path: "/api/v1/namespaces/{{ filters.namespace }}/pods/{{ filters.pod }}/log"
+      query:
+        previous: "{{ 'true' if filters.previous else None }}"
+        tailLines: 200
+      response_format: text
+    filters:
+      - {column: namespace, required: true, examples: [shop]}
+      - {column: pod, required: true, examples: [checkout-1]}
+      - {column: previous, type: BOOLEAN, examples: ["true"]}
+    response:
+      text: {}
+    columns:
+      - {name: message, path: line}
+      - {name: namespace, filter_only: true}
+      - {name: pod, filter_only: true}
+      - {name: previous, type: BOOLEAN, filter_only: true}
+    examples:
+      - {sql: "SELECT message FROM testkube_pod_logs WHERE namespace = 'shop' AND pod = 'checkout-1' AND previous = true"}
+    positive_control: false
+
+roles:
+  k8s_state:
+    table: testkube_pods
+    filters: {namespace: "{{ namespace }}"}
+    columns: {pod: pod, namespace: namespace, phase: phase, node: node, statuses: container_statuses}
+  k8s_events:
+    table: testkube_events
+    filters: {namespace: "{{ namespace }}"}
+    columns: {ts: ts, namespace: namespace, type: type, reason: reason, object: object, kind: kind, message: message}
+  k8s_logs:
+    table: testkube_pod_logs
+    columns: {message: message}

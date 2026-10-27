@@ -1,0 +1,71 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "hits": {
+    "hits": [
+      {
+        "_index": ".internal.alerts-security.alerts-default-000001",
+        "_id": "a3d1c7e2f1b0e5a9c4d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6",
+        "_score": null,
+        "fields": {
+          "@timestamp": [
+            "2025-01-17T09:12:44.512Z"
+          ],
+          "kibana.alert.original_time": [
+            "2025-01-17T09:12:30.000Z"
+          ],
+          "kibana.alert.uuid": [
+            "a3d1c7e2f1b0e5a9c4d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6"
+          ],
+          "kibana.alert.rule.name": [
+            "Unusual Process Execution"
+          ],
+          "kibana.alert.rule.uuid": [
+            "ac3b2f10-d4e3-11ef-9cd2-0242ac120002"
+          ],
+          "kibana.alert.rule.rule_type_id": [
+            "siem.queryRule"
+          ],
+          "kibana.alert.severity": [
+            "high"
+          ],
+          "kibana.alert.risk_score": [
+            73
+          ],
+          "kibana.alert.status": [
+            "active"
+          ],
+          "kibana.alert.workflow_status": [
+            "open"
+          ],
+          "kibana.alert.reason": [
+            "process event with process curl, by root on Host-f43kkddfyc created high alert Unusual Process Execution."
+          ],
+          "host.name": [
+            "Host-f43kkddfyc"
+          ],
+          "user.name": [
+            "root"
+          ],
+          "kibana.space_ids": [
+            "default"
+          ]
+        },
+        "sort": [
+          1737105164512
+        ]
+      }
+    ],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 1
+    }
+  },
+  "timed_out": false,
+  "took": 0
+}

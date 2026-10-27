@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "message": "Test Message",
+      "timestamp": "1234567890000",
+      "logLevel": "INFO",
+      "tags": [
+        {
+          "name": "log.custom",
+          "key": "endpoint_type",
+          "value": "INTERNAL"
+        }
+      ],
+      "traceId": "000000000000000043500e1469c2f17a",
+      "applicationIds": [
+        "C3lB8JC0TxaaVxKhUTc9rA",
+        "D1YPvO1ZS7ac79DmBSw1jQ"
+      ],
+      "processId": "test_process_id",
+      "hostName": "test_host_name",
+      "dockerContainerName": "test_docker_container_name",
+      "kubernetesPodName": "test_kubernetes_pod_name"
+    }
+  ],
+  "adjustedTimeFrame": null,
+  "canLoadMore": true,
+  "totalHits": 225
+}

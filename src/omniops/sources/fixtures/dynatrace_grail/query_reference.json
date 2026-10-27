@@ -1,0 +1,68 @@
+{
+ "progress": 100,
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "end": "2023-03-10T11:02:00.705980000Z",
+     "start": "2023-03-10T09:02:00.705980000Z"
+    },
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 18,
+    "locale": "",
+    "query": "fetch ...",
+    "queryId": "92918dae-c2f9-4c98-b278-dc42adcc5954",
+    "timezone": "Z"
+   }
+  },
+  "records": [
+   {
+    "davis.status": "OPEN",
+    "davis.title": "Http monitor global outage",
+    "davis.underMaintenance": "false",
+    "timestamp": "2022-03-17T08:00:01.231000000Z"
+   },
+   {
+    "davis.status": "OPEN",
+    "davis.title": "Http monitor global outage",
+    "davis.underMaintenance": "false",
+    "timestamp": "2022-03-17T08:00:01.231000000Z"
+   },
+   {
+    "davis.status": "OPEN",
+    "davis.title": "Http monitor global outage",
+    "davis.underMaintenance": "false",
+    "timestamp": "2022-03-17T08:00:01.231000000Z"
+   },
+   {
+    "davis.status": "OPEN",
+    "davis.title": "Http monitor global outage",
+    "davis.underMaintenance": "false",
+    "timestamp": "2022-03-17T08:00:01.231000000Z"
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     3
+    ],
+    "mappings": {
+     "davis.status": {
+      "type": "string"
+     },
+     "davis.title": {
+      "type": "string"
+     },
+     "davis.underMaintenance": {
+      "type": "string"
+     },
+     "timestamp": {
+      "type": "timestamp"
+     }
+    }
+   }
+  ]
+ },
+ "state": "SUCCEEDED"
+}

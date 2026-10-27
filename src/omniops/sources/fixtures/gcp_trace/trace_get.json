@@ -1,0 +1,32 @@
+{
+  "projectId": "my-project",
+  "traceId": "382d4f4c6b7bb2f4a972559d9085001d",
+  "spans": [
+    {
+      "spanId": "2205310701640571284",
+      "kind": "RPC_SERVER",
+      "name": "/api/checkout",
+      "startTime": "2026-10-20T14:02:03.100000000Z",
+      "endTime": "2026-10-20T14:02:04.620500000Z",
+      "labels": {"/http/method": "POST", "/http/status_code": "503", "/http/url": "https://shop.example.com/api/checkout", "g.co/r/k8s_container/container_name": "checkout"}
+    },
+    {
+      "spanId": "8713390221651283476",
+      "kind": "RPC_CLIENT",
+      "name": "payments.Charge",
+      "startTime": "2026-10-20T14:02:03.150Z",
+      "endTime": "2026-10-20T14:02:04.600Z",
+      "parentSpanId": "2205310701640571284",
+      "labels": {"/component": "grpc", "/error/message": "deadline exceeded"}
+    },
+    {
+      "spanId": "1402785911390261577",
+      "kind": "RPC_CLIENT",
+      "name": "redis GET cart",
+      "startTime": "2026-10-20T14:02:03.110Z",
+      "endTime": "2026-10-20T14:02:03.112Z",
+      "parentSpanId": "2205310701640571284",
+      "labels": {"/component": "redis"}
+    }
+  ]
+}

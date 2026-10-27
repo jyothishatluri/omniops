@@ -1,0 +1,41 @@
+{
+ "kind": "ConfigMapList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "config-loader-settings",
+    "namespace": "batch",
+    "uid": "17d74859-0000-4000-8000-000000000017",
+    "resourceVersion": "45512",
+    "creationTimestamp": "2026-10-01T11:39:58Z",
+    "labels": {
+     "app": "config-loader"
+    },
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"v1\",\"data\":{\"LOG_LEVEL\":\"info\",\"REGION\":\"eu-west-1\"},\"kind\":\"ConfigMap\"}"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl-client-side-apply",
+      "operation": "Update",
+      "apiVersion": "v1",
+      "time": "2026-10-01T11:39:58Z",
+      "fieldsType": "FieldsV1",
+      "fieldsV1": {
+       "f:metadata": {}
+      }
+     }
+    ]
+   },
+   "data": {
+    "LOG_LEVEL": "info",
+    "REGION": "eu-west-1"
+   }
+  }
+ ]
+}

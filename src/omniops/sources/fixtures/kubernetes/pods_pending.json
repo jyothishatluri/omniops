@@ -1,0 +1,79 @@
+{
+ "kind": "PodList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "archive-writer-6c7d8e9f0-r5s6t",
+    "generateName": "archive-writer-6c7d8e9f0-",
+    "namespace": "batch",
+    "uid": "7b1c6a5d-9e2f-4a0b-1c3d-5e6f70819203",
+    "creationTimestamp": "2026-10-01T11:40:25Z",
+    "labels": {
+     "app": "archive-writer",
+     "pod-template-hash": "6c7d8e9f0"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "archive-writer-6c7d8e9f0",
+      "uid": "8c2d7b6e-0f3a-4b1c-2d4e-6f7081920314",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "main",
+      "image": "fixture.local/archive-writer:v1",
+      "volumeMounts": [
+       {
+        "name": "archive",
+        "mountPath": "/archive"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "memory": "32Mi"
+       },
+       "requests": {
+        "cpu": "10m",
+        "memory": "16Mi"
+       }
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "archive",
+      "persistentVolumeClaim": {
+       "claimName": "archive-writer"
+      }
+     }
+    ],
+    "restartPolicy": "Always",
+    "serviceAccountName": "default"
+   },
+   "status": {
+    "phase": "Pending",
+    "conditions": [
+     {
+      "type": "PodScheduled",
+      "status": "False",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:40:25Z",
+      "reason": "Unschedulable",
+      "message": "0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims. preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling."
+     }
+    ],
+    "qosClass": "Burstable"
+   }
+  }
+ ]
+}

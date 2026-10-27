@@ -1,0 +1,49 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {
+              "timestamp": 1759321800000,
+              "changeTrackingId": "8a3a594c-e726-4bc2-8078-26dffec9a3d8",
+              "category": "Deployment",
+              "type": "Basic",
+              "categoryType": "DEPLOYMENT__BASIC",
+              "shortDescription": "checkout-service 1.2.3",
+              "description": "Roll out retry budget change",
+              "version": "1.2.3",
+              "changelog": "https://github.com/example/checkout/releases/tag/v1.2.3",
+              "deepLink": "https://github.com/example/checkout/actions/runs/1",
+              "groupId": "release-2026-10-01",
+              "user": "ci-bot",
+              "entity.guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "entity.name": "checkout-service",
+              "entity.type": "APPLICATION",
+              "entity.domain": "APM",
+              "instrumentation.provider": "nerdgraph",
+              "newrelic.source": "api.changeTracking.create"
+            },
+            {
+              "timestamp": 1759318200000,
+              "deploymentId": "1157480",
+              "deploymentType": "BASIC",
+              "description": "Legacy REST v2 deployment marker",
+              "version": "v42",
+              "commit": "9d1f4b8",
+              "changelog": "Bump payment SDK",
+              "user": "jenkins",
+              "entity.guid": "MXxBUE18QVBQTElDQVRJT058MzIxNzY1NA",
+              "entity.name": "payments-api",
+              "entity.type": "APPLICATION",
+              "entity.domain": "APM",
+              "instrumentation.name": "user-agent",
+              "instrumentation.provider": "axios",
+              "instrumentation.source": "axios/1.18.1"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

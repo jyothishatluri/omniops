@@ -1,0 +1,16 @@
+{
+ "incident_relationships": [
+  {
+   "id": "01FCNDV6P870EA6S7TK1DSYD5H",
+   "incident": {
+    "external_id": 123,
+    "id": "01FCNDV6P870EA6S7TK1DSYD5H",
+    "name": "The database is down"
+   }
+  }
+ ],
+ "pagination_meta": {
+  "after": "01FCNDV6P870EA6S7TK1DSYDG0",
+  "page_size": 25
+ }
+}

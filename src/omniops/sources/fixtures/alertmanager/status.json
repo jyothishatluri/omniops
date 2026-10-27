@@ -1,0 +1,22 @@
+{
+  "cluster": {
+    "name": "01JABCDEFGHJKMNPQRSTVWXYZ0",
+    "status": "ready",
+    "peers": [
+      {"name": "01JABCDEFGHJKMNPQRSTVWXYZ0", "address": "10.0.0.5:9094"},
+      {"name": "01JABCDEFGHJKMNPQRSTVWXYZ1", "address": "10.0.0.6:9094"}
+    ]
+  },
+  "versionInfo": {
+    "version": "0.34.1",
+    "revision": "0000000000000000000000000000000000000000",
+    "branch": "HEAD",
+    "buildUser": "root@builder",
+    "buildDate": "20260917-08:00:00",
+    "goVersion": "go1.25.1"
+  },
+  "config": {
+    "original": "global:\n  resolve_timeout: 5m\nroute:\n  receiver: slack-oncall\n  group_by:\n  - alertname\n  routes:\n  - receiver: pagerduty-critical\n    matchers:\n    - severity=\"critical\"\nreceivers:\n- name: slack-oncall\n- name: pagerduty-critical\n"
+  },
+  "uptime": "2026-10-01T08:00:00.000Z"
+}

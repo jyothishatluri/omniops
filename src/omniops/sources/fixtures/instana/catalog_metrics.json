@@ -1,0 +1,13 @@
+[
+  {
+    "metricId": "calls",
+    "label": "Call count",
+    "formatter": "NUMBER",
+    "description": "Number of received calls",
+    "aggregations": [
+      "PER_SECOND",
+      "SUM"
+    ],
+    "defaultAggregation": null
+  }
+]

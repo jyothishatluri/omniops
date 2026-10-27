@@ -1,0 +1,53 @@
+{
+ "nextPageKey": "AQAAABQBAAAABQ==",
+ "pageSize": 1,
+ "totalCount": 1,
+ "types": [
+  {
+   "entityLimitExceeded": "false",
+   "fromRelationships": [
+    {
+     "id": "RUNS_ON_RESOURCE",
+     "toTypes": [
+      "CUSTOM_DEVICE"
+     ]
+    },
+    {
+     "id": "IS_NETWORK_CLIENT_OF_HOST",
+     "toTypes": [
+      "HOST",
+      "CUSTOM_DEVICE"
+     ]
+    }
+   ],
+   "managementZones": "placeholder for management zones",
+   "properties": [
+    {
+     "id": "BITNESS",
+     "type": "Enum"
+    },
+    {
+     "id": "CPU_CORES",
+     "type": "Number"
+    }
+   ],
+   "tags": "placeholder for tags",
+   "toRelationships": [
+    {
+     "fromTypes": [
+      "DISK"
+     ],
+     "id": "IS_DISK_OF"
+    },
+    {
+     "fromTypes": [
+      "VMWARE_DATACENTER",
+      "GEOLOC_SITE"
+     ],
+     "id": "IS_SITE_OF"
+    }
+   ],
+   "type": "HOST"
+  }
+ ]
+}

@@ -1,0 +1,9 @@
+{
+  "description": "string",
+  "integration": "string",
+  "per_unit": "second",
+  "short_name": "string",
+  "statsd_interval": "integer",
+  "type": "count",
+  "unit": "byte"
+}

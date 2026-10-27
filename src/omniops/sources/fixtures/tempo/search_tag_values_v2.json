@@ -1,0 +1,31 @@
+{
+  "tagValues": [
+    {
+      "type": "string",
+      "value": "article-service"
+    },
+    {
+      "type": "string",
+      "value": "postgres"
+    },
+    {
+      "type": "string",
+      "value": "cart-service"
+    },
+    {
+      "type": "string",
+      "value": "billing-service"
+    },
+    {
+      "type": "string",
+      "value": "shop-backend"
+    },
+    {
+      "type": "string",
+      "value": "auth-service"
+    }
+  ],
+  "metrics": {
+    "inspectedBytes": "502756"
+  }
+}

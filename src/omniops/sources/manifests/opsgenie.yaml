@@ -1,0 +1,1175 @@
+# Opsgenie (Atlassian) REST API as SQL tables. Direct REST, no MCP.
+#
+# Every path, parameter name, time format and response path below was checked against the official
+# REST API reference on docs.opsgenie.com (Alert API, Alert API Continued, Incident API, Incident
+# Timeline API, Schedule API, Who is On Call API, Heartbeat API, Service API, Team API, Deployment
+# API, Pagination, Rate Limiting) and the Atlassian support pages for the alert / incident search
+# query syntax. The offline fixtures in src/omniops/sources/fixtures/opsgenie/ are the documented
+# "Sample Response" bodies; where a documented sample is not valid JSON (a missing comma, a stray
+# quote) the fixture fixes only that syntax and says so in its note. Research notes:
+# docs/sources/opsgenie.md.
+#
+# Conventions:
+#   - Auth header `Authorization: GenieKey <apiKey>` (an API integration's key, or an account API key).
+#   - US instance https://api.opsgenie.com, EU instance https://api.eu.opsgenie.com (OPSGENIE_API_URL).
+#   - Alerts and incidents have no since/until parameters: the time window is pushed into the
+#     search `query` as `createdAt >= <epoch ms> AND createdAt < <epoch ms>` (documented field
+#     reference: createdAt is Unix epoch MILLISECONDS; < <= > >= are supported).
+#   - Opsgenie is end-of-sale (2025-06-04) and reaches end of support on 2027-04-05, when
+#     Atlassian shuts access off; accounts are migrating to Jira Service Management / Compass.
+source: opsgenie
+display_name: Opsgenie
+vendor: Atlassian
+description: >-
+  Opsgenie REST API: alerts (search, detail, count, activity logs, notes, notification
+  recipients), incidents (search, detail, logs, notes, associated alerts, incident timeline),
+  on-call (who is on call per schedule, schedule timelines), schedules, escalations, maintenance
+  windows, heartbeats, services, teams and deployments.
+docs_url: https://docs.opsgenie.com/docs/api-overview
+categories: [alerts, incidents, oncall, changes, services]
+base_url: "{{ (env.OPSGENIE_API_URL or 'https://api.opsgenie.com') | trim('/') }}"
+ui_base_url: "{{ (env.OPSGENIE_UI_URL or 'https://app.opsgenie.com') | trim('/') }}"
+env:
+  - {name: OPSGENIE_API_KEY, description: "API key: an API integration's key (Settings > Integrations > API; must not be restricted to access configurations for schedules/teams/services) or an account API key (Settings > API key management) with Read access. Sent as 'Authorization: GenieKey <key>'.", secret: true}
+  - {name: OPSGENIE_API_URL, description: "API base URL: https://api.opsgenie.com (US, default) or https://api.eu.opsgenie.com (EU instance)", default: "https://api.opsgenie.com"}
+  - {name: OPSGENIE_UI_URL, description: "Web UI base for deep links, e.g. https://acme.app.opsgenie.com or https://acme.app.eu.opsgenie.com (default https://app.opsgenie.com)", default: "https://app.opsgenie.com"}
+required_env: [OPSGENIE_API_KEY]
+auth:
+  type: headers
+  headers:
+    Authorization: "GenieKey {{ env.OPSGENIE_API_KEY }}"
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 300
+  max_retries: 3
+  notes: >-
+    Token-bucket limits per request DOMAIN (Alert, Incident, Configuration, Search, Heartbeat,
+    Schedule-oncalls, ...), checked both per minute and per second, account-wide (optionally with
+    per-integration fairness). Base limits depend on the subscription plan and seat count and are
+    shown on the Reports > API usage page; the Configuration domain (teams, schedules, services,
+    users) has the lowest limits, and alert/user listing is the Search domain. Over the limit:
+    BURST (accepted, delayed 5 s) or THROTTLED (HTTP 429). Headers X-RateLimit-State
+    (OK|BURST|THROTTLED), X-RateLimit-Reason, X-RateLimit-Period-In-Sec. Retry 429 and 503 with
+    exponential backoff.
+retention: {}
+pitfalls:
+  - "Opsgenie is end-of-life: end of sale 2025-06-04, end of support (access and API shut off, unmigrated data deleted) 2027-04-05. Accounts migrated to Jira Service Management stop updating here - an empty result from a migrated account is NOT evidence that nothing happened."
+  - "Time windows are pushed into the search query on createdAt (epoch ms): an alert created BEFORE the window that is still open is not in opsgenie_alerts for that window. Use opsgenie_open_alerts for everything currently open, whatever its age."
+  - "List Alerts can return at most 20,000 alerts (offset + limit < 20,000) and pages of at most 100; this source reads up to 1,000 newest alerts per query. Narrow the query (status, tag, team, message) rather than paging deeper."
+  - "Team / user / service names in queries must be exact (wildcards are not supported for teams and users). Unknown field names in a query match nothing rather than raising an error."
+  - "An API integration key that is 'restricted to access configurations' cannot read schedules, teams or services (HTTP 403); use an unrestricted integration or an account API key."
+  - "EU accounts must use https://api.eu.opsgenie.com (OPSGENIE_API_URL); the US host rejects EU keys."
+  - "Responders and impactedServices are returned as IDs: join opsgenie_teams / opsgenie_services to name them."
+query_languages:
+  opsgenie_alert_search: >-
+    Opsgenie alert search query (the `query` column). field: value pairs: message: 'payment*',
+    status: open | closed, acknowledged: true, tag: critical, teams: "Team Name", owner: user@x.com,
+    source / entity / alias / integration.name / integration.type / details.key / details.value,
+    count > 5, createdAt / lastOccurredAt as epoch MILLISECONDS with < <= > >=. Combine with AND /
+    OR (parenthesise groups) and NOT; '*' only as a prefix wildcard (lorem*). Null checks:
+    'owner : null', 'teams is null', 'details.key is not null'. Free text without a field searches
+    the message. This source adds the createdAt window and the pushed-down filters with AND.
+  opsgenie_incident_search: >-
+    Opsgenie incident search query. Fields: message, description, status (open | resolved |
+    closed), priority (P1..P5), teams (owner team name), services (service name), tag, actions,
+    details.key / details.value, postmortemRequired, postmortemStatus, createdAt (epoch ms) with
+    < <= > >=, AND / OR / NOT, prefix wildcard (lorem*).
+
+tables:
+  # ----------------------------------------------------------------------------------------------
+  # Alerts
+  # ----------------------------------------------------------------------------------------------
+  - name: opsgenie_alerts
+    title: Alerts created in a time window (search)
+    description: >-
+      One row per alert CREATED in the ts window, newest first (GET /v2/alerts, sort=createdAt
+      desc). The window becomes `createdAt >= start AND createdAt < end` (epoch ms) inside the
+      Opsgenie search query, ANDed with the optional free-form query (alert search syntax) and the
+      pushed-down filters status (open | closed), tag, team (owner/responder team name), entity,
+      source, alias. Use it for alert history around an incident and for "has this fired before".
+    kind: alerts
+    request:
+      method: GET
+      path: /v2/alerts
+      query:
+        query: >-
+          {{ [('(' ~ filters.query ~ ')') if filters.query else None,
+              ('status: ' ~ filters.status) if filters.status else None,
+              ('tag: ' ~ (filters.tag | quote)) if filters.tag else None,
+              ('teams: ' ~ (filters.team | quote)) if filters.team else None,
+              ('entity: ' ~ (filters.entity | quote)) if filters.entity else None,
+              ('source: ' ~ (filters.source | quote)) if filters.source else None,
+              ('alias: ' ~ (filters.alias | quote)) if filters.alias else None,
+              'createdAt >= ' ~ (time.start | epoch_ms),
+              'createdAt < ' ~ (time.end | epoch_ms)] | select | join(' AND ') }}
+        sort: createdAt
+        order: desc
+    filters:
+      - {column: query, description: "Opsgenie alert search query (see query_languages.opsgenie_alert_search), ANDed with the window", examples: ["message: payment* AND acknowledged: false"]}
+      - {column: status, description: "open | closed", examples: [open]}
+      - {column: tag, description: "Alert tag (exact)", examples: [Critical]}
+      - {column: team, description: "Team name (exact; responder/owner team)", examples: [ops_team]}
+      - {column: entity, description: "Alert entity (exact)", examples: [EC2]}
+      - {column: source, description: "Alert source (exact)", examples: [Isengard]}
+      - {column: alias, description: "Alert alias (de-duplication key)", examples: [event_573]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 10}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt, description: "Alert creation time"}
+      - {name: id, path: id}
+      - {name: tiny_id, path: tinyId, description: "Short, rolling id shown in the UI"}
+      - {name: alias, path: alias, description: "De-duplication key"}
+      - {name: title, path: message, description: "Alert message"}
+      - {name: status, path: status, description: "open | closed"}
+      - {name: severity, path: priority, description: "Opsgenie priority P1 (highest) .. P5"}
+      - {name: acknowledged, type: BOOLEAN, path: acknowledged}
+      - {name: is_seen, type: BOOLEAN, path: isSeen}
+      - {name: snoozed, type: BOOLEAN, path: snoozed}
+      - {name: snoozed_until, type: TIMESTAMP, path: snoozedUntil}
+      - {name: count, type: BIGINT, path: count, description: "Occurrences de-duplicated into this alert"}
+      - {name: last_occurred_at, type: TIMESTAMP, path: lastOccurredAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: source, path: source}
+      - {name: owner, path: owner, description: "Owner username (empty when unowned)"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: responders, type: JSON, path: responders, description: "[{id, type: team|user|escalation|schedule}] (IDs only)"}
+      - {name: integration, path: integration.name}
+      - {name: integration_type, path: integration.type}
+      - {name: ack_time_ms, type: DOUBLE, path: report.ackTime, description: "Time to acknowledge (report.ackTime; milliseconds)"}
+      - {name: close_time_ms, type: DOUBLE, path: report.closeTime, description: "Time to close (report.closeTime; milliseconds)"}
+      - {name: acknowledged_by, path: report.acknowledgedBy}
+      - {name: closed_by, path: report.closedBy}
+      - {name: query, filter_only: true}
+      - {name: tag, filter_only: true}
+      - {name: team, filter_only: true}
+      - {name: entity, filter_only: true}
+    sort_hint: "newest first (sort=createdAt, order=desc)"
+    pitfalls:
+      - "Only alerts CREATED in the window (createdAt); an alert de-duplicated into an older open alert raises count and lastOccurredAt but keeps the old createdAt."
+      - "List rows omit description, details (custom properties), entity and actions: read opsgenie_alert_detail for one alert."
+      - "priority is not a documented search field: filter severity in SQL (it is re-applied by DuckDB)."
+    examples:
+      - sql: >-
+          SELECT ts, tiny_id, title, status, severity, count, source, acknowledged_by
+          FROM opsgenie_alerts
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Every alert opened in the two hours around an incident.
+      - sql: >-
+          SELECT title, count(*) AS alerts, sum(count) AS occurrences, min(ts) AS first_seen
+          FROM opsgenie_alerts WHERE query = 'message: checkout*' AND ts >= now() - INTERVAL 7 DAY
+          GROUP BY title ORDER BY alerts DESC
+        description: Has this alert fired before (7-day recurrence by message)?
+    fixtures:
+      - file: alerts.json
+        expect_rows: 2
+        expect_columns: {ts: "2017-03-21T20:32:52.353Z", id: 70413a06-38d6-4c85-92b8-5ebc900d42e2, tiny_id: "1791", alias: event_573, title: "Our servers are in danger", status: closed, severity: P4, acknowledged: false, count: 79, source: Isengard, tags: '["OverwriteQuietHours","Critical"]', integration: Nebuchadnezzar, ack_time_ms: 15702, acknowledged_by: "agent_smith@opsgenie.com"}
+        note: "Official Sample Response of GET /v2/alerts (List Alerts) on https://docs.opsgenie.com/docs/alert-api, verbatim."
+    ui_link: "{{ ui_base_url }}/alert/list"
+    docs_url: https://docs.opsgenie.com/docs/alert-api#list-alerts
+
+  - name: opsgenie_open_alerts
+    title: Currently open alerts (any age)
+    description: >-
+      One row per alert that is open right now, newest first, regardless of when it was created
+      (query `status: open`, plus the optional query / tag / team / acknowledged filters). No
+      time window. Use it to see what is firing at the moment of an investigation.
+    kind: alerts
+    request:
+      method: GET
+      path: /v2/alerts
+      query:
+        query: >-
+          {{ ['status: open',
+              ('(' ~ filters.query ~ ')') if filters.query else None,
+              ('tag: ' ~ (filters.tag | quote)) if filters.tag else None,
+              ('teams: ' ~ (filters.team | quote)) if filters.team else None,
+              ('acknowledged: ' ~ (filters.acknowledged | string | lower)) if filters.acknowledged is not none and filters.acknowledged is defined else None] | select | join(' AND ') }}
+        sort: createdAt
+        order: desc
+    filters:
+      - {column: query, description: "Additional alert search query", examples: ["message: payment*"]}
+      - {column: tag, description: "Alert tag", examples: [Critical]}
+      - {column: team, description: "Team name (exact)", examples: [ops_team]}
+      - {column: acknowledged, type: BOOLEAN, description: "true = acknowledged, false = not yet acknowledged", examples: ["false"]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 10}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: id, path: id}
+      - {name: tiny_id, path: tinyId}
+      - {name: alias, path: alias}
+      - {name: title, path: message}
+      - {name: status, path: status}
+      - {name: severity, path: priority}
+      - {name: acknowledged, type: BOOLEAN, path: acknowledged}
+      - {name: snoozed, type: BOOLEAN, path: snoozed}
+      - {name: count, type: BIGINT, path: count}
+      - {name: last_occurred_at, type: TIMESTAMP, path: lastOccurredAt}
+      - {name: source, path: source}
+      - {name: owner, path: owner}
+      - {name: tags, type: JSON, path: tags}
+      - {name: responders, type: JSON, path: responders}
+      - {name: integration, path: integration.name}
+      - {name: query, filter_only: true}
+      - {name: tag, filter_only: true}
+      - {name: team, filter_only: true}
+    examples:
+      - sql: "SELECT ts, title, severity, acknowledged, count, last_occurred_at FROM opsgenie_open_alerts ORDER BY severity, ts DESC LIMIT 50"
+        description: What is open right now, most severe first.
+      - sql: "SELECT ts, title, source FROM opsgenie_open_alerts WHERE acknowledged = false AND team = 'ops_team'"
+        description: Unacknowledged alerts of one team.
+    fixtures:
+      - file: alerts.json
+        expect_rows: 2
+        expect_columns: {id: 70413a06-38d6-4c85-92b8-5ebc900d42e2, title: "Our servers are in danger", severity: P4}
+        note: "Official Sample Response of GET /v2/alerts (List Alerts) on https://docs.opsgenie.com/docs/alert-api (the docs sample mixes statuses; the live query is status: open)."
+    ui_link: "{{ ui_base_url }}/alert/list?query=status%3Aopen"
+    docs_url: https://docs.opsgenie.com/docs/alert-api#list-alerts
+
+  - name: opsgenie_alert_detail
+    title: One alert (full detail)
+    description: >-
+      Full detail of one alert (GET /v2/alerts/{identifier}): adds description, details (custom
+      properties from the monitoring tool), entity and actions. Filter alert = the alert id; set
+      identifier_type = 'tiny' for a tinyId or 'alias' for an alias (alias works for OPEN alerts
+      only). The id column always holds the alert id.
+    kind: alerts
+    request:
+      method: GET
+      path: "/v2/alerts/{{ filters.alert | urlencode }}"
+      query:
+        identifierType: "{{ filters.identifier_type or 'id' }}"
+    filters:
+      - {column: alert, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Alert id (or tinyId / alias with identifier_type)", examples: [70413a06-38d6-4c85-92b8-5ebc900d42e2]}
+      - {column: identifier_type, description: "id (default) | tiny | alias", examples: [id]}
+    response:
+      rows_path: "$.data"
+    columns:
+      - {name: alert, filter_only: true, description: "The identifier you asked for"}
+      - {name: id, path: id}
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: tiny_id, path: tinyId}
+      - {name: alias, path: alias}
+      - {name: title, path: message}
+      - {name: description, path: description}
+      - {name: status, path: status}
+      - {name: severity, path: priority}
+      - {name: acknowledged, type: BOOLEAN, path: acknowledged}
+      - {name: count, type: BIGINT, path: count}
+      - {name: last_occurred_at, type: TIMESTAMP, path: lastOccurredAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: source, path: source}
+      - {name: entity, path: entity}
+      - {name: owner, path: owner}
+      - {name: details, type: JSON, path: details, description: "Custom properties (key/value) sent by the monitoring tool"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: actions, type: JSON, path: actions}
+      - {name: responders, type: JSON, path: responders}
+      - {name: integration, path: integration.name}
+      - {name: integration_type, path: integration.type}
+      - {name: ack_time_ms, type: DOUBLE, path: report.ackTime}
+      - {name: close_time_ms, type: DOUBLE, path: report.closeTime}
+      - {name: acknowledged_by, path: report.acknowledgedBy}
+      - {name: closed_by, path: report.closedBy}
+      - {name: identifier_type, filter_only: true}
+    pitfalls:
+      - "identifier_type = 'alias' cannot retrieve CLOSED alerts (documented); use the id."
+    examples:
+      - sql: "SELECT title, description, details, entity, source, status FROM opsgenie_alert_detail WHERE alert = '70413a06-38d6-4c85-92b8-5ebc900d42e2'"
+        description: The alert's full payload (custom details carry host, region, runbook links ...).
+      - sql: "SELECT id, title, status, details FROM opsgenie_alert_detail WHERE alert = '1791' AND identifier_type = 'tiny'"
+        description: Look an alert up by the short id shown in the UI / notification.
+    fixtures:
+      - file: alert.json
+        filters: {alert: 70413a06-38d6-4c85-92b8-5ebc900d42e2}
+        expect_rows: 1
+        expect_columns: {id: 70413a06-38d6-4c85-92b8-5ebc900d42e2, title: "Our servers are in danger", description: "Example description", entity: EC2, severity: P5, details: '{"serverName":"Zion","region":"Oregon"}', actions: '["Restart","Ping"]', closed_by: "neo@opsgenie.com"}
+        note: "Official Sample Response of GET /v2/alerts/:identifier (Get Alert) on https://docs.opsgenie.com/docs/alert-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/alert-api#get-alert
+
+  - name: opsgenie_alert_count
+    title: Count of alerts matching a query in a window
+    description: >-
+      Number of alerts created in the ts window matching the optional query and status filter
+      (GET /v2/alerts/count). One row. Cheap: use it before listing, or to compare the incident
+      window with a baseline window.
+    kind: generic
+    request:
+      method: GET
+      path: /v2/alerts/count
+      query:
+        query: >-
+          {{ [('(' ~ filters.query ~ ')') if filters.query else None,
+              ('status: ' ~ filters.status) if filters.status else None,
+              'createdAt >= ' ~ (time.start | epoch_ms),
+              'createdAt < ' ~ (time.end | epoch_ms)] | select | join(' AND ') }}
+    filters:
+      - {column: query, description: "Alert search query", examples: ["tag: Critical"]}
+      - {column: status, description: "open | closed", examples: [open]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d, reapply: false}
+    response:
+      rows_path: "$.data"
+    columns:
+      - {name: count, type: BIGINT, path: count}
+      - {name: query, filter_only: true}
+      - {name: status, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: >-
+          WITH now_w AS (SELECT count FROM opsgenie_alert_count WHERE query = 'tag: Critical' AND ts >= now() - INTERVAL 1 HOUR),
+               base AS (SELECT count FROM opsgenie_alert_count WHERE query = 'tag: Critical' AND ts BETWEEN now() - INTERVAL 25 HOUR AND now() - INTERVAL 24 HOUR)
+          SELECT now_w.count AS last_hour, base.count AS same_hour_yesterday FROM now_w, base
+        description: Critical alert volume in the last hour vs the same hour yesterday.
+    fixtures:
+      - file: alert_count.json
+        expect_rows: 1
+        expect_columns: {count: 7}
+        note: "Official Sample Response of GET /v2/alerts/count (Count Alerts) on https://docs.opsgenie.com/docs/alert-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/alert-api#count-alerts
+
+  - name: opsgenie_alert_logs
+    title: Activity log of an alert
+    description: >-
+      One row per activity log entry of an alert, oldest first: created, acknowledged, closed,
+      notifications, views, escalations, actions, with the user/system that acted. alert_id
+      required (IN up to 20); identifier_type tiny | alias for non-id identifiers.
+    kind: events
+    request:
+      method: GET
+      path: "/v2/alerts/{{ filters.alert_id | urlencode }}/logs"
+      query:
+        identifierType: "{{ filters.identifier_type or 'id' }}"
+        order: asc
+        limit: 100
+    filters:
+      - {column: alert_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Alert id", examples: [8418d193-2dab-4490-b331-8c02cdd196b7]}
+      - {column: identifier_type, description: "id (default) | tiny | alias", examples: [id]}
+    pagination: {type: next_url, next_url_path: "$.paging.next", max_pages: 10}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: message, path: log, description: "Log line, e.g. 'Alert acknowledged via web'"}
+      - {name: type, path: type, description: "system | alertRecipient | ..."}
+      - {name: author, path: owner, description: "User (or system) that acted"}
+      - {name: offset, path: offset, description: "Pagination offset token"}
+      - {name: alert_id, filter_only: true}
+      - {name: identifier_type, filter_only: true}
+    sort_hint: "oldest first (order=asc)"
+    examples:
+      - sql: "SELECT ts, author, type, message FROM opsgenie_alert_logs WHERE alert_id = '8418d193-2dab-4490-b331-8c02cdd196b7' ORDER BY ts"
+        description: Who was notified, who acknowledged and when.
+    fixtures:
+      - file: alert_logs.json
+        filters: {alert_id: ee624ed0-3ee0-45be-9c9d-e7667eaf21e5}
+        expect_rows: 2
+        expect_columns: {ts: "2017-04-12T12:27:52.838Z", message: "Alert acknowledged via web", type: system, author: "neo@opsgenie.com", alert_id: ee624ed0-3ee0-45be-9c9d-e7667eaf21e5}
+        note: "Official Sample Response of GET /v2/alerts/:identifier/logs (List Alert Logs) on https://docs.opsgenie.com/docs/alert-api-continued, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/alert-api-continued#list-alert-logs
+
+  - name: opsgenie_alert_notes
+    title: Notes on an alert
+    description: One row per note added to the alert (alert_id required, IN up to 20), newest first.
+    kind: events
+    request:
+      method: GET
+      path: "/v2/alerts/{{ filters.alert_id | urlencode }}/notes"
+      query:
+        identifierType: "{{ filters.identifier_type or 'id' }}"
+        limit: 100
+    filters:
+      - {column: alert_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Alert id", examples: [8418d193-2dab-4490-b331-8c02cdd196b7]}
+      - {column: identifier_type, description: "id (default) | tiny | alias", examples: [id]}
+    pagination: {type: next_url, next_url_path: "$.paging.next", max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: message, path: note}
+      - {name: author, path: owner}
+      - {name: offset, path: offset}
+      - {name: alert_id, filter_only: true}
+      - {name: identifier_type, filter_only: true}
+    examples:
+      - sql: "SELECT ts, author, message FROM opsgenie_alert_notes WHERE alert_id = '8418d193-2dab-4490-b331-8c02cdd196b7' ORDER BY ts"
+        description: What responders wrote on the alert.
+    fixtures:
+      - file: alert_notes.json
+        filters: {alert_id: ee624ed0-3ee0-45be-9c9d-e7667eaf21e5}
+        expect_rows: 2
+        expect_columns: {ts: "2017-04-12T13:36:21.874Z", author: "morpheus@opsgenie.com", offset: "1492004181874000155"}
+        note: "Official Sample Response of GET /v2/alerts/:identifier/notes (List Alert Notes) on https://docs.opsgenie.com/docs/alert-api-continued; structure, owners, times and offsets verbatim, the two note texts (film quotes in the docs) replaced with neutral sentences."
+    docs_url: https://docs.opsgenie.com/docs/alert-api-continued#list-alert-notes
+
+  - name: opsgenie_alert_recipients
+    title: Notification recipients of an alert
+    description: >-
+      One row per user the alert was routed to, with their state (action = acted, notactive,
+      ...) and the method (e.g. Acknowledge). Shows whether the on-call person was actually
+      notified and responded. alert_id required.
+    kind: events
+    request:
+      method: GET
+      path: "/v2/alerts/{{ filters.alert_id | urlencode }}/recipients"
+      query:
+        identifierType: "{{ filters.identifier_type or 'id' }}"
+    filters:
+      - {column: alert_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Alert id", examples: [8418d193-2dab-4490-b331-8c02cdd196b7]}
+      - {column: identifier_type, description: "id (default) | tiny | alias", examples: [id]}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: user, path: user.username}
+      - {name: user_id, path: user.id}
+      - {name: state, path: state, description: "action | notactive | ... (recipient state)"}
+      - {name: method, path: method, description: "Action taken (Acknowledge, Close ...) or empty"}
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: alert_id, filter_only: true}
+      - {name: identifier_type, filter_only: true}
+    examples:
+      - sql: "SELECT user, state, method, ts, updated_at FROM opsgenie_alert_recipients WHERE alert_id = '8418d193-2dab-4490-b331-8c02cdd196b7'"
+        description: Was the right person paged, and did they act?
+    fixtures:
+      - file: alert_recipients.json
+        filters: {alert_id: 8418d193-2dab-4490-b331-8c02cdd196b7}
+        expect_rows: 2
+        expect_columns: {user: "neo@opsgenie.com", state: action, method: Acknowledge, ts: "2017-04-12T12:27:28.52Z"}
+        note: "Official Sample Response of GET /v2/alerts/:identifier/recipients (List Alert Recipients) on https://docs.opsgenie.com/docs/alert-api-continued, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/alert-api-continued#list-alert-recipients
+
+  # ----------------------------------------------------------------------------------------------
+  # Incidents
+  # ----------------------------------------------------------------------------------------------
+  - name: opsgenie_incidents
+    title: Incidents created in a time window (search)
+    description: >-
+      One row per Opsgenie incident CREATED in the ts window, newest first (GET /v1/incidents,
+      sort=createdAt desc). The window is pushed into the incident search query on createdAt
+      (epoch ms), ANDed with the optional query and the status (open | resolved | closed),
+      priority (P1..P5), team (owner team name) and service (service name) filters.
+    kind: incidents
+    request:
+      method: GET
+      path: /v1/incidents
+      query:
+        query: >-
+          {{ [('(' ~ filters.query ~ ')') if filters.query else None,
+              ('status: ' ~ filters.status) if filters.status else None,
+              ('priority: ' ~ filters.severity) if filters.severity else None,
+              ('teams: ' ~ (filters.team | quote)) if filters.team else None,
+              ('services: ' ~ (filters.service | quote)) if filters.service else None,
+              'createdAt >= ' ~ (time.start | epoch_ms),
+              'createdAt < ' ~ (time.end | epoch_ms)] | select | join(' AND ') }}
+        sort: createdAt
+        order: desc
+    filters:
+      - {column: query, description: "Incident search query (see query_languages.opsgenie_incident_search)", examples: ["message: checkout*"]}
+      - {column: status, description: "open | resolved | closed", examples: [open]}
+      - {column: severity, description: "Priority P1..P5", examples: [P1]}
+      - {column: team, description: "Owner team name (exact)", examples: [ops_team]}
+      - {column: service, description: "Impacted service name (exact)", examples: [checkout]}
+    time: {column: ts, default_lookback: 7d, max_window: 180d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 10}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: id, path: id}
+      - {name: tiny_id, path: tinyId}
+      - {name: title, path: message}
+      - {name: status, path: status, description: "open | resolved | closed"}
+      - {name: severity, path: priority, description: "P1..P5"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: responders, type: JSON, path: responders, description: "[{type, id}] (IDs)"}
+      - {name: impacted_services, type: JSON, path: impactedServices, description: "Service IDs (join opsgenie_services)"}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: query, filter_only: true}
+      - {name: team, filter_only: true}
+      - {name: service, filter_only: true}
+    pitfalls:
+      - "The Incident API needs a plan with Incident Management (Standard / Enterprise); otherwise HTTP 402/403."
+      - "service filters by service NAME in the search query, but impacted_services holds IDs."
+    examples:
+      - sql: >-
+          SELECT ts, tiny_id, title, status, severity, impacted_services FROM opsgenie_incidents
+          WHERE ts >= now() - INTERVAL 30 DAY ORDER BY ts DESC
+        description: Incidents of the last 30 days (recurrence / prior incidents).
+      - sql: "SELECT ts, title, severity FROM opsgenie_incidents WHERE status = 'open' AND ts >= now() - INTERVAL 7 DAY"
+        description: Incidents still open that were declared this week.
+    fixtures:
+      - file: incidents.json
+        expect_rows: 2
+        expect_columns: {ts: "2017-03-21T20:32:52.353Z", id: 70413a06-38d6-4c85-92b8-5ebc900d42e2, tiny_id: "1791", title: "Our servers are in danger", status: closed, severity: P4, impacted_services: '["df635094-efd3-48e4-b73a-b8bdfbf1178f","b6868288-02c7-440b-a693-0a5cf20576f5"]'}
+        note: "Official Sample Response of GET /v1/incidents (List Incidents) on https://docs.opsgenie.com/docs/incident-api, verbatim."
+    ui_link: "{{ ui_base_url }}/incident/list"
+    docs_url: https://docs.opsgenie.com/docs/incident-api#list-incidents
+
+  - name: opsgenie_incident_detail
+    title: One incident (full detail)
+    description: >-
+      Full detail of one incident (GET /v1/incidents/{identifier}): description, extra
+      properties, impact start / detect / end dates. Filter incident = the incident id, or a
+      tinyId with identifier_type = 'tiny'. The id column always holds the incident id.
+    kind: incidents
+    request:
+      method: GET
+      path: "/v1/incidents/{{ filters.incident | urlencode }}"
+      query:
+        identifierType: "{{ filters.identifier_type or 'id' }}"
+    filters:
+      - {column: incident, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident id (or tinyId with identifier_type)", examples: [70413a06-38d6-4c85-92b8-5ebc900d42e2]}
+      - {column: identifier_type, description: "id (default) | tiny", examples: [id]}
+    response:
+      rows_path: "$.data"
+    columns:
+      - {name: incident, filter_only: true, description: "The identifier you asked for"}
+      - {name: id, path: id}
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: tiny_id, path: tinyId}
+      - {name: title, path: message}
+      - {name: description, path: description}
+      - {name: status, path: status}
+      - {name: severity, path: priority}
+      - {name: tags, type: JSON, path: tags}
+      - {name: responders, type: JSON, path: responders}
+      - {name: impacted_services, type: JSON, path: impactedServices}
+      - {name: extra_properties, type: JSON, path: extraProperties}
+      - {name: impact_start, type: TIMESTAMP, path: impactStartDate}
+      - {name: impact_detected, type: TIMESTAMP, path: impactDetectDate}
+      - {name: impact_end, type: TIMESTAMP, path: impactEndDate}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: identifier_type, filter_only: true}
+    examples:
+      - sql: "SELECT title, status, severity, impact_start, impact_end, extra_properties FROM opsgenie_incident_detail WHERE incident = '70413a06-38d6-4c85-92b8-5ebc900d42e2'"
+        description: Impact window and custom properties of an incident.
+    fixtures:
+      - file: incident.json
+        filters: {incident: 70413a06-38d6-4c85-92b8-5ebc900d42e2}
+        expect_rows: 1
+        expect_columns: {title: "Incident with API create", severity: P5, impact_start: "2017-03-21T20:32:52.353Z", impact_end: "2017-04-10T20:32:57.301Z", extra_properties: '{"serverName":"Zion","region":"Oregon"}'}
+        note: "Sample Response of GET /v1/incidents/:identifier (Get Incident) on https://docs.opsgenie.com/docs/incident-api; the documented sample lacks the comma after extraProperties, added here - otherwise verbatim."
+    docs_url: https://docs.opsgenie.com/docs/incident-api#get-incident
+
+  - name: opsgenie_incident_logs
+    title: Activity log of an incident
+    description: One row per incident log entry (status changes, notifications, views), oldest first. incident_id required.
+    kind: events
+    request:
+      method: GET
+      path: "/v1/incidents/{{ filters.incident_id | urlencode }}/logs"
+      query:
+        identifierType: "{{ filters.identifier_type or 'id' }}"
+        order: asc
+        limit: 100
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident id", examples: [8418d193-2dab-4490-b331-8c02cdd196b7]}
+      - {column: identifier_type, description: "id (default) | tiny", examples: [id]}
+    pagination: {type: next_url, next_url_path: "$.paging.next", max_pages: 10}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: message, path: log}
+      - {name: type, path: type, description: "system | incidentRecipient | ..."}
+      - {name: author, path: owner}
+      - {name: offset, path: offset}
+      - {name: incident_id, filter_only: true}
+      - {name: identifier_type, filter_only: true}
+    examples:
+      - sql: "SELECT ts, author, message FROM opsgenie_incident_logs WHERE incident_id = '8418d193-2dab-4490-b331-8c02cdd196b7' ORDER BY ts"
+        description: Incident lifecycle (who resolved it and when).
+    fixtures:
+      - file: incident_logs.json
+        filters: {incident_id: ee624ed0-3ee0-45be-9c9d-e7667eaf21e5}
+        expect_rows: 2
+        expect_columns: {ts: "2017-04-12T12:27:52.838Z", message: "Incident resolved via web", type: system, author: "neo@opsgenie.com"}
+        note: "Official Sample Response of GET /v1/incidents/:identifier/logs (List Incident Logs) on https://docs.opsgenie.com/docs/incident-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/incident-api#list-incident-logs
+
+  - name: opsgenie_incident_notes
+    title: Notes on an incident
+    description: One row per note on the incident (incident_id required), newest first.
+    kind: events
+    request:
+      method: GET
+      path: "/v1/incidents/{{ filters.incident_id | urlencode }}/notes"
+      query:
+        identifierType: "{{ filters.identifier_type or 'id' }}"
+        limit: 100
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident id", examples: [8418d193-2dab-4490-b331-8c02cdd196b7]}
+      - {column: identifier_type, description: "id (default) | tiny", examples: [id]}
+    pagination: {type: next_url, next_url_path: "$.paging.next", max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt}
+      - {name: message, path: note}
+      - {name: author, path: owner}
+      - {name: offset, path: offset}
+      - {name: incident_id, filter_only: true}
+      - {name: identifier_type, filter_only: true}
+    examples:
+      - sql: "SELECT ts, author, message FROM opsgenie_incident_notes WHERE incident_id = '8418d193-2dab-4490-b331-8c02cdd196b7' ORDER BY ts"
+    fixtures:
+      - file: incident_notes.json
+        filters: {incident_id: ee624ed0-3ee0-45be-9c9d-e7667eaf21e5}
+        expect_rows: 2
+        expect_columns: {ts: "2017-04-12T13:36:21.874Z", author: "morpheus@opsgenie.com", incident_id: ee624ed0-3ee0-45be-9c9d-e7667eaf21e5}
+        note: "Official Sample Response of GET /v1/incidents/:identifier/notes (List Incident Notes) on https://docs.opsgenie.com/docs/incident-api; structure, owners, times and offsets verbatim, the two note texts (film quotes in the docs) replaced with neutral sentences."
+    docs_url: https://docs.opsgenie.com/docs/incident-api#list-incident-notes
+
+  - name: opsgenie_incident_alerts
+    title: Alerts associated with an incident (IDs)
+    description: >-
+      One row per alert id associated with the incident (GET /v1/incidents/{id}/associated-alert-ids;
+      at most 25 per request). Join opsgenie_alert_detail on id for the alerts themselves.
+    kind: alerts
+    request:
+      method: GET
+      path: "/v1/incidents/{{ filters.incident_id | urlencode }}/associated-alert-ids"
+      query:
+        identifierType: "{{ filters.identifier_type or 'id' }}"
+        limit: 25
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Incident id", examples: [8418d193-2dab-4490-b331-8c02cdd196b7]}
+      - {column: identifier_type, description: "id (default) | tiny", examples: [id]}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: alert_id, path: ".", description: "Associated alert id"}
+      - {name: incident_id, filter_only: true}
+      - {name: identifier_type, filter_only: true}
+    pitfalls:
+      - "Maximum page size is 25 and the docs show no paging section for this endpoint: only the 25 most recent associations are returned."
+    examples:
+      - sql: "SELECT alert_id FROM opsgenie_incident_alerts WHERE incident_id = '8418d193-2dab-4490-b331-8c02cdd196b7'"
+        description: Which alerts were attached to the incident.
+    fixtures:
+      - file: incident_alert_ids.json
+        filters: {incident_id: 8418d193-2dab-4490-b331-8c02cdd196b7}
+        expect_rows: 2
+        expect_columns: {alert_id: 40ab23d0-c960-4a26-b658-99f5584cb212-1566891206483, incident_id: 8418d193-2dab-4490-b331-8c02cdd196b7}
+        note: "Official Sample Response of GET /v1/incidents/:identifier/associated-alert-ids (Get Associated Alerts) on https://docs.opsgenie.com/docs/incident-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/incident-api#get-associated-alerts
+
+  - name: opsgenie_incident_timeline
+    title: Incident timeline entries
+    description: >-
+      One row per incident timeline entry (custom entries, incident events, responder alerts,
+      stakeholder updates, status page, integration events), oldest first. incident_id required
+      (the incident's id); optional group filter (custom | incident | responderAlert |
+      stakeholderUpdate | statusPage | iccSessionLifecycle | iccSessionDetails | integration).
+    kind: events
+    request:
+      method: GET
+      path: "/v2/incident-timelines/{{ filters.incident_id | urlencode }}/entries"
+      query:
+        group: "{{ filters.group }}"
+        order: asc
+        limit: 20
+    filters:
+      - {column: incident_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Incident id", examples: [5a9alp7-b5d2-4ecb-b82c-e3b5286829cf]}
+      - {column: group, description: "Entry group (comma-separated list allowed)", examples: ["custom,incident"]}
+    pagination: {type: cursor, cursor_path: "$.data.nextOffset", cursor_param: query.offset, max_pages: 15}
+    response:
+      rows_path: "$.data.entries[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: eventTime}
+      - {name: id, path: id}
+      - {name: group, path: group}
+      - {name: type, path: type}
+      - {name: title, path: description.name, description: "Entry text"}
+      - {name: hidden, type: BOOLEAN, path: hidden}
+      - {name: author, path: actor.name}
+      - {name: author_type, path: actor.type}
+      - {name: edited_at, type: TIMESTAMP, path: lastEdit.editTime}
+      - {name: incident_id, filter_only: true}
+    pitfalls:
+      - "Pages hold at most 20 entries (documented limit 1..20); this source follows nextOffset for up to 300 entries."
+    examples:
+      - sql: "SELECT ts, \"group\", type, author, title FROM opsgenie_incident_timeline WHERE incident_id = '5a9alp7-b5d2-4ecb-b82c-e3b5286829cf' ORDER BY ts"
+        description: The incident narrative as responders recorded it.
+    fixtures:
+      - file: incident_timeline.json
+        filters: {incident_id: 5a9alp7-b5d2-4ecb-b82c-e3b5286829cf}
+        expect_rows: 2
+        expect_columns: {ts: "2019-01-30T16:55:00Z", id: 4a9alp7-b5d2-4ecb-b82c-e3b5286829cf, group: custom, type: CustomUserEntry, title: "sample incident timeline entry 1", hidden: false, author: API, author_type: api}
+        note: "Response of GET /v2/incident-timelines/:incidentId/entries (List Incident Timeline Entries) on https://docs.opsgenie.com/docs/incident-timeline-api. The documented sample is not valid JSON ('\"data\": \"entries\"' without the opening brace, missing commas after actor and an extra trailing comma); this fixture fixes only that syntax, values verbatim."
+    docs_url: https://docs.opsgenie.com/docs/incident-timeline-api#list-incident-timeline-entries
+
+  # ----------------------------------------------------------------------------------------------
+  # On-call and schedules
+  # ----------------------------------------------------------------------------------------------
+  - name: opsgenie_oncall
+    title: Who is on call (per schedule)
+    description: >-
+      One row per (schedule, on-call user) at the start of the ts window (default: when the alert
+      fired). With schedule (name or id; schedule_identifier_type = name | id, default name) it
+      calls GET /v2/schedules/{schedule}/on-calls?flat=true; without it the (deprecated but still
+      documented) GET /v2/schedules/on-calls?flat=true covering every schedule. The ts predicate
+      sets the `date` parameter and is not re-applied to rows.
+    kind: entities
+    request:
+      method: GET
+      path: "{{ ('/v2/schedules/' ~ (filters.schedule | urlencode) ~ '/on-calls') if filters.schedule else '/v2/schedules/on-calls' }}"
+      query:
+        scheduleIdentifierType: "{{ (filters.schedule_identifier_type or 'name') if filters.schedule else None }}"
+        flat: "true"
+        date: "{{ time.start | strftime('%Y-%m-%dT%H:%M:%S+00:00') }}"
+    filters:
+      - {column: schedule, ops: ["=", "in"], max_fan_out: 10, description: "Schedule name (default) or id (with schedule_identifier_type = 'id')", examples: [ScheduleName]}
+      - {column: schedule_identifier_type, description: "name (default) | id", examples: [name]}
+    time: {column: ts, default_lookback: 5m, reapply: false}
+    response:
+      rows_path: "$.data"
+      expand:
+        - {explode: onCallRecipients, as: r}
+    columns:
+      - {name: schedule, path: _parent.name}
+      - {name: schedule_id, path: _parent.id}
+      - {name: schedule_enabled, type: BOOLEAN, path: _parent.enabled}
+      - {name: user, path: "@r", description: "On-call recipient username (flat=true)"}
+      - {name: schedule_identifier_type, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Point in time (date parameter = window start)"}
+    pitfalls:
+      - "The all-schedules endpoint /v2/schedules/on-calls is marked DEPRECATED (since 2018-08-31) in the docs; give schedule = '<name>' when you know it."
+      - "flat=true resolves teams/escalations to usernames but drops the escalation structure; use opsgenie_schedule_timeline for rotations and overrides."
+    examples:
+      - sql: "SELECT schedule, user FROM opsgenie_oncall WHERE schedule = 'ScheduleName'"
+        description: Who was on call for the schedule when the alert fired.
+      - sql: "SELECT schedule, user FROM opsgenie_oncall WHERE ts = TIMESTAMP '2026-10-01 03:00:00'"
+        description: Everyone on call across all schedules at 03:00 UTC.
+    fixtures:
+      - file: oncall_flat.json
+        filters: {schedule: ScheduleName}
+        expect_rows: 1
+        expect_columns: {schedule: ScheduleName, schedule_id: d875alp4-9b4e-4219-a803-0c26936d18de, schedule_enabled: true, user: "user4@opsgenie.com"}
+        note: "Official Sample Response (flat = true) of GET /v2/schedules/:scheduleIdentifier/on-calls (Get On Calls) on https://docs.opsgenie.com/docs/who-is-on-call-api, verbatim."
+      - file: oncalls_all_flat.json
+        expect_rows: 3
+        expect_columns: {schedule: ScheduleName, user: "user4@opsgenie.com"}
+        note: "Sample Response (flat = true) of GET /v2/schedules/on-calls (List On Calls, deprecated) on https://docs.opsgenie.com/docs/who-is-on-call-api; a stray double quote after the second _parent.id is removed, otherwise verbatim."
+    docs_url: https://docs.opsgenie.com/docs/who-is-on-call-api#get-on-calls
+
+  - name: opsgenie_schedules
+    title: Schedules
+    description: One row per schedule (GET /v2/schedules?expand=rotation) with its time zone, owner team and rotations.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/schedules
+      query:
+        expand: rotation
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: timezone, path: timezone}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: owner_team, path: ownerTeam.name}
+      - {name: owner_team_id, path: ownerTeam.id}
+      - {name: rotations, type: JSON, path: rotations, description: "Rotations with type, length, startDate and participants"}
+      - {name: participants, type: JSON, path: "rotations[*].participants[*]", description: "All participants (users / teams) of all rotations"}
+    examples:
+      - sql: "SELECT name, timezone, owner_team, enabled FROM opsgenie_schedules ORDER BY name"
+        description: Schedule names (the schedule filter of opsgenie_oncall / opsgenie_schedule_timeline).
+    fixtures:
+      - file: schedules.json
+        expect_rows: 1
+        expect_columns: {id: d875e654-9b4e-4219-alp3-0c26936d18de, name: ScheduleName, timezone: Europe/Kirov, enabled: true, owner_team: ops_team}
+        note: "Official Response of GET /v2/schedules (List Schedules) on https://docs.opsgenie.com/docs/schedule-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/schedule-api#list-schedules
+
+  - name: opsgenie_schedule_timeline
+    title: Schedule timeline (final on-call periods)
+    description: >-
+      One row per final on-call period of a schedule's rotations covering the ts window (GET
+      /v2/schedules/{schedule}/timeline, interval in days from the window start): rotation,
+      recipient, period type (default | override | forwarding) and start/end. schedule required
+      (name by default; schedule_identifier_type = 'id' for ids). The ts predicate is not
+      re-applied; filter start_at / end_at in SQL.
+    kind: entities
+    request:
+      method: GET
+      path: "/v2/schedules/{{ filters.schedule | urlencode }}/timeline"
+      query:
+        identifierType: "{{ filters.schedule_identifier_type or 'name' }}"
+        date: "{{ time.start | strftime('%Y-%m-%dT%H:%M:%S+00:00') }}"
+        interval: "{{ [((time.range_s + 86399) // 86400), 1] | max }}"
+        intervalUnit: days
+    filters:
+      - {column: schedule, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Schedule name (or id with schedule_identifier_type = 'id')", examples: [ScheduleName]}
+      - {column: schedule_identifier_type, description: "name (default) | id", examples: [name]}
+    time: {column: ts, default_lookback: 24h, max_window: 31d, reapply: false}
+    response:
+      rows_path: "$.data.finalTimeline.rotations[*]"
+      expand:
+        - {explode: periods, as: p}
+    columns:
+      - {name: schedule, path: "$.data._parent.name"}
+      - {name: schedule_id, path: "$.data._parent.id"}
+      - {name: rotation, path: name}
+      - {name: rotation_id, path: id}
+      - {name: user, path: "@p.recipient.name", description: "Recipient name (username for users, team name for teams)"}
+      - {name: recipient_type, path: "@p.recipient.type", description: "user | team | escalation | none"}
+      - {name: period_type, path: "@p.type", description: "default | override | forwarding"}
+      - {name: start_at, type: TIMESTAMP, path: "@p.startDate"}
+      - {name: end_at, type: TIMESTAMP, path: "@p.endDate"}
+      - {name: schedule_identifier_type, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT rotation, user, period_type, start_at, end_at FROM opsgenie_schedule_timeline
+          WHERE schedule = 'ScheduleName' AND ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 00:00:00'
+          ORDER BY start_at
+        description: Who covered the schedule during an incident day, including overrides.
+    fixtures:
+      - file: schedule_timeline.json
+        filters: {schedule: ScheduleName}
+        expect_rows: 3
+        expect_columns: {schedule: ScheduleName, rotation: "First Rotation", user: "user2@opsgenie.com", recipient_type: user, period_type: override, start_at: "2017-05-17T14:56:34.603Z", end_at: "2017-05-18T14:33:00Z"}
+        note: "Response of GET /v2/schedules/:identifier/timeline (Get Schedule Timeline) on https://docs.opsgenie.com/docs/schedule-api; the documented sample misses one comma between two baseTimeline periods, added here - otherwise verbatim."
+    docs_url: https://docs.opsgenie.com/docs/schedule-api#get-schedule-timeline
+
+  # ----------------------------------------------------------------------------------------------
+  # Heartbeats, services, teams, deployments
+  # ----------------------------------------------------------------------------------------------
+  - name: opsgenie_heartbeats
+    title: Heartbeats
+    description: >-
+      One row per heartbeat monitor (GET /v2/heartbeats): interval, enabled, owner team and the
+      alert it raises when expired. A heartbeat that stopped pinging means a monitored job or
+      integration is dead - often the real cause behind 'no data'. The expired flag is read per
+      heartbeat from opsgenie_heartbeat.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/heartbeats
+    response:
+      rows_path: "$.data.heartbeats[*]"
+    columns:
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: interval, type: BIGINT, path: interval}
+      - {name: interval_unit, path: intervalUnit, description: "minutes | hours | days"}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: expired, type: BOOLEAN, path: expired, description: "Present when the API returns it (always in opsgenie_heartbeat)"}
+      - {name: owner_team, path: ownerTeam.name}
+      - {name: alert_message, path: alertMessage}
+      - {name: alert_priority, path: alertPriority}
+      - {name: alert_tags, type: JSON, path: alertTags}
+    examples:
+      - sql: "SELECT name, interval, interval_unit, enabled, owner_team FROM opsgenie_heartbeats WHERE enabled ORDER BY name"
+        description: Enabled heartbeat monitors (then check expired ones with opsgenie_heartbeat).
+    fixtures:
+      - file: heartbeats.json
+        expect_rows: 3
+        expect_columns: {name: hb1, interval: 5, interval_unit: minutes, enabled: true, owner_team: "A team", alert_priority: P3}
+        note: "Official Response of GET /v2/heartbeats (List Heartbeats) on https://docs.opsgenie.com/docs/heartbeat-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/heartbeat-api#list-heartbeats
+
+  - name: opsgenie_heartbeat
+    title: One heartbeat (with expired state)
+    description: One heartbeat by name (GET /v2/heartbeats/{name}), including whether it is expired (no ping within its interval).
+    kind: entities
+    request:
+      method: GET
+      path: "/v2/heartbeats/{{ filters.name | urlencode }}"
+    filters:
+      - {column: name, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Heartbeat name", examples: [HeartbeatName]}
+    response:
+      rows_path: "$.data"
+    columns:
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: interval, type: BIGINT, path: interval}
+      - {name: interval_unit, path: intervalUnit}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: expired, type: BOOLEAN, path: expired}
+      - {name: owner_team, path: ownerTeam.name}
+      - {name: alert_message, path: alertMessage}
+      - {name: alert_priority, path: alertPriority}
+      - {name: alert_tags, type: JSON, path: alertTags}
+    examples:
+      - sql: "SELECT name, expired, interval, interval_unit FROM opsgenie_heartbeat WHERE name IN ('HeartbeatName', 'nightly-backup')"
+        description: Did the job's heartbeat stop?
+    fixtures:
+      - file: heartbeat.json
+        filters: {name: HeartbeatName}
+        expect_rows: 1
+        expect_columns: {name: HeartbeatName, expired: true, interval: 10, owner_team: ops_team, alert_tags: '["heartbeatTag1","heartbeatTag2"]'}
+        note: "Official Response of GET /v2/heartbeats/:heartbeatName (Get Heartbeat Request) on https://docs.opsgenie.com/docs/heartbeat-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/heartbeat-api#get-heartbeat-request
+
+  - name: opsgenie_services
+    title: Services
+    description: One row per Opsgenie service (GET /v1/services), sorted by name; optional service search query (e.g. name:checkout). Team-scoped keys see only their team's services.
+    kind: entities
+    request:
+      method: GET
+      path: /v1/services
+      query:
+        query: "{{ filters.query }}"
+        sort: name
+        order: asc
+    filters:
+      - {column: query, description: "Service search query, e.g. name:checkout", examples: ["name:exampleService"]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: service, path: name}
+      - {name: description, path: description}
+      - {name: team_id, path: teamId}
+      - {name: tags, type: JSON, path: tags}
+      - {name: is_external, type: BOOLEAN, path: isExternal}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT id, service, team_id FROM opsgenie_services WHERE query = 'name:checkout'"
+        description: Map a service name to its Opsgenie id (impacted_services / deployments use ids).
+    fixtures:
+      - file: services.json
+        expect_rows: 2
+        expect_columns: {id: 6aa85159-9e2e-4e54-8088-546f9c15d513, service: "Service API Test Service - Updated", team_id: 2e3c4c13-51e7-4cf6-a353-34c6f75494c7, is_external: false}
+        note: "Official Response of GET /v1/services (List Services) on https://docs.opsgenie.com/docs/service-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/service-api#list-services
+
+  - name: opsgenie_teams
+    title: Teams
+    description: Every team of the account in one response (GET /v2/teams, no pagination). Maps the team ids found in responders to names.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/teams
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+    examples:
+      - sql: "SELECT id, name FROM opsgenie_teams ORDER BY name"
+    fixtures:
+      - file: teams.json
+        expect_rows: 3
+        expect_columns: {id: 90098alp9-f0e3-41d3-a060-0ea895027630, name: ops_team}
+        note: "Official Response of GET /v2/teams (List Teams) on https://docs.opsgenie.com/docs/team-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/team-api#list-teams
+
+  - name: opsgenie_deployments
+    title: Deployments of services (Bitbucket / API deployments)
+    description: >-
+      Deployments mapped to Opsgenie services (GET /v2/deployments/search): service_id required
+      (IN list sent as repeated serviceIds), optional environment_id; the ts window is sent as
+      startTime / endTime. Only deployments reported to Opsgenie (Bitbucket Pipelines or the
+      Deployment API) exist here.
+    kind: changes
+    request:
+      method: GET
+      path: /v2/deployments/search
+      query:
+        serviceIds: "{{ filters.service_id | as_list }}"
+        environmentIds: "{{ filters.environment_id | as_list }}"
+        startTime: "{{ time.start | rfc3339 }}"
+        endTime: "{{ time.end | rfc3339 }}"
+    filters:
+      - {column: service_id, required: true, ops: ["=", "in"], fan_out: false, description: "Opsgenie service id(s) (opsgenie_services.id)", examples: [96f6655c-73f1-4d4b-a1a5-4b97dd8409b5]}
+      - {column: environment_id, ops: ["=", "in"], fan_out: false, description: "Environment id(s)", examples: ["{598f7ddd-21c3-4064-a569-4dac1b8b0280}"]}
+    time: {column: ts, default_lookback: 48h, max_window: 90d}
+    pagination: {type: offset, offset_param: query.paginationKey, limit_param: query.limit, page_size: 100, max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: startedAt, description: "Deployment start"}
+      - {name: completed_at, type: TIMESTAMP, path: completedAt}
+      - {name: id, path: id}
+      - {name: external_id, path: externalId}
+      - {name: type, path: type, description: "pipelines (Bitbucket) | api"}
+      - {name: state, path: state, description: "successful | failed | in_progress ..."}
+      - {name: title, path: message}
+      - {name: description, path: description, description: "Usually '<short sha> <commit message>'"}
+      - {name: env, path: environment.displayName}
+      - {name: environment_type, path: environment.type}
+      - {name: environment_id, path: environment.id}
+      - {name: service_id, filter_only: true}
+    pitfalls:
+      - "Only Bitbucket Cloud is supported as SCM by Opsgenie's deployment tracking; GitHub/GitLab deploys are absent unless pushed through the Deployment API."
+      - "The docs do not state how startTime/endTime bound the search nor the maximum limit; rows are re-filtered on ts in SQL."
+    examples:
+      - sql: >-
+          SELECT ts, state, title, description, env FROM opsgenie_deployments
+          WHERE service_id = '96f6655c-73f1-4d4b-a1a5-4b97dd8409b5' AND ts >= now() - INTERVAL 2 DAY ORDER BY ts DESC
+        description: Deploys of the service in the 48h before an incident.
+    fixtures:
+      - file: deployments.json
+        filters: {service_id: 96f6655c-73f1-4d4b-a1a5-4b97dd8409b5}
+        expect_rows: 3
+        expect_columns: {ts: "2020-08-17T08:16:57.943Z", id: 0e1a5c8d-66a5-34a4-a315-733caa5e5636, type: pipelines, state: successful, title: "Deployment #5", env: production, environment_type: Production}
+        note: "Official Sample Response of GET /v2/deployments/search (Search Deployments) on https://docs.opsgenie.com/docs/deployment-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/deployment-api#search-deployments
+
+  # ----------------------------------------------------------------------------------------------
+  # Escalations and maintenance (why someone was / was not paged)
+  # ----------------------------------------------------------------------------------------------
+  - name: opsgenie_escalations
+    title: Escalation policies (one row per escalation rule)
+    description: >-
+      Every escalation of the account (GET /v2/escalations, no pagination), one row per rule in
+      order: condition (if-not-acked | if-not-closed), notify type (default | next | previous |
+      users | admins | all), delay and recipient (user / schedule / team). Shows who is paged
+      next and after how long when an alert is not acknowledged.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/escalations
+    response:
+      rows_path: "$.data[*]"
+      expand:
+        - {explode: rules, as: r}
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: owner_team, path: ownerTeam.name}
+      - {name: owner_team_id, path: ownerTeam.id}
+      - {name: rule_index, type: BIGINT, expr: "(_.rules or []).index(r)", description: "Position of the rule in the escalation (0 = first)"}
+      - {name: condition, path: "@r.condition", description: "if-not-acked | if-not-closed"}
+      - {name: notify_type, path: "@r.notifyType", description: "default | next | previous | users | admins | all"}
+      - {name: delay, type: BIGINT, path: "@r.delay.timeAmount"}
+      - {name: delay_unit, path: "@r.delay.timeUnit", description: "minutes (documented unit)"}
+      - {name: recipient_type, path: "@r.recipient.type", description: "user | schedule | team"}
+      - {name: recipient, expr: "r.recipient.name or r.recipient.username", description: "Schedule / team name or username"}
+      - {name: recipient_id, path: "@r.recipient.id"}
+      - {name: repeat, type: JSON, path: repeat, description: "{waitInterval, count, resetRecipientStates, closeAlertAfterAll} or NULL"}
+    pitfalls:
+      - "Escalations are only used when an alert's responders include the escalation (directly or via a team's routing rule); a team routed straight to a schedule never escalates."
+    examples:
+      - sql: >-
+          SELECT name, rule_index, condition, delay, delay_unit, recipient_type, recipient
+          FROM opsgenie_escalations WHERE owner_team = 'ops_team' ORDER BY name, rule_index
+        description: How an unacknowledged alert of a team escalates (who, after how many minutes).
+    fixtures:
+      - file: escalations.json
+        expect_rows: 4
+        expect_columns: {id: 4e8de428-f403-4e82-b46a-4402b8e7a5ed, name: EscalationName, rule_index: 0, condition: if-not-closed, notify_type: default, delay: 0, delay_unit: minutes, recipient_type: user, recipient: "alp@opsgenie.com", repeat: '{"waitInterval":15,"count":13,"resetRecipientStates":true,"closeAlertAfterAll":true}'}
+        note: "Response of GET /v2/escalations (List Escalations) on https://docs.opsgenie.com/docs/escalation-api; the documented sample has a trailing comma after the second escalation, removed here - otherwise verbatim."
+    docs_url: https://docs.opsgenie.com/docs/escalation-api#list-escalations
+
+  - name: opsgenie_maintenance
+    title: Maintenance windows
+    description: >-
+      One row per maintenance (GET /v1/maintenance): status (planned | active | past |
+      cancelled), time type (for-5-minutes | for-30-minutes | for-1-hour | indefinitely | schedule) and start/end for
+      scheduled ones. While a maintenance is active the integrations / policies in its rules are
+      disabled, so alerts may never be created or notified - check it when an expected alert or
+      page is missing. Filter type = all (default) | non-expired | past (pushed down). Which
+      integrations / policies are covered: opsgenie_maintenance_detail.
+    kind: events
+    request:
+      method: GET
+      path: /v1/maintenance
+      query:
+        type: "{{ filters.type or 'all' }}"
+    filters:
+      - {column: type, description: "all (default) | non-expired | past", examples: [non-expired]}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: time.startDate, description: "Start (scheduled maintenances only)"}
+      - {name: id, path: id}
+      - {name: status, path: status, description: "planned | active | past | cancelled"}
+      - {name: title, path: description}
+      - {name: time_type, path: time.type, description: "for-5-minutes | for-30-minutes | for-1-hour | indefinitely | schedule"}
+      - {name: start_at, type: TIMESTAMP, path: time.startDate}
+      - {name: end_at, type: TIMESTAMP, path: time.endDate}
+      - {name: type, filter_only: true}
+    pitfalls:
+      - "Only 'schedule' maintenances carry start/end dates; for-N-minutes and indefinitely ones have NULL start_at / end_at (judge them by status = 'active')."
+    examples:
+      - sql: "SELECT id, status, title, time_type, start_at, end_at FROM opsgenie_maintenance WHERE type = 'non-expired'"
+        description: Planned and active maintenances (anything that can silence alerts right now).
+      - sql: >-
+          SELECT id, title, start_at, end_at FROM opsgenie_maintenance
+          WHERE start_at <= TIMESTAMP '2026-10-01 11:00:00' AND end_at >= TIMESTAMP '2026-10-01 11:00:00'
+        description: Was a scheduled maintenance running when the alert should have fired?
+    fixtures:
+      - file: maintenance_non_expired.json
+        filters: {type: non-expired}
+        expect_rows: 2
+        expect_columns: {id: 20b78362-9d1e-43e0-8b86-3026b7071109, status: planned, title: Maintenance1, time_type: schedule, start_at: "2017-03-20T11:41:00Z", end_at: "2017-03-20T12:15:00Z", type: non-expired}
+        note: "Official Response of GET /v1/maintenance?type=non-expired (List Maintenance) on https://docs.opsgenie.com/docs/maintenance-api, verbatim."
+      - file: maintenance_past.json
+        filters: {type: past}
+        expect_rows: 1
+        expect_columns: {id: 9aa71390-fe1c-425a-ad52-f1cfbdf56091, status: past, time_type: for-1-hour, start_at: null}
+        note: "Official Response of GET /v1/maintenance?type=past (List Maintenance) on https://docs.opsgenie.com/docs/maintenance-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/maintenance-api#list-maintenance
+
+  - name: opsgenie_maintenance_detail
+    title: One maintenance with its rules
+    description: >-
+      One maintenance by id (GET /v1/maintenance/{id}), one row per rule: the entity (integration
+      or policy) it covers and its state (enabled / disabled). An integration rule is always
+      'disabled' (no alerts are created from it during the maintenance). maintenance_id required
+      (IN up to 20; ids from opsgenie_maintenance).
+    kind: entities
+    request:
+      method: GET
+      path: "/v1/maintenance/{{ filters.maintenance_id | urlencode }}"
+    filters:
+      - {column: maintenance_id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Maintenance id", examples: [b0ee8414-1d29-45c3-850f-11dbf0f1402f]}
+    response:
+      rows_path: "$.data"
+      expand:
+        - {explode: rules, as: rule, keep_empty: true}
+    columns:
+      - {name: id, path: id}
+      - {name: status, path: status}
+      - {name: title, path: description}
+      - {name: time_type, path: time.type}
+      - {name: start_at, type: TIMESTAMP, path: time.startDate}
+      - {name: end_at, type: TIMESTAMP, path: time.endDate}
+      - {name: entity_type, path: "@rule.entity.type", description: "integration | policy"}
+      - {name: entity_id, path: "@rule.entity.id", description: "Integration or policy id"}
+      - {name: rule_state, path: "@rule.state", description: "enabled | disabled (integration rules are always disabled)"}
+      - {name: maintenance_id, filter_only: true}
+    examples:
+      - sql: "SELECT status, start_at, end_at, entity_type, entity_id, rule_state FROM opsgenie_maintenance_detail WHERE maintenance_id = 'b0ee8414-1d29-45c3-850f-11dbf0f1402f'"
+        description: Which integrations / policies a maintenance switched off.
+    fixtures:
+      - file: maintenance.json
+        filters: {maintenance_id: b0ee8414-1d29-45c3-850f-11dbf0f1402f}
+        expect_rows: 1
+        expect_columns: {id: b0ee8414-1d29-45c3-850f-11dbf0f1402f, status: planned, title: "Maintenance Description", time_type: schedule, start_at: "2018-03-25T08:45:00Z", entity_type: policy, entity_id: 1d9530bb-a079-43d9-8535-bbfd2fb6f8af, rule_state: enabled}
+        note: "Official Response of GET /v1/maintenance/:maintenanceId (Get Maintenance) on https://docs.opsgenie.com/docs/maintenance-api, verbatim."
+    docs_url: https://docs.opsgenie.com/docs/maintenance-api#get-maintenance
+
+roles:
+  active_alerts:
+    table: opsgenie_open_alerts
+    columns: {ts: ts, name: title, title: title, state: status, severity: severity, labels: tags, id: id}
+    notes: "Opsgenie alerts open right now (any age)."
+  alert_history:
+    table: opsgenie_alerts
+    columns: {ts: ts, name: title, title: title, state: status, severity: severity, count: count, id: id}
+    notes: "Alerts created in the window; count = de-duplicated occurrences."
+  incidents:
+    table: opsgenie_incidents
+    columns: {ts: ts, id: id, title: title, state: status, status: status, severity: severity}
+    notes: "Opsgenie incidents created in the window; the 'query' variable is pushed as an incident search query."
+  oncall:
+    table: opsgenie_oncall
+    columns: {name: user, user: user, schedule: schedule}
+    notes: "Who was on call per schedule at the window start (all schedules unless schedule is given)."
+  services:
+    table: opsgenie_services
+    columns: {service: service, id: id}

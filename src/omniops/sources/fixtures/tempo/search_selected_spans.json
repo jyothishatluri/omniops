@@ -1,0 +1,205 @@
+{
+  "traces": [
+    {
+      "traceID": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "rootServiceName": "webapp",
+      "rootTraceName": "POST /api/orders",
+      "startTimeUnixNano": "1792478178000000000",
+      "durationMs": 1800,
+      "spanSets": [
+        {
+          "spans": [
+            {
+              "spanID": "00f067aa0ba902b7",
+              "name": "handle POST /api/orders",
+              "startTimeUnixNano": "1792478178010000000",
+              "durationNanos": "1296000000",
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "order-service"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "server"
+                  }
+                },
+                {
+                  "key": "status",
+                  "value": {
+                    "stringValue": "error"
+                  }
+                },
+                {
+                  "key": "statusMessage",
+                  "value": {
+                    "stringValue": "payment failed"
+                  }
+                },
+                {
+                  "key": "http.route",
+                  "value": {
+                    "stringValue": "/api/orders"
+                  }
+                },
+                {
+                  "key": "http.method",
+                  "value": {
+                    "stringValue": "POST"
+                  }
+                },
+                {
+                  "key": "http.status_code",
+                  "value": {
+                    "intValue": "500"
+                  }
+                }
+              ]
+            },
+            {
+              "spanID": "53995c3f42cd8ad8",
+              "name": "handle POST /api/payments",
+              "startTimeUnixNano": "1792478178025000000",
+              "durationNanos": "1210000000",
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "payment-service"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "server"
+                  }
+                },
+                {
+                  "key": "status",
+                  "value": {
+                    "stringValue": "error"
+                  }
+                },
+                {
+                  "key": "http.route",
+                  "value": {
+                    "stringValue": "/api/payments"
+                  }
+                },
+                {
+                  "key": "http.request.method",
+                  "value": {
+                    "stringValue": "POST"
+                  }
+                },
+                {
+                  "key": "http.response.status_code",
+                  "value": {
+                    "intValue": "502"
+                  }
+                }
+              ]
+            }
+          ],
+          "matched": 2
+        }
+      ],
+      "serviceStats": {
+        "webapp": {
+          "spanCount": 2
+        },
+        "api-gateway": {
+          "spanCount": 2
+        },
+        "order-service": {
+          "spanCount": 3,
+          "errorCount": 1
+        },
+        "payment-service": {
+          "spanCount": 2,
+          "errorCount": 1
+        }
+      }
+    },
+    {
+      "traceID": "b7ad6b7169203331",
+      "rootServiceName": "webapp",
+      "rootTraceName": "POST /api/orders",
+      "startTimeUnixNano": "1792478238000000000",
+      "durationMs": 950,
+      "spanSets": [
+        {
+          "spans": [
+            {
+              "spanID": "0af7651916cd43dd",
+              "name": "handle POST /api/orders",
+              "startTimeUnixNano": "1792478238010000000",
+              "durationNanos": "900000000",
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "order-service"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "server"
+                  }
+                },
+                {
+                  "key": "status",
+                  "value": {
+                    "stringValue": "error"
+                  }
+                },
+                {
+                  "key": "http.route",
+                  "value": {
+                    "stringValue": "/api/orders"
+                  }
+                },
+                {
+                  "key": "http.method",
+                  "value": {
+                    "stringValue": "POST"
+                  }
+                },
+                {
+                  "key": "http.status_code",
+                  "value": {
+                    "intValue": "500"
+                  }
+                }
+              ]
+            }
+          ],
+          "matched": 1
+        }
+      ],
+      "serviceStats": {
+        "webapp": {
+          "spanCount": 2
+        },
+        "api-gateway": {
+          "spanCount": 2
+        },
+        "order-service": {
+          "spanCount": 2,
+          "errorCount": 1
+        }
+      }
+    }
+  ],
+  "metrics": {
+    "inspectedTraces": 412,
+    "inspectedBytes": "2097152",
+    "totalBlocks": 4,
+    "completedJobs": 4,
+    "totalJobs": 4
+  }
+}

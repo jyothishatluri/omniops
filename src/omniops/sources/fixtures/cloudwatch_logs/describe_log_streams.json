@@ -1,0 +1,22 @@
+{
+  "logStreams": [
+    {
+      "storedBytes": 0,
+      "arn": "arn:aws:logs:us-east-1:123456789012:log-group:my-log-group-1:log-stream:my-log-stream-1",
+      "creationTime": 1393545600000,
+      "firstEventTimestamp": 1393545600000,
+      "lastEventTimestamp": 1393567800000,
+      "lastIngestionTime": 1393589200000,
+      "logStreamName": "my-log-stream-1"
+    },
+    {
+      "storedBytes": 0,
+      "arn": "arn:aws:logs:us-east-1:123456789012:log-group:my-log-group-2:log-stream:my-log-stream-2",
+      "creationTime": 1396224000000,
+      "firstEventTimestamp": 1396224000000,
+      "lastEventTimestamp": 1396235500000,
+      "lastIngestionTime": 1396225560000,
+      "logStreamName": "my-log-stream-2"
+    }
+  ]
+}

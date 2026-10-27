@@ -1,0 +1,61 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {
+              "timestamp": 1759322520000,
+              "event": "open",
+              "incidentId": 4129812340,
+              "title": "checkout-service error rate > 5% for 5 minutes",
+              "priority": "critical",
+              "conditionId": 1284850,
+              "conditionName": "High error rate",
+              "policyId": 707052,
+              "policyName": "Checkout golden signals",
+              "entity.guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "entity.name": "checkout-service",
+              "entity.type": "APPLICATION",
+              "targetName": "checkout-service",
+              "openTime": 1759322520000,
+              "closeTime": null,
+              "degradationTime": 1759322220000,
+              "evaluationType": "threshold",
+              "operator": ">",
+              "threshold": 5.0,
+              "nrqlQuery": "SELECT percentage(count(*), WHERE error IS TRUE) FROM Transaction WHERE appName = 'checkout-service'",
+              "runbookUrl": "https://example.com/runbooks/checkout-errors",
+              "muted": false,
+              "accountId": 1,
+              "type": "Incident"
+            },
+            {
+              "timestamp": 1759324320000,
+              "event": "close",
+              "incidentId": 4129812340,
+              "title": "checkout-service error rate > 5% for 5 minutes",
+              "priority": "critical",
+              "conditionId": 1284850,
+              "conditionName": "High error rate",
+              "policyId": 707052,
+              "policyName": "Checkout golden signals",
+              "entity.guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "entity.name": "checkout-service",
+              "entity.type": "APPLICATION",
+              "targetName": "checkout-service",
+              "openTime": 1759322520000,
+              "closeTime": 1759324320000,
+              "closeCause": "CONDITION_RECOVERED",
+              "recoveryTime": 1759324200000,
+              "evaluationType": "threshold",
+              "muted": false,
+              "accountId": 1,
+              "type": "Incident"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

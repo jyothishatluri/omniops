@@ -1,0 +1,65 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 42,
+    "locale": "en_US",
+    "query": "fetch logs | summarize value = count(), by: { ts = bin(timestamp, 60s), group_value = loglevel }",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 125000,
+    "scannedBytes": 52428800,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "ts": "2026-10-01T11:40:00.000000000Z",
+    "group_value": "ERROR",
+    "value": "12"
+   },
+   {
+    "ts": "2026-10-01T11:40:00.000000000Z",
+    "group_value": "INFO",
+    "value": "340"
+   },
+   {
+    "ts": "2026-10-01T11:41:00.000000000Z",
+    "group_value": "ERROR",
+    "value": "97"
+   },
+   {
+    "ts": "2026-10-01T11:41:00.000000000Z",
+    "group_value": "INFO",
+    "value": "331"
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     3
+    ],
+    "mappings": {
+     "ts": {
+      "type": "timestamp"
+     },
+     "group_value": {
+      "type": "string"
+     },
+     "value": {
+      "type": "long"
+     }
+    }
+   }
+  ]
+ }
+}

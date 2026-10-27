@@ -1,0 +1,3 @@
+[
+  {"id": 81, "name": "PHP_Node", "type": "Other", "tierId": 70, "tierName": "PHP_Tier", "machineId": 65, "machineName": "232fe50b8f9c", "machineOSType": "Linux", "machineAgentPresent": false, "appAgentPresent": true, "appAgentVersion": "Proxy v4.2.0.0 GA SHA-1:.c86ec090f4ff77195df065fe56dade4dfc3913aa #9909 8869-master-build", "ipAddresses": {"ipAddresses": ["fe80:0:0:0:42:acff:fe11:2%eth0", "172.17.0.2"]}, "agentType": "PHP_APP_AGENT"}
+]

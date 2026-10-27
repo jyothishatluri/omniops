@@ -1,0 +1,26 @@
+{
+ "query": {
+  "calculations": [{"op": "COUNT"}, {"op": "P99", "column": "duration_ms"}],
+  "breakdowns": ["name"],
+  "orders": [{"op": "COUNT", "order": "descending"}],
+  "limit": 100,
+  "start_time": 1617977760,
+  "end_time": 1617977880,
+  "granularity": 60
+ },
+ "id": "sGUnkBHgRFN",
+ "complete": true,
+ "data": {
+  "series": [
+   {"time": "2021-04-09T14:16:00Z", "data": {"COUNT": 1, "P99(duration_ms)": 210, "name": "TestGoogleCallbackLogin", "test.classname": "github.com/honeycombio/hound/cmd/poodle/handlers", "test.status": "passed"}},
+   {"time": "2021-04-09T14:17:00Z", "data": {"COUNT": 77481, "P99(duration_ms)": 857.0309715273646, "name": "TestGoogleCallbackLogin", "test.classname": "github.com/honeycombio/hound/cmd/poodle/handlers", "test.status": "passed"}}
+  ],
+  "results": [
+   {"data": {"COUNT": 77482, "P99(duration_ms)": 857.0309715273646, "name": "TestGoogleCallbackLogin", "test.classname": "github.com/honeycombio/hound/cmd/poodle/handlers", "test.status": "passed"}}
+  ]
+ },
+ "links": {
+  "query_url": "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/HprJhV1fYy",
+  "graph_image_url": "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/HprJhV1fYy/snapshot"
+ }
+}

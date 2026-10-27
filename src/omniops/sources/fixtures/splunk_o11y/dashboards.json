@@ -1,0 +1,123 @@
+{
+ "count": 0,
+ "results": [
+  {
+   "authorizedWriters": {
+    "teams": [
+     "ZZZZ4",
+     "Z2X"
+    ],
+    "users": [
+     "YXXX",
+     "XYYY"
+    ]
+   },
+   "chartDensity": "DEFAULT",
+   "charts": [
+    {
+     "chartId": "XY1XX5",
+     "column": 5,
+     "height": 2,
+     "row": 10,
+     "width": 7
+    }
+   ],
+   "created": 1641024000000,
+   "creator": "XXYYX",
+   "customProperties": "string",
+   "description": "Latency measurements",
+   "eventOverlays": [
+    {
+     "eventColorIndex": 5,
+     "eventLine": true,
+     "eventSignal": {
+      "eventSearchText": "ValueExceeded",
+      "eventType": "detectorEvents"
+     },
+     "sources": [
+      {
+       "NOT": false,
+       "property": "datacenter",
+       "value": [
+        "Paris",
+        "London"
+       ]
+      }
+     ]
+    }
+   ],
+   "filters": {
+    "sources": [
+     {
+      "NOT": false,
+      "property": "host",
+      "value": [
+       "host5",
+       "host6"
+      ]
+     }
+    ],
+    "time": {
+     "end": 1647943200000,
+     "start": 1647936000000
+    },
+    "variables": [
+     {
+      "alias": "Europe",
+      "preferredSuggestions": [
+       "Europe",
+       "Asia"
+      ],
+      "property": "datacenter",
+      "required": true,
+      "restricted": true,
+      "value": [
+       "London",
+       "Paris"
+      ]
+     }
+    ]
+   },
+   "groupId": "YYXXYY",
+   "id": "ZZZXXXX",
+   "lastUpdated": 1647990000000,
+   "lastUpdatedBy": "XXXX888",
+   "maxDelayOverride": 1000,
+   "name": "Latency",
+   "permissions": {
+    "acl": [
+     {
+      "actions": [
+       "READ"
+      ],
+      "principalId": "string",
+      "principalType": "USER"
+     }
+    ],
+    "parent": "string"
+   },
+   "selectedEventOverlays": [
+    {
+     "eventSignal": {
+      "eventSearchText": "ValueExceeded",
+      "eventType": "detectorEvents"
+     },
+     "overlayId": "E5",
+     "sources": [
+      {
+       "NOT": false,
+       "property": "datacenter",
+       "value": [
+        "Paris",
+        "London"
+       ]
+      }
+     ]
+    }
+   ],
+   "tags": [
+    "string"
+   ]
+  }
+ ]
+}

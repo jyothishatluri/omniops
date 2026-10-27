@@ -1,0 +1,18 @@
+{
+  "data": {
+    "attributes": {
+      "ingested_tags": [
+        "env:prod",
+        "service:web",
+        "version:1.0"
+      ],
+      "tags": [
+        "sport:golf",
+        "sport:football",
+        "animal:dog"
+      ]
+    },
+    "id": "test.metric.latency",
+    "type": "metrics"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "buckets": [
+    {
+      "name": "projects/my-project/locations/global/buckets/_Default",
+      "description": "Default bucket",
+      "retentionDays": 30,
+      "lifecycleState": "ACTIVE",
+      "updateTime": "2026-01-15T09:00:00Z"
+    },
+    {
+      "name": "projects/my-project/locations/global/buckets/_Required",
+      "description": "Audit bucket",
+      "retentionDays": 400,
+      "locked": true,
+      "lifecycleState": "ACTIVE"
+    }
+  ],
+  "nextPageToken": ""
+}

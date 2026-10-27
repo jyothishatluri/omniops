@@ -1,0 +1,18 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "attributes": {"http": {"status_code": 504}},
+        "host": "ip-10-0-1-23",
+        "message": "upstream request timeout",
+        "service": "checkout",
+        "status": "error",
+        "tags": ["env:prod"],
+        "timestamp": "2026-10-01T11:02:03.000Z"
+      },
+      "id": "AAAAAZtimeoutPartial0001",
+      "type": "log"
+    }
+  ],
+  "meta": {"elapsed": 30000, "page": {}, "request_id": "req-timeout", "status": "timeout"}
+}

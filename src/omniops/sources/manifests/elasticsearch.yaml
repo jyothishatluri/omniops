@@ -1,0 +1,1400 @@
+# Elasticsearch REST API (8.x / 9.x, Elastic Cloud Hosted, Serverless, self-managed).
+# Logs, APM traces/errors, metrics, alerts-as-data, ES|QL and index inventory over direct REST.
+# Research notes, endpoint table and doc links: docs/sources/elasticsearch.md
+source: elasticsearch
+display_name: Elasticsearch
+vendor: Elastic N.V.
+description: >-
+  Elasticsearch search/ES|QL/aggregation APIs over logs-*, traces-apm*, metrics-* and the Kibana
+  alerts-as-data indices, plus index/data-stream/cluster inventory.
+docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/
+categories: [logs, traces, metrics, alerts, errors, inventory]
+base_url: "{{ env.ELASTICSEARCH_URL }}"
+env:
+  - {name: ELASTICSEARCH_URL, description: "Base URL incl. port, e.g. https://my-deployment.es.us-central1.gcp.cloud.es.io:443 or http://localhost:9200 (no trailing slash)"}
+  - {name: ELASTICSEARCH_API_KEY, description: "Encoded API key (the base64 'encoded' value from the create-API-key response); sent as 'Authorization: ApiKey <key>'", secret: true}
+  - {name: ELASTICSEARCH_USERNAME, description: "Basic-auth user (used only when no API key is set)"}
+  - {name: ELASTICSEARCH_PASSWORD, description: "Basic-auth password", secret: true}
+  - {name: ELASTICSEARCH_LOGS_INDEX, description: "Default index pattern(s) for log search", default: "logs-*,filebeat-*,logstash-*"}
+  - {name: ELASTICSEARCH_APM_TRACES_INDEX, description: "APM transaction/span index pattern", default: "traces-apm*"}
+  - {name: ELASTICSEARCH_APM_ERRORS_INDEX, description: "APM error index pattern", default: "logs-apm.error-*"}
+  - {name: KIBANA_URL, description: "Optional Kibana URL, only used to build UI deep links"}
+required_env: [ELASTICSEARCH_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('ApiKey ' ~ env.ELASTICSEARCH_API_KEY) if env.ELASTICSEARCH_API_KEY
+      else (('Basic ' ~ ((env.ELASTICSEARCH_USERNAME ~ ':' ~ (env.ELASTICSEARCH_PASSWORD or '')) | b64)) if env.ELASTICSEARCH_USERNAME else None) }}
+headers:
+  Content-Type: application/json
+rate_limit:
+  concurrency: 4
+  notes: >-
+    No fixed request quota. Overload shows up as HTTP 429 es_rejected_execution_exception (search
+    thread-pool queue full) or circuit_breaking_exception: narrow the index pattern / time range,
+    do not retry in a tight loop.
+retention:
+  logs: "set by ILM / data stream lifecycle (logs@lifecycle default: no delete)"
+  apm_traces: 10d (traces-apm default ILM)
+  apm_errors: 10d (logs-apm.error default ILM)
+  apm_metrics: 90d (metrics-apm.* default ILM)
+errors:
+  - {path: "$._shards.failures", non_empty: true, message: "$._shards.failures[0].reason.reason", hint: "some shards failed (often a field mapped differently across indices or a bad query_string): results are PARTIAL; fix the query or narrow the index pattern"}
+  - {path: "$.timed_out", equals: true, message: "$.timed_out", hint: "search timed out on at least one shard: results are partial; narrow the time window or index pattern"}
+ui_base_url: "{{ env.KIBANA_URL }}"
+query_languages:
+  lucene_query_string: >-
+    Elasticsearch query_string (Lucene) syntax, default operator AND. field:value, field:"exact
+    phrase", wildcards field:abc*, ranges http.response.status_code:[500 TO 599], boolean AND/OR/NOT,
+    _exists_:field. Field names are ECS (service.name, log.level, host.name, trace.id,
+    kubernetes.namespace, event.outcome). Reserved characters + - = && || > < ! ( ) { } [ ] ^ " ~ * ? : \ /
+    must be escaped with a backslash inside values.
+  esql: >-
+    ES|QL piped language: FROM <index pattern> | WHERE <cond> | EVAL x = ... | STATS agg BY keys |
+    SORT col DESC | LIMIT n. Comparisons use == and string literals use double quotes:
+    WHERE log.level == "error" AND service.name == "checkout-api". Time buckets:
+    STATS c = COUNT(*) BY ts = BUCKET(@timestamp, 1 minute). Full-text: WHERE MATCH(message, "timeout").
+    Default result limit is 1000 rows unless LIMIT is given (hard cap 10000).
+pitfalls:
+  - "An unknown field or a wrong index pattern returns 0 hits, not an error. Confirm the pattern with elasticsearch_data_streams / elasticsearch_indices and field names with elasticsearch_field_caps before concluding 'no errors'."
+  - "Field names differ by shipper: ECS (service.name, log.level, host.name, trace.id) for Elastic Agent/APM/Beats; OTel-native data streams (*.otel-*) store resource.attributes.service.name, severity_text, body.text, trace_id/span_id (Elasticsearch exposes ECS-style aliases for many of them). The canonical columns coalesce both."
+  - "keyword fields are case-sensitive: log.level 'error' does not match 'ERROR'. text fields do not match exact terms; use the .keyword sub-field or query_string."
+  - "APM traces are head-sampled: counts from traces-apm* are SAMPLED counts. For true throughput/error rate query metrics-apm.service_transaction.1m-* (or use the ratio, not the absolute count)."
+  - "Durations: APM transaction.duration.us / span.duration.us are MICROseconds; OTel 'duration' is NANOseconds; kibana.alert.duration.us is microseconds. Columns named duration_ms are already converted."
+  - "Hidden / dot-prefixed indices (.alerts-*, .internal.alerts-*) need expand_wildcards=open,hidden or a pattern that starts with a dot."
+  - "Cross-cluster search: prefix patterns with the remote cluster alias (remote:logs-*); results from unavailable remotes are silently skipped when skip_unavailable is true."
+
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_search
+    title: Document / log search (_search, Query DSL)
+    description: >-
+      Search documents (logs, events, any index) with the Query DSL. One row per hit, newest first.
+      Time range is pushed down as a range filter on @timestamp (or time_field). Optional pushdown:
+      query (Lucene query_string), service, env, host, level, trace_id, index_pattern. Canonical
+      columns are coalesced from the fields API and from nested or dotted _source keys; every other
+      _source key is flattened into extra columns (dots -> underscores, e.g. http_response_status_code).
+    kind: logs
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.ELASTICSEARCH_LOGS_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: "{{ [limit or 500, 1000] | min }}"
+        track_total_hits: false
+        sort:
+          - "{{ filters.time_field or '@timestamp' }}": {order: desc, unmapped_type: date}
+        query:
+          bool:
+            filter:
+              - range:
+                  "{{ filters.time_field or '@timestamp' }}":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND', 'analyze_wildcard': true} } if filters.query else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'service.name': filters.service | as_list} }, {'terms': {'service.name.keyword': filters.service | as_list} }, {'terms': {'resource.attributes.service.name': filters.service | as_list} }], 'minimum_should_match': 1} } if filters.service else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'service.environment': filters.env | as_list} }, {'terms': {'resource.attributes.deployment.environment': filters.env | as_list} }], 'minimum_should_match': 1} } if filters.env else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'host.name': filters.host | as_list} }, {'terms': {'host.hostname': filters.host | as_list} }, {'terms': {'resource.attributes.host.name': filters.host | as_list} }], 'minimum_should_match': 1} } if filters.host else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'log.level': filters.level | as_list} }, {'terms': {'severity_text': filters.level | as_list} }], 'minimum_should_match': 1} } if filters.level else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'trace.id': filters.trace_id | as_list} }, {'terms': {'trace_id': filters.trace_id | as_list} }], 'minimum_should_match': 1} } if filters.trace_id else None }}"
+        fields:
+          - "@timestamp"
+          - "{{ filters.time_field }}"
+          - message
+          - body.text
+          - event.original
+          - error.message
+          - log.level
+          - severity_text
+          - service.name
+          - service.environment
+          - resource.attributes.service.name
+          - resource.attributes.deployment.environment
+          - host.name
+          - host.hostname
+          - resource.attributes.host.name
+          - kubernetes.pod.name
+          - kubernetes.namespace
+          - resource.attributes.k8s.pod.name
+          - resource.attributes.k8s.namespace.name
+          - container.name
+          - trace.id
+          - trace_id
+          - span.id
+          - span_id
+          - data_stream.dataset
+          - event.dataset
+          - http.response.status_code
+    filters:
+      - {column: query, description: "Lucene query_string (default operator AND), e.g. message:\"connection refused\" AND NOT log.level:debug", examples: ['message:"connection refused" AND kubernetes.namespace:prod']}
+      - {column: index_pattern, description: "Index / data stream / alias pattern(s), comma separated (default ELASTICSEARCH_LOGS_INDEX)", examples: ["logs-*"]}
+      - {column: time_field, description: "Date field for the time range and sort (default @timestamp)", examples: ["@timestamp"]}
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "service.name (ECS) or resource.attributes.service.name (OTel), exact", examples: ["checkout-api"]}
+      - {column: env, ops: ["=", "in"], fan_out: false, description: "service.environment / deployment.environment, exact", examples: ["production"]}
+      - {column: host, ops: ["=", "in"], fan_out: false, variants: hostname, description: "host.name / host.hostname, exact", examples: ["ip-10-0-1-23"]}
+      - {column: level, ops: ["=", "in"], fan_out: false, description: "log.level / severity_text, exact and case-sensitive (usually lowercase for ECS loggers)", examples: ["error"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "trace.id / trace_id", examples: ["85925e55b43f4340aaaaaaaaaaaaaaaa"]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    pagination: {type: cursor, cursor_path: "$.hits.hits[-1].sort", cursor_param: body.search_after, max_pages: 3}
+    response:
+      rows_path: "$.hits.hits[*]"
+      dynamic: "_source"
+      dynamic_max_columns: 60
+    columns:
+      - name: ts
+        type: TIMESTAMP
+        transform: auto_time
+        description: "Event time (@timestamp or time_field), UTC"
+        expr: >-
+          ((_['fields'] or {})[filters.time_field or '@timestamp'] or [none])[0] or _['_source'][filters.time_field or '@timestamp']
+      - {name: index, path: "_index", description: "Concrete (backing) index of the hit, e.g. .ds-logs-nginx.access-default-2026.10.01-000003"}
+      - {name: id, path: "_id"}
+      - name: message
+        description: "message / body.text (OTel) / error.message / event.original"
+        expr: >-
+          ((_['fields'] or {})['message'] or [none])[0] or _['_source']['message'] or ((_['fields'] or {})['body.text'] or [none])[0]
+          or _['_source']['body']['text'] or ((_['fields'] or {})['error.message'] or [none])[0] or _['_source']['error']['message']
+          or ((_['fields'] or {})['event.original'] or [none])[0]
+      - name: level
+        description: "log.level (ECS) or severity_text (OTel)"
+        expr: >-
+          ((_['fields'] or {})['log.level'] or [none])[0] or _['_source']['log']['level'] or _['_source']['log.level']
+          or ((_['fields'] or {})['severity_text'] or [none])[0] or _['_source']['severity_text']
+      - name: service
+        description: "service.name / resource.attributes.service.name"
+        expr: >-
+          ((_['fields'] or {})['service.name'] or [none])[0] or _['_source']['service']['name'] or _['_source']['service.name']
+          or ((_['fields'] or {})['resource.attributes.service.name'] or [none])[0]
+      - name: env
+        description: "service.environment / resource.attributes.deployment.environment"
+        expr: >-
+          ((_['fields'] or {})['service.environment'] or [none])[0] or _['_source']['service']['environment']
+          or ((_['fields'] or {})['resource.attributes.deployment.environment'] or [none])[0]
+      - name: host
+        description: "host.name / host.hostname / resource.attributes.host.name"
+        expr: >-
+          ((_['fields'] or {})['host.name'] or [none])[0] or _['_source']['host']['name'] or _['_source']['host.name']
+          or ((_['fields'] or {})['host.hostname'] or [none])[0] or _['_source']['host']['hostname']
+          or ((_['fields'] or {})['resource.attributes.host.name'] or [none])[0]
+      - name: pod
+        expr: >-
+          ((_['fields'] or {})['kubernetes.pod.name'] or [none])[0] or _['_source']['kubernetes']['pod']['name']
+          or ((_['fields'] or {})['resource.attributes.k8s.pod.name'] or [none])[0]
+      - name: namespace
+        expr: >-
+          ((_['fields'] or {})['kubernetes.namespace'] or [none])[0] or _['_source']['kubernetes']['namespace']
+          or ((_['fields'] or {})['resource.attributes.k8s.namespace.name'] or [none])[0]
+      - name: container
+        expr: >-
+          ((_['fields'] or {})['container.name'] or [none])[0] or _['_source']['container']['name']
+      - name: trace_id
+        expr: >-
+          ((_['fields'] or {})['trace.id'] or [none])[0] or _['_source']['trace']['id'] or ((_['fields'] or {})['trace_id'] or [none])[0]
+          or _['_source']['trace_id']
+      - name: span_id
+        expr: >-
+          ((_['fields'] or {})['span.id'] or [none])[0] or _['_source']['span']['id'] or ((_['fields'] or {})['span_id'] or [none])[0]
+          or _['_source']['span_id']
+      - name: dataset
+        description: "data_stream.dataset / event.dataset"
+        expr: >-
+          ((_['fields'] or {})['data_stream.dataset'] or [none])[0] or _['_source']['data_stream']['dataset']
+          or ((_['fields'] or {})['event.dataset'] or [none])[0] or _['_source']['event']['dataset']
+      - name: status_code
+        type: BIGINT
+        description: "http.response.status_code"
+        expr: >-
+          ((_['fields'] or {})['http.response.status_code'] or [none])[0] or _['_source']['http']['response']['status_code']
+      - {name: doc, type: JSON, path: "_source", description: "Full _source document; use doc->>'$.http.request.method' style JSON paths"}
+      - {name: query, filter_only: true, description: "Lucene query_string"}
+      - {name: index_pattern, filter_only: true, description: "Index pattern searched"}
+      - {name: time_field, filter_only: true, description: "Date field used for time range"}
+    max_rows: 3000
+    sort_hint: "newest first (sorted server-side on the time field)"
+    pitfalls:
+      - "query uses Lucene query_string, not KQL: write service.name:checkout-api AND log.level:error (KQL's 'and'/'or' lowercase and ':' wildcard semantics differ)."
+      - "A query_string referencing a field that is text in one index and keyword in another can fail on some shards; the engine reports this as a partial-result error."
+      - "Use the canonical service/level/host filters instead of putting them in query: they are matched against both ECS and OTel field names."
+      - "For volume questions (how many errors per minute) use elasticsearch_log_counts, not COUNT(*) over this table (it returns at most a few thousand hits)."
+    examples:
+      - sql: >-
+          SELECT ts, service, host, level, message, trace_id FROM elasticsearch_search
+          WHERE service = 'checkout-api' AND level = 'error'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Latest error logs of one service during the incident window.
+      - sql: >-
+          SELECT host, count(*) AS n, min(ts) AS first_seen, max(ts) AS last_seen FROM elasticsearch_search
+          WHERE query = 'message:"connection refused" AND kubernetes.namespace:prod' AND index_pattern = 'logs-*'
+          GROUP BY host ORDER BY n DESC
+        description: Which hosts log 'connection refused', and since when.
+      - sql: >-
+          SELECT ts, status_code, message, doc->>'$.url.path' AS path FROM elasticsearch_search
+          WHERE index_pattern = 'logs-nginx.access-*' AND query = 'http.response.status_code:[500 TO 599]' LIMIT 100
+        description: 5xx access-log lines with the request path from the raw document.
+    fixtures:
+      - file: search_response.json
+        note: "Verbatim example response of the Search API reference (operation-search); nested _source, no fields section."
+        expect_rows: 1
+        expect_columns: {ts: "2099-11-15T14:12:12Z", index: my-index-000001, id: "0", message: "GET /search HTTP/1.1 200 1070000", status_code: 200, doc: {not_null: true}}
+      - file: search_fields_response.json
+        note: "Verbatim example response from 'Retrieve selected fields' (fields API, @timestamp as epoch_millis string, _source disabled)."
+        expect_rows: 1
+        expect_columns: {ts: "2099-11-15T14:12:12Z", id: "0", status_code: 200}
+      - file: search_shard_failure.json
+        note: "Built strictly from the documented search response schema (_shards: ShardStatistics with failures[] of ShardFailure {shard, index, node, reason: ErrorCause {type, reason} }): a 200 with failed shards must raise, not look like 'no matching logs'."
+        expect_error: "failed to create query"
+      - file: search_timed_out.json
+        note: "Built strictly from the documented search response schema (timed_out: true with partial hits)."
+        expect_error: "search timed out"
+    ui_link: >-
+      {{ (env.KIBANA_URL ~ "/app/discover#/?_g=(time:(from:'" ~ (time.start | rfc3339_ms) ~ "',to:'" ~ (time.end | rfc3339_ms) ~ "'))") if env.KIBANA_URL else '' }}
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-search
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_esql
+    title: ES|QL query (POST /_query)
+    description: >-
+      Run an ES|QL query. One row per result row; every output column becomes a SQL column
+      (dots -> underscores) and the whole row is also available as JSON in `result` with the
+      original column names. The analysis time window is applied as a Query DSL `filter` (range on
+      @timestamp or time_field) so the FROM clause does not need its own time WHERE. ts is taken
+      from an output column named @timestamp, ts, bucket, time or timestamp when present.
+    kind: generic
+    request:
+      method: POST
+      path: /_query
+      body:
+        query: "{{ filters.query }}"
+        columnar: true
+        filter: "{{ None if filters.time_field == 'none' else {'range': {(filters.time_field or '@timestamp'): {'gte': (time.start | rfc3339_ms), 'lte': (time.end | rfc3339_ms), 'format': 'strict_date_optional_time'} } } }}"
+    filters:
+      - {column: query, required: true, description: "ES|QL query starting with FROM (or TS for time-series data streams, ROW / SHOW for constants)", examples: ['FROM logs-* | WHERE log.level == "error" | STATS errors = COUNT(*) BY ts = BUCKET(@timestamp, 1 minute), service.name | SORT ts']}
+      - {column: time_field, description: "Date field used for the window filter (default @timestamp; 'none' disables the filter for indices without a time field)", examples: ["@timestamp"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, reapply: false}
+    response:
+      rows_path: "$"
+      expand:
+        - {columnar: {columns: "$.columns", data: "$.values", orientation: column}, as: r}
+      dynamic: "@r"
+      dynamic_max_columns: 60
+      errors:
+        - {path: "$.is_partial", equals: true, message: "$.is_partial", hint: "ES|QL returned partial results (shard or remote-cluster failure): do not treat missing rows as absence"}
+    columns:
+      - name: ts
+        type: TIMESTAMP
+        transform: auto_time
+        description: "From output column @timestamp / ts / bucket / time / timestamp if present, else null"
+        expr: "r['@timestamp'] or r['ts'] or r['bucket'] or r['time'] or r['timestamp']"
+      - {name: result, type: JSON, path: "@r", description: "The full result row keyed by ES|QL column names: result->>'service.name'"}
+      - {name: query, filter_only: true}
+      - {name: time_field, filter_only: true}
+    max_rows: 10000
+    pitfalls:
+      - "ES|QL silently caps results at 1000 rows without LIMIT (max 10000). Aggregate with STATS in ES|QL instead of fetching raw rows."
+      - "The window filter is a range on @timestamp: documents without that field (inventory / lookup indices) are excluded, so querying them returns 0 rows unless time_field = 'none'."
+      - "The ts predicate only sets the server-side window filter (reapply: false): it is not re-applied in SQL, so STATS results without a time column (ts = null) and BUCKET rows starting just before the window are kept."
+      - "Unknown fields are a 400 verification_exception (loud), unlike Query DSL which silently matches nothing."
+      - "String literals use double quotes inside ES|QL; equality is ==. Escape single quotes when embedding in the SQL string literal."
+      - "Multi-valued fields come back as JSON arrays."
+    examples:
+      - sql: >-
+          SELECT ts, result->>'service.name' AS service, CAST(result->>'errors' AS BIGINT) AS errors FROM elasticsearch_esql
+          WHERE query = 'FROM logs-* | WHERE log.level == "error" | STATS errors = COUNT(*) BY ts = BUCKET(@timestamp, 1 minute), service.name | SORT ts'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+        description: Error log counts per minute and service (server-side aggregation).
+      - sql: >-
+          SELECT result->>'service.name' AS service, CAST(result->>'p95_us' AS DOUBLE) / 1000 AS p95_ms, CAST(result->>'failure_rate' AS DOUBLE) AS failure_rate
+          FROM elasticsearch_esql
+          WHERE query = 'FROM traces-apm* | WHERE processor.event == "transaction" | EVAL failed = CASE(event.outcome == "failure", 1, 0) | STATS p95_us = PERCENTILE(transaction.duration.us, 95), failure_rate = AVG(failed) BY service.name | SORT failure_rate DESC | LIMIT 20'
+        description: Per-service p95 latency and failure rate from APM transactions.
+    fixtures:
+      - file: esql_columnar.json
+        note: "Verbatim example response from the ES|QL REST API page ('columnar': true results)."
+        expect_rows: 5
+        expect_columns: {ts: null, author: "Peter F. Hamilton", page_count: 768, release_date: "2004-03-02T00:00:00.000Z"}
+      - file: esql_partial.json
+        note: "Built strictly from the documented ES|QL response schema (took, is_partial, columns, values; columnar layout): is_partial = true must fail loudly instead of returning a silently incomplete result."
+        expect_error: "ES|QL returned partial results"
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-esql-query
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_log_counts
+    title: Document counts over time (date_histogram [+ terms])
+    description: >-
+      Count matching documents per time bucket (auto interval, ~120 buckets, empty buckets
+      included) and optionally per top-N value of group_by (e.g. service.name, log.level,
+      host.name). One row per (bucket, group). Use for 'when did errors start / which service spiked'.
+    kind: timeseries
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.ELASTICSEARCH_LOGS_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 0
+        track_total_hits: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "{{ filters.time_field or '@timestamp' }}":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND', 'analyze_wildcard': true} } if filters.query else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'service.name': filters.service | as_list} }, {'terms': {'service.name.keyword': filters.service | as_list} }, {'terms': {'resource.attributes.service.name': filters.service | as_list} }], 'minimum_should_match': 1} } if filters.service else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'log.level': filters.level | as_list} }, {'terms': {'severity_text': filters.level | as_list} }], 'minimum_should_match': 1} } if filters.level else None }}"
+        aggs:
+          h:
+            date_histogram:
+              field: "{{ filters.time_field or '@timestamp' }}"
+              fixed_interval: "{{ time.step_s }}s"
+              min_doc_count: 0
+              extended_bounds:
+                min: "{{ time.start | epoch_ms }}"
+                max: "{{ time.end | epoch_ms }}"
+            aggs: "{{ {'g': {'terms': {'field': filters.group_by, 'size': (filters.top or 10) | int} } } if filters.group_by else None }}"
+    filters:
+      - {column: query, description: "Lucene query_string selecting the documents to count", examples: ['log.level:error']}
+      - {column: index_pattern, description: "Index pattern (default ELASTICSEARCH_LOGS_INDEX)", examples: ["logs-*"]}
+      - {column: time_field, description: "Date field (default @timestamp)"}
+      - {column: group_by, description: "keyword field to split by (top-N per bucket), e.g. service.name, log.level, host.name, kubernetes.namespace", examples: ["service.name"]}
+      - {column: top, type: BIGINT, description: "Top-N groups per bucket (default 10)", examples: ["10"]}
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "service.name filter", examples: ["checkout-api"]}
+      - {column: level, ops: ["=", "in"], fan_out: false, description: "log.level / severity_text filter", examples: ["error"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, target_points: 120, min_step: 10s}
+    response:
+      rows_path: "$.aggregations.h.buckets[*]"
+      expand:
+        - {explode: "g.buckets", as: g, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "key", transform: epoch_ms, description: "Bucket start (UTC)"}
+      - {name: group_key, path: "@g.key", description: "Value of group_by (null when not grouped or bucket empty)"}
+      - {name: value, type: BIGINT, expr: "g.doc_count if g else _['doc_count']", description: "Number of documents in the bucket / group"}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: time_field, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+      - {name: service, filter_only: true}
+      - {name: level, filter_only: true}
+    zero_fill: true
+    pitfalls:
+      - "Top-N groups are chosen per bucket (terms inside date_histogram): a group missing from a bucket means 0 or 'not in that bucket's top N'; zero_fill inserts 0 for missing groups."
+      - "group_by must be a keyword/aggregatable field (use field_caps); a text field fails with 'Fielddata is disabled'. Use the .keyword sub-field for dynamically mapped strings."
+      - "Bucket keys are aligned to the interval from the epoch, so the first/last buckets can be partial."
+    examples:
+      - sql: >-
+          SELECT ts, group_key AS service, value AS errors FROM elasticsearch_log_counts
+          WHERE level = 'error' AND group_by = 'service.name'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Error log volume per service over two hours (find the first spike).
+      - sql: >-
+          SELECT ts, value FROM elasticsearch_log_counts
+          WHERE query = 'message:"OutOfMemoryError"' AND index_pattern = 'logs-*' ORDER BY ts
+        description: Occurrences of a specific message over the default window.
+    fixtures:
+      - file: date_histogram.json
+        note: "Date histogram API docs example response (aggregation renamed sales_over_time -> h, elided '...' removed)."
+        expect_rows: 3
+        expect_columns: {ts: "2015-01-01T00:00:00Z", value: 3, group_key: null}
+      - file: date_histogram_grouped.json
+        filters: {group_by: service.name}
+        note: "Built from the documented date_histogram bucket shape with a documented terms sub-aggregation (g) inside each bucket; values illustrative."
+        expect_rows: 5
+        expect_columns: {ts: "2015-01-01T00:00:00Z", group_key: checkout-api, value: 2}
+    docs_url: https://www.elastic.co/docs/reference/aggregations/search-aggregations-bucket-datehistogram-aggregation
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_metric_histogram
+    title: Numeric field statistic over time (date_histogram + avg/max/percentiles)
+    description: >-
+      Aggregate a numeric field per time bucket: avg | min | max | sum | cardinality | value_count |
+      percentiles (with percentile). Optional group_by keyword field (top-N per bucket). Works on
+      metrics-* (system.cpu.total.norm.pct, kubernetes.pod.memory.usage.bytes ...), APM
+      (transaction.duration.us) or any numeric log field. One row per (bucket, group).
+    kind: timeseries
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or 'metrics-*' }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 0
+        track_total_hits: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "{{ filters.time_field or '@timestamp' }}":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND', 'analyze_wildcard': true} } if filters.query else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'service.name': filters.service | as_list} }, {'terms': {'resource.attributes.service.name': filters.service | as_list} }], 'minimum_should_match': 1} } if filters.service else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'host.name': filters.host | as_list} }, {'terms': {'resource.attributes.host.name': filters.host | as_list} }], 'minimum_should_match': 1} } if filters.host else None }}"
+        aggs:
+          h:
+            date_histogram:
+              field: "{{ filters.time_field or '@timestamp' }}"
+              fixed_interval: "{{ time.step_s }}s"
+              min_doc_count: 0
+              extended_bounds:
+                min: "{{ time.start | epoch_ms }}"
+                max: "{{ time.end | epoch_ms }}"
+            aggs:
+              m: "{{ None if filters.group_by else {(filters.agg or 'avg'): ({'field': filters.metric_field, 'percents': [(filters.percentile or 95) | float]} if filters.agg == 'percentiles' else {'field': filters.metric_field})} }}"
+              g: "{{ {'terms': {'field': filters.group_by, 'size': (filters.top or 10) | int}, 'aggs': {'m': {(filters.agg or 'avg'): ({'field': filters.metric_field, 'percents': [(filters.percentile or 95) | float]} if filters.agg == 'percentiles' else {'field': filters.metric_field})} } } if filters.group_by else None }}"
+    filters:
+      - {column: metric_field, required: true, description: "Numeric field to aggregate", examples: ["system.cpu.total.norm.pct"]}
+      - {column: agg, description: "avg (default) | min | max | sum | cardinality | value_count | percentiles", examples: ["avg"]}
+      - {column: percentile, type: DOUBLE, description: "Percentile when agg = 'percentiles' (default 95)", examples: ["95"]}
+      - {column: index_pattern, description: "Index pattern (default metrics-*)", examples: ["metrics-system.cpu-*"]}
+      - {column: query, description: "Lucene query_string to select documents", examples: ['event.dataset:system.cpu']}
+      - {column: group_by, description: "keyword field to split by, e.g. host.name, service.name", examples: ["host.name"]}
+      - {column: top, type: BIGINT, description: "Top-N groups per bucket (default 10)"}
+      - {column: time_field, description: "Date field (default @timestamp)"}
+      - {column: service, ops: ["=", "in"], fan_out: false, examples: ["checkout-api"]}
+      - {column: host, ops: ["=", "in"], fan_out: false, variants: hostname, examples: ["ip-10-0-1-23"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, target_points: 120, min_step: 10s}
+    response:
+      rows_path: "$.aggregations.h.buckets[*]"
+      expand:
+        - {explode: "g.buckets", as: g, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "key", transform: epoch_ms}
+      - {name: group_key, path: "@g.key", description: "Value of group_by (null when not grouped)"}
+      - name: value
+        type: DOUBLE
+        description: "Aggregated value (null for empty buckets; percentiles return the requested percentile)"
+        expr: >-
+          ((g['m'].get('value') if g['m'].get('value') is number else ((g['m'].get('values') or {}).values() | list | first)) if g['m'] is mapping else none) if g
+          else ((_['m'].get('value') if _['m'].get('value') is number else ((_['m'].get('values') or {}).values() | list | first)) if _['m'] is mapping else none)
+      - {name: doc_count, type: BIGINT, expr: "g.doc_count if g else _['doc_count']", description: "Documents in the bucket / group"}
+      - {name: metric_field, filter_only: true}
+      - {name: agg, filter_only: true}
+      - {name: percentile, type: DOUBLE, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+      - {name: time_field, filter_only: true}
+      - {name: service, filter_only: true}
+      - {name: host, filter_only: true}
+    pitfalls:
+      - "Units are whatever the field stores: *.pct fields are 0-1 fractions (0.93 = 93%), APM durations are microseconds, memory is bytes."
+      - "metrics-apm.* aggregated data streams store histograms / aggregate_metric_double (transaction.duration.histogram, transaction.duration.summary): avg on them needs ES|QL or the raw traces-apm* index."
+      - "Empty buckets have value null (not 0): do not read a gap as 'metric dropped to zero'."
+    examples:
+      - sql: >-
+          SELECT ts, group_key AS host, value AS cpu FROM elasticsearch_metric_histogram
+          WHERE metric_field = 'system.cpu.total.norm.pct' AND agg = 'max' AND group_by = 'host.name'
+            AND index_pattern = 'metrics-system.cpu-*' ORDER BY ts
+        description: Max normalized CPU per host over time.
+      - sql: >-
+          SELECT ts, value / 1000 AS p95_ms FROM elasticsearch_metric_histogram
+          WHERE index_pattern = 'traces-apm*' AND metric_field = 'transaction.duration.us' AND agg = 'percentiles' AND percentile = 95
+            AND query = 'processor.event:transaction' AND service = 'checkout-api' ORDER BY ts
+        description: p95 transaction latency of a service over time.
+    fixtures:
+      - file: metric_histogram.json
+        filters: {metric_field: price}
+        note: "Built from the documented date_histogram bucket shape plus the documented single-value metric sub-aggregation shape ({value}); null value as documented for empty buckets."
+        expect_rows: 3
+        expect_columns: {ts: "2015-01-01T00:00:00Z", value: 75.0, doc_count: 3, group_key: null}
+      - file: metric_histogram_percentiles.json
+        filters: {metric_field: transaction.duration.us, agg: percentiles, group_by: service.name}
+        note: "Documented date_histogram buckets with a terms sub-aggregation whose buckets carry a percentiles sub-aggregation ('values' object keyed by percent, as in the percentiles docs)."
+        expect_rows: 3
+        expect_columns: {group_key: checkout-api, value: 940.0, doc_count: 2}
+    docs_url: https://www.elastic.co/docs/reference/aggregations/search-aggregations-bucket-datehistogram-aggregation
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_top_terms
+    title: Top values of a field (terms aggregation)
+    description: >-
+      Most frequent values of a keyword field over the time window (count-descending), with an
+      optional numeric statistic per value. One row per value. Use for 'which hosts/services/error
+      messages/status codes dominate'.
+    kind: generic
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.ELASTICSEARCH_LOGS_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 0
+        track_total_hits: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "{{ filters.time_field or '@timestamp' }}":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND', 'analyze_wildcard': true} } if filters.query else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'service.name': filters.service | as_list} }, {'terms': {'resource.attributes.service.name': filters.service | as_list} }], 'minimum_should_match': 1} } if filters.service else None }}"
+        aggs:
+          t:
+            terms:
+              field: "{{ filters.field }}"
+              size: "{{ [(filters.top or limit or 20) | int, 500] | min }}"
+            aggs: "{{ {'m': {(filters.agg or 'avg'): ({'field': filters.metric_field, 'percents': [(filters.percentile or 95) | float]} if filters.agg == 'percentiles' else {'field': filters.metric_field})} } if filters.metric_field else None }}"
+    filters:
+      - {column: field, required: true, description: "keyword field to rank, e.g. service.name, host.name, error.type, url.path, http.response.status_code", examples: ["service.name"]}
+      - {column: top, type: BIGINT, description: "Number of values (default 20, max 500)", examples: ["20"]}
+      - {column: query, description: "Lucene query_string to select documents", examples: ['log.level:error']}
+      - {column: index_pattern, description: "Index pattern (default ELASTICSEARCH_LOGS_INDEX)", examples: ["logs-*"]}
+      - {column: metric_field, description: "Optional numeric field to aggregate per value"}
+      - {column: agg, description: "avg (default) | min | max | sum | cardinality | percentiles"}
+      - {column: percentile, type: DOUBLE, description: "Percentile when agg = 'percentiles'"}
+      - {column: time_field, description: "Date field (default @timestamp)"}
+      - {column: service, ops: ["=", "in"], fan_out: false, examples: ["checkout-api"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.aggregations.t.buckets[*]"
+    columns:
+      - {name: term, path: "key", description: "Field value"}
+      - {name: doc_count, type: BIGINT, path: "doc_count", description: "Matching documents with this value"}
+      - name: value
+        type: DOUBLE
+        description: "metric_field statistic for this value (null when no metric_field)"
+        expr: >-
+          (_['m'].get('value') if _['m'].get('value') is number else ((_['m'].get('values') or {}).values() | list | first)) if _['m'] is mapping else none
+      - {name: other_doc_count, type: BIGINT, path: "$.aggregations.t.sum_other_doc_count", description: "Documents whose value is outside the top N"}
+      - {name: field, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: metric_field, filter_only: true}
+      - {name: agg, filter_only: true}
+      - {name: percentile, type: DOUBLE, filter_only: true}
+      - {name: time_field, filter_only: true}
+      - {name: service, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Time window (pushdown only)"}
+    sort_hint: "count descending (server-side)"
+    pitfalls:
+      - "terms counts are approximate across shards (doc_count_error_upper_bound); fine for ranking, not for exact totals."
+      - "A text field fails with 'Fielddata is disabled on text fields': use the .keyword sub-field."
+    examples:
+      - sql: >-
+          SELECT term AS error_type, doc_count FROM elasticsearch_top_terms
+          WHERE field = 'error.type' AND query = 'log.level:error' AND service = 'checkout-api' ORDER BY doc_count DESC
+        description: Dominant error types of one service in the window.
+      - sql: >-
+          SELECT term AS endpoint, doc_count, value / 1000 AS avg_ms FROM elasticsearch_top_terms
+          WHERE index_pattern = 'traces-apm*' AND field = 'transaction.name' AND metric_field = 'transaction.duration.us'
+            AND query = 'processor.event:transaction AND event.outcome:failure' ORDER BY doc_count DESC LIMIT 10
+        description: Endpoints with the most failed transactions and their average latency.
+    fixtures:
+      - file: terms.json
+        filters: {field: genre}
+        note: "Terms aggregation docs example response (aggregation renamed genres -> t, elided '...' removed)."
+        expect_rows: 3
+        expect_columns: {term: electronic, doc_count: 6, value: null, other_doc_count: 0}
+      - file: terms_sub_agg.json
+        filters: {field: my-field, metric_field: my-other-field}
+        note: "Aggregations overview docs example of a terms aggregation with an avg sub-aggregation (my-agg-name -> t, my-sub-agg-name -> m)."
+        expect_rows: 1
+        expect_columns: {term: foo, doc_count: 5, value: 75.0}
+    docs_url: https://www.elastic.co/docs/reference/aggregations/search-aggregations-bucket-terms-aggregation
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_indices
+    title: Indices (_cat/indices)
+    description: >-
+      Index inventory with health, doc count and size (bytes). Use to check that an index pattern
+      exists and receives data, or spot red/yellow indices. Includes data stream backing indices.
+    kind: entities
+    request:
+      method: GET
+      path: "/_cat/indices/{{ filters.index_pattern or '*' }}"
+      query:
+        format: json
+        bytes: b
+        h: "health,status,index,uuid,pri,rep,docs.count,docs.deleted,store.size,pri.store.size,creation.date.string"
+        s: "index"
+        health: "{{ filters.health }}"
+        expand_wildcards: "{{ 'all' if filters.include_hidden else 'open' }}"
+    filters:
+      - {column: index_pattern, description: "Index pattern (default *)", examples: [".ds-logs-*"]}
+      - {column: health, description: "green | yellow | red", examples: ["red"]}
+      - {column: include_hidden, type: BOOLEAN, description: "Include hidden/system indices", examples: ["false"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: index, path: "index"}
+      - {name: health, path: "health"}
+      - {name: status, path: "status", description: "open | close"}
+      - {name: uuid, path: "uuid"}
+      - {name: primaries, type: BIGINT, path: "pri"}
+      - {name: replicas, type: BIGINT, path: "rep"}
+      - {name: docs_count, type: BIGINT, path: "['docs.count']"}
+      - {name: docs_deleted, type: BIGINT, path: "['docs.deleted']"}
+      - {name: store_size, path: "['store.size']", description: "Bytes (bytes=b) as a string; cast to BIGINT"}
+      - {name: created_at, type: TIMESTAMP, path: "['creation.date.string']"}
+      - {name: index_pattern, filter_only: true}
+      - {name: include_hidden, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "_cat APIs are for humans: numbers are strings; this table casts them."
+      - "Data streams appear as their backing indices (.ds-<stream>-<date>-<generation>); creation date of the newest backing index shows the last rollover."
+    examples:
+      - sql: "SELECT index, health, docs_count, CAST(store_size AS BIGINT) / 1e9 AS gb FROM elasticsearch_indices WHERE health <> 'green'"
+        description: Unhealthy indices.
+      - sql: "SELECT index, docs_count, created_at FROM elasticsearch_indices WHERE index_pattern = '.ds-logs-*' ORDER BY created_at DESC LIMIT 20"
+        description: Newest log backing indices (is ingestion rolling over?).
+    fixtures:
+      - file: cat_indices.json
+        note: "Verbatim example response of the cat indices API reference (format=json)."
+        expect_rows: 2
+        expect_columns: {index: my-index-000001, health: yellow, docs_count: 1200, primaries: 1}
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-cat-indices
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_data_streams
+    title: Data streams (GET /_data_stream)
+    description: >-
+      Data streams with health status, backing indices, lifecycle policy and template. Use to find
+      the right index pattern (logs-<dataset>-<namespace>, traces-apm-*, metrics-*) and its retention policy.
+    kind: entities
+    request:
+      method: GET
+      path: "/_data_stream/{{ filters.name or '*' }}"
+      query:
+        expand_wildcards: "{{ 'all' if filters.include_hidden else 'open' }}"
+    filters:
+      - {column: name, description: "Data stream name or wildcard", examples: ["logs-*"]}
+      - {column: include_hidden, type: BOOLEAN, description: "Include hidden data streams"}
+    response:
+      rows_path: "$.data_streams[*]"
+    columns:
+      - {name: name, path: "name"}
+      - {name: status, path: "status", description: "GREEN | YELLOW | RED (health of backing indices)"}
+      - {name: timestamp_field, path: "timestamp_field.name"}
+      - {name: generation, type: BIGINT, path: "generation"}
+      - {name: backing_indices, type: BIGINT, path: "indices", transform: length}
+      - {name: write_index, path: "indices[-1].index_name", description: "Current write (newest) backing index"}
+      - {name: template, path: "template"}
+      - {name: ilm_policy, path: "ilm_policy"}
+      - {name: lifecycle, type: JSON, path: "lifecycle", description: "Data stream lifecycle (data_retention) when DSL-managed"}
+      - {name: hidden, type: BOOLEAN, path: "hidden"}
+      - {name: indices, type: JSON, path: "indices"}
+      - {name: include_hidden, type: BOOLEAN, filter_only: true}
+    examples:
+      - sql: "SELECT name, status, ilm_policy, write_index FROM elasticsearch_data_streams WHERE name = 'logs-*' ORDER BY name"
+        description: Which log data streams exist and their health.
+    fixtures:
+      - file: data_streams.json
+        note: "Verbatim example response of the get data stream API reference."
+        expect_rows: 2
+        expect_columns: {name: my-data-stream, status: GREEN, backing_indices: 2, write_index: ".ds-my-data-stream-2099.03.08-000002", ilm_policy: my-lifecycle-policy}
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-get-data-stream
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_data_stream_stats
+    title: Data stream freshness and size (GET /_data_stream/_stats)
+    description: >-
+      Per data stream: store size and maximum @timestamp (last ingested event). The fastest way to
+      tell 'no errors' apart from 'no data': a stale max_ts means ingestion stopped.
+    kind: entities
+    request:
+      method: GET
+      path: "/_data_stream/{{ filters.name or '*' }}/_stats"
+      query:
+        human: "false"
+    filters:
+      - {column: name, description: "Data stream name or wildcard", examples: ["logs-*"]}
+    response:
+      rows_path: "$.data_streams[*]"
+    columns:
+      - {name: name, path: "data_stream"}
+      - {name: backing_indices, type: BIGINT, path: "backing_indices"}
+      - {name: store_size_bytes, type: BIGINT, path: "store_size_bytes"}
+      - {name: max_ts, type: TIMESTAMP, path: "maximum_timestamp", transform: epoch_ms, description: "Newest @timestamp in the stream (UTC)"}
+    pitfalls:
+      - "maximum_timestamp is the newest event time, which can be in the future for clients with skewed clocks."
+    examples:
+      - sql: "SELECT name, max_ts, store_size_bytes FROM elasticsearch_data_stream_stats WHERE name = 'logs-*' ORDER BY max_ts"
+        description: Log data streams ordered by staleness (ingestion gaps first).
+    fixtures:
+      - file: data_stream_stats.json
+        note: "Verbatim example response of the data stream stats API reference."
+        expect_rows: 2
+        expect_columns: {name: my-data-stream, backing_indices: 3, store_size_bytes: 3772, max_ts: "2020-12-09T11:07:08Z"}
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-data-streams-stats-1
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_field_caps
+    title: Field capabilities (GET /{index}/_field_caps)
+    description: >-
+      Which fields exist in an index pattern, their types, and whether they are searchable /
+      aggregatable. One row per (field, type). Use before filtering or grouping on a field you
+      have not used before (unknown fields silently match nothing).
+    kind: entities
+    request:
+      method: GET
+      path: "/{{ filters.index_pattern or env.ELASTICSEARCH_LOGS_INDEX }}/_field_caps"
+      query:
+        fields: "{{ filters.field or '*' }}"
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+        include_empty_fields: "{{ 'false' if filters.hide_empty else None }}"
+        filters: "-metadata"
+    filters:
+      - {column: index_pattern, description: "Index pattern", examples: ["logs-*"]}
+      - {column: field, description: "Field name or wildcard (default *)", examples: ["service.*"]}
+      - {column: hide_empty, type: BOOLEAN, description: "true: send include_empty_fields=false so mapped fields without any value are dropped (Elasticsearch 8.13+; older versions reject the parameter with HTTP 400)", examples: ["true"]}
+    response:
+      rows_path: "$.fields"
+      expand:
+        - {entries: ".", as: f}
+        - {entries: "@f.value", as: t}
+    columns:
+      - {name: field, path: "@f.key"}
+      - {name: type, path: "@t.key"}
+      - {name: searchable, type: BOOLEAN, path: "@t.value.searchable"}
+      - {name: aggregatable, type: BOOLEAN, path: "@t.value.aggregatable"}
+      - {name: indices, type: JSON, path: "@t.value.indices", description: "Only present when the field has several types across indices"}
+      - {name: index_pattern, filter_only: true}
+      - {name: hide_empty, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "Without hide_empty a field can be listed because it is in the mapping (index template) even if no document ever had a value; set hide_empty = true (8.13+) to see only fields that hold data."
+      - "A field listed with two types (e.g. long and keyword) is a mapping conflict: queries and aggregations on it can fail on some shards."
+    examples:
+      - sql: "SELECT field, type, aggregatable FROM elasticsearch_field_caps WHERE index_pattern = 'logs-*' AND field = 'service.*'"
+        description: Confirm service fields exist and can be grouped on.
+    fixtures:
+      - file: field_caps.json
+        note: "Verbatim example response of the field capabilities API reference."
+        expect_rows: 3
+        expect_columns: {field: rating, type: long, searchable: true, aggregatable: false}
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-field-caps
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_cluster_health
+    title: Cluster health (GET /_cluster/health)
+    description: >-
+      Cluster status (green/yellow/red), node counts and shard allocation. Check when searches
+      fail, time out or return partial results: the observability backend itself may be the incident.
+    kind: entities
+    request:
+      method: GET
+      path: "/_cluster/health{{ ('/' ~ filters.index_pattern) if filters.index_pattern else '' }}"
+    filters:
+      - {column: index_pattern, description: "Optional index pattern to scope health", examples: ["logs-*"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: cluster_name, path: "cluster_name"}
+      - {name: status, path: "status"}
+      - {name: number_of_nodes, type: BIGINT, path: "number_of_nodes"}
+      - {name: number_of_data_nodes, type: BIGINT, path: "number_of_data_nodes"}
+      - {name: active_shards_percent, type: DOUBLE, path: "active_shards_percent_as_number"}
+      - {name: unassigned_shards, type: BIGINT, path: "unassigned_shards"}
+      - {name: initializing_shards, type: BIGINT, path: "initializing_shards"}
+      - {name: relocating_shards, type: BIGINT, path: "relocating_shards"}
+      - {name: pending_tasks, type: BIGINT, path: "number_of_pending_tasks"}
+      - {name: index_pattern, filter_only: true}
+    examples:
+      - sql: "SELECT status, unassigned_shards, number_of_data_nodes FROM elasticsearch_cluster_health"
+        description: Is the logging cluster itself healthy?
+    fixtures:
+      - file: cluster_health.json
+        note: "Verbatim example response of the cluster health API reference."
+        expect_rows: 1
+        expect_columns: {cluster_name: testcluster, status: yellow, unassigned_shards: 1, active_shards_percent: 50.0}
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-cluster-health
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_nodes
+    title: Nodes (_cat/nodes)
+    description: >-
+      One row per cluster node: roles, elected master, JVM heap / RAM / CPU percent, load
+      averages, disk used percent, uptime and version. Check when searches are slow, rejected
+      with 429 or time out - the logging / APM cluster itself may be overloaded (heap > 85%,
+      disk above the 85/90/95% watermarks).
+    kind: entities
+    request:
+      method: GET
+      path: /_cat/nodes
+      query:
+        format: json
+        h: "ip,name,node.role,master,heap.percent,ram.percent,cpu,load_1m,load_5m,load_15m,disk.used_percent,uptime,version"
+        s: name
+    response:
+      rows_path: "$"
+    columns:
+      - {name: name, path: "name", description: "Node name"}
+      - {name: ip, path: "ip"}
+      - {name: roles, path: "['node.role']", description: "Role letters: m master-eligible, d data, h hot, w warm, c cold, f frozen, i ingest, l ML, s content, t transform, '-' coordinating only"}
+      - {name: is_master, type: BOOLEAN, expr: "_['master'] == '*'", description: "Elected master"}
+      - {name: heap_percent, type: DOUBLE, path: "['heap.percent']", description: "JVM heap used %"}
+      - {name: ram_percent, type: DOUBLE, path: "['ram.percent']", description: "OS memory used % (includes page cache, usually high)"}
+      - {name: cpu_percent, type: DOUBLE, path: "cpu", description: "Recent system CPU %"}
+      - {name: load_1m, type: DOUBLE, path: "load_1m"}
+      - {name: load_5m, type: DOUBLE, path: "load_5m"}
+      - {name: load_15m, type: DOUBLE, path: "load_15m"}
+      - {name: disk_used_percent, type: DOUBLE, path: "['disk.used_percent']", description: "Disk used % (85% low / 90% high / 95% flood-stage watermarks by default; flood stage makes indices read-only)"}
+      - {name: uptime, path: "uptime", description: "Human duration, e.g. 17.3m (a short uptime means a recent restart)"}
+      - {name: version, path: "version"}
+    pitfalls:
+      - "_cat values are strings; this table casts the percentages. load_* can be null on platforms that do not report them."
+      - "Elastic Cloud Serverless manages nodes for you; node-level cat APIs may be unavailable there (use the project's performance metrics instead)."
+    examples:
+      - sql: "SELECT name, roles, heap_percent, cpu_percent, disk_used_percent, uptime FROM elasticsearch_nodes ORDER BY heap_percent DESC"
+        description: Nodes under memory pressure or recently restarted.
+      - sql: "SELECT name, disk_used_percent FROM elasticsearch_nodes WHERE disk_used_percent >= 85 ORDER BY disk_used_percent DESC"
+        description: Nodes past the low disk watermark (shard allocation / read-only risk).
+    fixtures:
+      - file: cat_nodes.json
+        note: "Verbatim example response CatNodesResponseExample1 of the cat nodes API reference (GET /_cat/nodes?v=true&format=json, default columns)."
+        expect_rows: 1
+        expect_columns: {name: mJw06l1, ip: 127.0.0.1, roles: cdfhilmrstw, is_master: true, heap_percent: 65.0, ram_percent: 99.0, cpu_percent: 42.0, load_1m: 3.07, load_5m: null, disk_used_percent: null}
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-cat-nodes
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_shards
+    title: Shards and unassigned reasons (_cat/shards)
+    description: >-
+      One row per shard copy: index, shard number, primary / replica, state (STARTED,
+      INITIALIZING, RELOCATING, UNASSIGNED), docs, store bytes, node and the unassigned reason.
+      Use when cluster health is yellow / red to see which indices lost shards and why. Scope it
+      with index_pattern on large clusters.
+    kind: entities
+    request:
+      method: GET
+      path: "/_cat/shards{{ ('/' ~ filters.index_pattern) if filters.index_pattern else '' }}"
+      query:
+        format: json
+        bytes: b
+        h: "index,shard,prirep,state,docs,store,ip,node,unassigned.reason,unassigned.at"
+        s: "state,index"
+    filters:
+      - {column: index_pattern, description: "Index / data stream pattern (default all)", examples: [".ds-logs-*"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: index, path: "index"}
+      - {name: shard, type: BIGINT, path: "shard"}
+      - {name: primary, type: BOOLEAN, expr: "_['prirep'] in ['p', 'primary']", description: "true = primary, false = replica (prirep p/r)"}
+      - {name: state, path: "state", description: "STARTED | INITIALIZING | RELOCATING | UNASSIGNED"}
+      - {name: docs, type: BIGINT, path: "docs"}
+      - {name: store, path: "store", description: "Store size (bytes when bytes=b is honoured; a human string such as 31.1mb otherwise)"}
+      - {name: ip, path: "ip"}
+      - {name: node, path: "node"}
+      - {name: unassigned_reason, path: "['unassigned.reason']", description: "INDEX_CREATED, NODE_LEFT, ALLOCATION_FAILED, CLUSTER_RECOVERED ... (null for assigned shards)"}
+      - {name: unassigned_at, type: TIMESTAMP, path: "['unassigned.at']", transform: auto_time}
+      - {name: index_pattern, filter_only: true}
+    pitfalls:
+      - "Without index_pattern this lists every shard of the cluster (can be tens of thousands of rows); filter on state = 'UNASSIGNED' in SQL and scope the pattern."
+      - "unassigned_reason says what happened, not why the shard cannot be allocated now; the cluster allocation explain API gives the decider explanation."
+    examples:
+      - sql: "SELECT index, shard, primary, unassigned_reason, unassigned_at FROM elasticsearch_shards WHERE state = 'UNASSIGNED' ORDER BY primary DESC, index"
+        description: Unassigned shards (primaries first = red indices = missing data).
+      - sql: "SELECT node, count(*) AS shards FROM elasticsearch_shards WHERE index_pattern = '.ds-logs-*' GROUP BY node ORDER BY shards DESC"
+        description: Log shard distribution per node (hot spots).
+    fixtures:
+      - file: cat_shards_unassigned.json
+        note: "Verbatim example response CatShardsResponseExample5 of the cat shards API reference (h=index,shard,prirep,state,unassigned.reason&format=json); the documented example itself puts docs/store/ip/node text into unassigned.reason for assigned shards."
+        expect_rows: 4
+        expect_columns: {index: my-index-000001, shard: 0, primary: true, state: STARTED}
+      - file: cat_shards.json
+        note: "Verbatim example response CatShardsResponseExample1 of the cat shards API reference (GET _cat/shards?format=json)."
+        expect_rows: 1
+        expect_columns: {index: my-index-000001, shard: 0, primary: true, state: STARTED, docs: 3014, store: 31.1mb, node: H5dfFeA, unassigned_reason: null}
+    docs_url: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-cat-shards
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_alerts
+    title: Kibana alerts-as-data (.alerts-* search)
+    description: >-
+      Alerts written by Kibana alerting rules (Observability, Stack, Security) to the
+      .alerts-<context>.<dataset>-<space> aliases. One row per alert (one document per alert
+      instance, updated while active). Pushdown: status (active | recovered | untracked), rule_name,
+      rule_id, rule_type, workflow_status, query. Time window = alerts overlapping the window
+      (started before its end and updated after its start); ts is the alert start.
+    kind: alerts
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or '.alerts-*' }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+        expand_wildcards: "open,hidden"
+      body:
+        size: "{{ [limit or 500, 1000] | min }}"
+        track_total_hits: false
+        sort:
+          - "@timestamp": {order: desc, unmapped_type: date}
+        query:
+          bool:
+            filter:
+              - range: {"kibana.alert.start": {lte: "{{ time.end | rfc3339_ms }}", format: strict_date_optional_time}}
+              - range: {"@timestamp": {gte: "{{ time.start | rfc3339_ms }}", format: strict_date_optional_time}}
+              - "{{ {'terms': {'kibana.alert.status': filters.status | as_list} } if filters.status else None }}"
+              - "{{ {'terms': {'kibana.alert.rule.name': filters.rule_name | as_list} } if filters.rule_name else None }}"
+              - "{{ {'terms': {'kibana.alert.rule.uuid': filters.rule_id | as_list} } if filters.rule_id else None }}"
+              - "{{ {'terms': {'kibana.alert.rule.rule_type_id': filters.rule_type | as_list} } if filters.rule_type else None }}"
+              - "{{ {'terms': {'kibana.alert.workflow_status': filters.workflow_status | as_list} } if filters.workflow_status else None }}"
+              - "{{ {'terms': {'kibana.alert.uuid': filters.alert_id | as_list} } if filters.alert_id else None }}"
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND'} } if filters.query else None }}"
+        fields:
+          - "@timestamp"
+          - "kibana.*"
+          - service.name
+          - service.environment
+          - host.name
+          - tags
+    filters:
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "kibana.alert.status: active | recovered | untracked", examples: ["active"]}
+      - {column: title, param: rule_name, ops: ["=", "in"], fan_out: false, description: "Rule name (exact)", examples: ["checkout-api error rate"]}
+      - {column: rule_id, ops: ["=", "in"], fan_out: false, description: "kibana.alert.rule.uuid (= Kibana rule id)", examples: ["0cc8ed92-cbe6-42bd-800b-19ba5134ffd2"]}
+      - {column: rule_type, ops: ["=", "in"], fan_out: false, description: "kibana.alert.rule.rule_type_id, e.g. apm.transaction_error_rate, .es-query, observability.rules.custom_threshold, logs.alert.document.count, metrics.alert.threshold, slo.rules.burnRate, siem.queryRule", examples: ["apm.transaction_error_rate"]}
+      - {column: workflow_status, ops: ["=", "in"], fan_out: false, description: "open | acknowledged | closed", examples: ["open"]}
+      - {column: id, param: alert_id, ops: ["=", "in"], fan_out: false, description: "kibana.alert.uuid", examples: ["8f3a2b6e-5d7c-4e1a-9b2f-0c1d2e3f4a5b"]}
+      - {column: query, description: "Lucene query_string over alert fields, e.g. service.name:checkout-api", examples: ['service.name:checkout-api']}
+      - {column: index_pattern, description: "Alerts alias pattern (default .alerts-*); e.g. .alerts-observability.*, .alerts-security.alerts-default", examples: [".alerts-observability.*"]}
+    time: {column: ts, default_lookback: 6h, max_window: 30d}
+    pagination: {type: cursor, cursor_path: "$.hits.hits[-1].sort", cursor_param: body.search_after, max_pages: 3}
+    response:
+      rows_path: "$.hits.hits[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, transform: auto_time, description: "kibana.alert.start", expr: "((_['fields'] or {})['kibana.alert.start'] or [none])[0] or _['_source']['kibana.alert.start'] or _['_source']['kibana']['alert']['start']"}
+      - {name: end_ts, type: TIMESTAMP, transform: auto_time, description: "kibana.alert.end (null while active)", expr: "((_['fields'] or {})['kibana.alert.end'] or [none])[0] or _['_source']['kibana.alert.end'] or _['_source']['kibana']['alert']['end']"}
+      - {name: updated_at, type: TIMESTAMP, transform: auto_time, description: "@timestamp (last rule execution that touched the alert)", expr: "((_['fields'] or {})['@timestamp'] or [none])[0] or _['_source']['@timestamp']"}
+      - {name: status, description: "active | recovered | untracked", expr: "((_['fields'] or {})['kibana.alert.status'] or [none])[0] or _['_source']['kibana.alert.status'] or _['_source']['kibana']['alert']['status']"}
+      - {name: title, description: "Rule name", expr: "((_['fields'] or {})['kibana.alert.rule.name'] or [none])[0] or _['_source']['kibana.alert.rule.name'] or _['_source']['kibana']['alert']['rule']['name']"}
+      - {name: message, description: "kibana.alert.reason", expr: "((_['fields'] or {})['kibana.alert.reason'] or [none])[0] or _['_source']['kibana.alert.reason'] or _['_source']['kibana']['alert']['reason']"}
+      - {name: rule_id, expr: "((_['fields'] or {})['kibana.alert.rule.uuid'] or [none])[0] or _['_source']['kibana.alert.rule.uuid'] or _['_source']['kibana']['alert']['rule']['uuid']"}
+      - {name: rule_type, expr: "((_['fields'] or {})['kibana.alert.rule.rule_type_id'] or [none])[0] or _['_source']['kibana.alert.rule.rule_type_id'] or _['_source']['kibana']['alert']['rule']['rule_type_id']"}
+      - {name: rule_category, expr: "((_['fields'] or {})['kibana.alert.rule.category'] or [none])[0] or _['_source']['kibana.alert.rule.category'] or _['_source']['kibana']['alert']['rule']['category']"}
+      - {name: id, description: "kibana.alert.uuid", expr: "((_['fields'] or {})['kibana.alert.uuid'] or [none])[0] or _['_source']['kibana.alert.uuid'] or _['_source']['kibana']['alert']['uuid']"}
+      - {name: instance_id, description: "Alert instance / group key (e.g. host or service the alert is about)", expr: "((_['fields'] or {})['kibana.alert.instance.id'] or [none])[0] or _['_source']['kibana.alert.instance.id'] or _['_source']['kibana']['alert']['instance']['id']"}
+      - {name: severity, expr: "((_['fields'] or {})['kibana.alert.severity'] or [none])[0] or _['_source']['kibana.alert.severity'] or _['_source']['kibana']['alert']['severity']"}
+      - {name: workflow_status, expr: "((_['fields'] or {})['kibana.alert.workflow_status'] or [none])[0] or _['_source']['kibana.alert.workflow_status'] or _['_source']['kibana']['alert']['workflow_status']"}
+      - {name: duration_ms, type: DOUBLE, transform: us_to_ms, description: "kibana.alert.duration.us converted to ms", expr: "((_['fields'] or {})['kibana.alert.duration.us'] or [_['_source']['kibana.alert.duration.us'] if _['_source']['kibana.alert.duration.us'] is defined else _['_source']['kibana']['alert']['duration']['us']])[0]"}
+      - {name: value, type: DOUBLE, description: "kibana.alert.evaluation.value (rule types that record it)", expr: "((_['fields'] or {})['kibana.alert.evaluation.value'] or [_['_source']['kibana.alert.evaluation.value'] if _['_source']['kibana.alert.evaluation.value'] is defined else _['_source']['kibana']['alert']['evaluation']['value']])[0]"}
+      - {name: threshold, type: DOUBLE, expr: "((_['fields'] or {})['kibana.alert.evaluation.threshold'] or [_['_source']['kibana.alert.evaluation.threshold'] if _['_source']['kibana.alert.evaluation.threshold'] is defined else _['_source']['kibana']['alert']['evaluation']['threshold']])[0]"}
+      - {name: flapping, type: BOOLEAN, expr: "((_['fields'] or {})['kibana.alert.flapping'] or [_['_source']['kibana.alert.flapping'] if _['_source']['kibana.alert.flapping'] is defined else _['_source']['kibana']['alert']['flapping']])[0]"}
+      - {name: service, expr: "((_['fields'] or {})['service.name'] or [none])[0] or _['_source']['service.name'] or _['_source']['service']['name']"}
+      - {name: env, expr: "((_['fields'] or {})['service.environment'] or [none])[0] or _['_source']['service.environment'] or _['_source']['service']['environment']"}
+      - {name: host, expr: "((_['fields'] or {})['host.name'] or [none])[0] or _['_source']['host.name'] or _['_source']['host']['name']"}
+      - {name: tags, type: JSON, expr: "(_['fields'] or {})['kibana.alert.rule.tags'] or (_['fields'] or {})['tags'] or _['_source']['kibana.alert.rule.tags'] or _['_source']['tags']"}
+      - {name: url, description: "kibana.alert.url (only when server.publicBaseUrl is configured)", expr: "((_['fields'] or {})['kibana.alert.url'] or [none])[0] or _['_source']['kibana.alert.url'] or _['_source']['kibana']['alert']['url']"}
+      - {name: index, path: "_index"}
+      - {name: doc, type: JSON, expr: "_['fields'] or _['_source']", description: "All alert fields"}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+    sort_hint: "most recently updated first"
+    pitfalls:
+      - "Needs read privilege on .alerts-* (or .internal.alerts-*); a key without it gets 0 rows from wildcard patterns, not a 403."
+      - "Security alerts live in .alerts-security.alerts-<space>, observability in .alerts-observability.<dataset>.alerts-<space>, stack rules in .alerts-stack.alerts-<space>."
+      - "status 'recovered' alerts keep end_ts; flapping alerts may toggle active/recovered and are marked flapping = true."
+      - "Rules without alerts-as-data support (older connectors-only rules) do not appear here; use kibana_alerting_rules.last_run instead."
+    examples:
+      - sql: >-
+          SELECT ts, title, status, instance_id, message, duration_ms FROM elasticsearch_alerts
+          WHERE status = 'active' ORDER BY ts
+        description: Alerts active in the analysis window, oldest first.
+      - sql: >-
+          SELECT title, count(*) AS alerts, min(ts) AS first_start, max(end_ts) AS last_end FROM elasticsearch_alerts
+          WHERE ts >= TIMESTAMP '2026-10-01 00:00:00' GROUP BY title ORDER BY alerts DESC
+        description: Alert history per rule for the day (noisy / flapping rules first).
+    fixtures:
+      - file: alerts_as_data.json
+        note: "Built from the documented search response envelope and the documented alerts-as-data field names (Query alerts docs + Kibana alert schema); hit 1 uses the fields-API format, hit 2 dotted _source keys."
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:42:00Z", status: active, title: "checkout-api error rate", duration_ms: 960000.0, value: 8.0, service: checkout-api, rule_type: apm.transaction_error_rate, end_ts: null}
+    docs_url: https://www.elastic.co/docs/explore-analyze/alerting/alerts/query-alerts
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_apm_traces
+    title: APM transactions and spans (traces-apm*)
+    description: >-
+      Elastic APM transaction and span documents (classic APM Server / APM integration, ECS fields).
+      One row per transaction or span. Filter on trace_id to get a whole trace (sorted oldest first),
+      or on service / name / outcome / duration_ms to find slow or failed requests. Durations converted to ms.
+    kind: spans
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.ELASTICSEARCH_APM_TRACES_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: "{{ [limit or 500, 1000] | min }}"
+        track_total_hits: false
+        sort:
+          - "@timestamp": {order: "{{ 'asc' if filters.trace_id else 'desc' }}", unmapped_type: date}
+        query:
+          bool:
+            filter:
+              - range:
+                  "@timestamp":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - terms:
+                  processor.event: "{{ filters.event | as_list if filters.event else ['transaction', 'span'] }}"
+              - "{{ {'terms': {'trace.id': filters.trace_id | as_list} } if filters.trace_id else None }}"
+              - "{{ {'terms': {'service.name': filters.service | as_list} } if filters.service else None }}"
+              - "{{ {'terms': {'service.environment': filters.env | as_list} } if filters.env else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'transaction.name': filters.name | as_list} }, {'terms': {'span.name': filters.name | as_list} }], 'minimum_should_match': 1} } if filters.name else None }}"
+              - "{{ {'terms': {'event.outcome': filters.outcome | as_list} } if filters.outcome else None }}"
+              - "{{ {'bool': {'should': [{'range': {'transaction.duration.us': {'gte': (filters.duration_ms | float) * 1000} } }, {'range': {'span.duration.us': {'gte': (filters.duration_ms | float) * 1000} } }], 'minimum_should_match': 1} } if filters.duration_ms else None }}"
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND'} } if filters.query else None }}"
+    filters:
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "trace.id (32 hex chars)", examples: ["945254c567a5417eaaaaaaaaaaaaaaaa"]}
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "service.name", examples: ["checkout-api"]}
+      - {column: env, ops: ["=", "in"], fan_out: false, description: "service.environment", examples: ["production"]}
+      - {column: resource, param: name, ops: ["=", "in"], fan_out: false, description: "transaction.name or span.name (exact), e.g. 'GET /api/cart'", examples: ["GET /api/types"]}
+      - {column: outcome, ops: ["=", "in"], fan_out: false, description: "event.outcome: success | failure | unknown", examples: ["failure"]}
+      - {column: event, ops: ["=", "in"], fan_out: false, description: "processor.event: transaction | span (default both)", examples: ["transaction"]}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">="], description: "Minimum duration in ms (pushed as >=)", examples: ["500"]}
+      - {column: query, description: "Lucene query_string over APM fields, e.g. transaction.result:\"HTTP 5xx\"", examples: ['transaction.result:"HTTP 5xx"']}
+      - {column: index_pattern, description: "Default ELASTICSEARCH_APM_TRACES_INDEX (traces-apm*)", examples: ["traces-apm*"]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    pagination: {type: cursor, cursor_path: "$.hits.hits[-1].sort", cursor_param: body.search_after, max_pages: 3}
+    response:
+      rows_path: "$.hits.hits[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "_source['@timestamp']", transform: auto_time}
+      - {name: trace_id, expr: "_['_source']['trace']['id'] or _['_source']['trace.id']"}
+      - {name: span_id, description: "span.id for spans, transaction.id for transactions", expr: "_['_source']['span']['id'] or _['_source']['span.id'] or _['_source']['transaction']['id'] or _['_source']['transaction.id']"}
+      - {name: parent_id, expr: "_['_source']['parent']['id'] or _['_source']['parent.id']"}
+      - {name: transaction_id, expr: "_['_source']['transaction']['id'] or _['_source']['transaction.id']"}
+      - {name: event, description: "transaction | span", expr: "_['_source']['processor']['event'] or _['_source']['processor.event']"}
+      - {name: service, expr: "_['_source']['service']['name'] or _['_source']['service.name']"}
+      - {name: env, expr: "_['_source']['service']['environment'] or _['_source']['service.environment']"}
+      - {name: version, expr: "_['_source']['service']['version'] or _['_source']['service.version']"}
+      - {name: resource, description: "transaction.name or span.name", expr: "_['_source']['transaction']['name'] or _['_source']['span']['name'] or _['_source']['transaction.name'] or _['_source']['span.name']"}
+      - {name: type, expr: "_['_source']['transaction']['type'] or _['_source']['span']['type']"}
+      - {name: subtype, expr: "_['_source']['span']['subtype']"}
+      - {name: duration_ms, type: DOUBLE, transform: us_to_ms, description: "transaction.duration.us / span.duration.us in ms", expr: "_['_source']['transaction']['duration']['us'] or _['_source']['span']['duration']['us'] or _['_source']['transaction.duration.us'] or _['_source']['span.duration.us']"}
+      - {name: outcome, description: "event.outcome", expr: "_['_source']['event']['outcome'] or _['_source']['event.outcome']"}
+      - {name: result, description: "transaction.result, e.g. 'HTTP 5xx'", expr: "_['_source']['transaction']['result']"}
+      - {name: status_code, type: BIGINT, expr: "_['_source']['http']['response']['status_code']"}
+      - {name: destination, description: "span.destination.service.resource (downstream dependency)", expr: "_['_source']['span']['destination']['service']['resource']"}
+      - {name: host, expr: "_['_source']['host']['name'] or _['_source']['host']['hostname'] or _['_source']['observer']['hostname']"}
+      - {name: pod, expr: "_['_source']['kubernetes']['pod']['name']"}
+      - {name: doc, type: JSON, path: "_source"}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+    sort_hint: "newest first; oldest first when trace_id is filtered (waterfall order)"
+    pitfalls:
+      - "Only sampled transactions are stored (transaction.sampled); unsampled requests do not appear - never count throughput from this table."
+      - "OTel-native traces (traces-*.otel-*) use trace_id / span_id / duration (ns) / name instead of these ECS fields; query them with elasticsearch_search or elasticsearch_esql."
+      - "A span's parent_id is the transaction or span that started it; the root transaction has no parent_id."
+    examples:
+      - sql: >-
+          SELECT ts, event, service, resource, duration_ms, outcome, parent_id, span_id FROM elasticsearch_apm_traces
+          WHERE trace_id = '945254c567a5417eaaaaaaaaaaaaaaaa' ORDER BY ts
+        description: Full trace waterfall for one trace id.
+      - sql: >-
+          SELECT ts, resource, duration_ms, result, trace_id FROM elasticsearch_apm_traces
+          WHERE service = 'checkout-api' AND event = 'transaction' AND duration_ms >= 2000 ORDER BY duration_ms DESC LIMIT 50
+        description: Slowest checkout-api requests in the window, with trace ids to drill into.
+      - sql: >-
+          SELECT destination, count(*) AS calls, avg(duration_ms) AS avg_ms FROM elasticsearch_apm_traces
+          WHERE service = 'checkout-api' AND event = 'span' AND outcome = 'failure' GROUP BY destination ORDER BY calls DESC
+        description: Which downstream dependency the failing spans call.
+    fixtures:
+      - file: apm_traces.json
+        note: "APM data-model docs example transaction (transactions page) and span (spans page) documents wrapped in the documented _search response envelope."
+        expect_rows: 2
+        expect_columns: {ts: "2017-05-30T18:53:27Z", trace_id: 945254c567a5417eaaaaaaaaaaaaaaaa, event: transaction, service: serviceabc, resource: GET /api/types, duration_ms: 32.592, status_code: 200, span_id: 945254c567a5417e}
+    ui_link: "{{ (env.KIBANA_URL ~ '/app/apm/link-to/trace/' ~ filters.trace_id) if env.KIBANA_URL and filters.trace_id else '' }}"
+    docs_url: https://www.elastic.co/docs/solutions/observability/apm/transactions
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_apm_errors
+    title: APM errors / exceptions (logs-apm.error-*)
+    description: >-
+      Exceptions and logged errors captured by Elastic APM agents. One row per error occurrence
+      with exception type/message, culprit, grouping key and the trace/transaction it belongs to.
+      Group on grouping_key to count distinct error groups.
+    kind: logs
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.ELASTICSEARCH_APM_ERRORS_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: "{{ [limit or 500, 1000] | min }}"
+        track_total_hits: false
+        sort:
+          - "@timestamp": {order: desc, unmapped_type: date}
+        query:
+          bool:
+            filter:
+              - range:
+                  "@timestamp":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - term: {processor.event: error}
+              - "{{ {'terms': {'service.name': filters.service | as_list} } if filters.service else None }}"
+              - "{{ {'terms': {'service.environment': filters.env | as_list} } if filters.env else None }}"
+              - "{{ {'terms': {'error.grouping_key': filters.grouping_key | as_list} } if filters.grouping_key else None }}"
+              - "{{ {'terms': {'trace.id': filters.trace_id | as_list} } if filters.trace_id else None }}"
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND'} } if filters.query else None }}"
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, examples: ["checkout-api"]}
+      - {column: env, ops: ["=", "in"], fan_out: false, examples: ["production"]}
+      - {column: grouping_key, ops: ["=", "in"], fan_out: false, description: "error.grouping_key (one error group)", examples: ["50f62f37edffc4630c6655ba3ecfcf46"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, examples: ["945254c567a5417eaaaaaaaaaaaaaaaa"]}
+      - {column: query, description: "Lucene query_string, e.g. error.exception.type:DbError", examples: ['error.exception.type:DbError']}
+      - {column: index_pattern, description: "Default ELASTICSEARCH_APM_ERRORS_INDEX (logs-apm.error-*)", examples: ["logs-apm.error-*"]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    pagination: {type: cursor, cursor_path: "$.hits.hits[-1].sort", cursor_param: body.search_after, max_pages: 3}
+    response:
+      rows_path: "$.hits.hits[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "_source['@timestamp']", transform: auto_time}
+      - {name: service, expr: "_['_source']['service']['name'] or _['_source']['service.name']"}
+      - {name: env, expr: "_['_source']['service']['environment']"}
+      - {name: id, expr: "_['_source']['error']['id'] or _['_id']"}
+      - {name: grouping_key, expr: "_['_source']['error']['grouping_key']"}
+      - {name: exception_type, expr: "_['_source']['error']['exception'][0]['type']"}
+      - {name: message, description: "error.exception[0].message, else error.log.message", expr: "_['_source']['error']['exception'][0]['message'] or _['_source']['error']['log']['message']"}
+      - {name: culprit, expr: "_['_source']['error']['culprit']"}
+      - {name: handled, type: BOOLEAN, expr: "_['_source']['error']['exception'][0]['handled']"}
+      - {name: trace_id, expr: "_['_source']['trace']['id']"}
+      - {name: transaction_id, expr: "_['_source']['transaction']['id']"}
+      - {name: resource, description: "transaction.name", expr: "_['_source']['transaction']['name']"}
+      - {name: host, expr: "_['_source']['host']['name'] or _['_source']['host']['hostname']"}
+      - {name: stacktrace, type: JSON, expr: "_['_source']['error']['exception'][0]['stacktrace']"}
+      - {name: doc, type: JSON, path: "_source"}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+    pitfalls:
+      - "error.grouping_key groups occurrences of the same error; count distinct groups, not rows, when asking 'how many different errors'."
+      - "Default retention of logs-apm.error-* is 10 days."
+    examples:
+      - sql: >-
+          SELECT grouping_key, any_value(exception_type) AS type, any_value(message) AS message, count(*) AS n, min(ts) AS first_seen
+          FROM elasticsearch_apm_errors WHERE service = 'checkout-api' GROUP BY grouping_key ORDER BY n DESC LIMIT 10
+        description: Top error groups of a service and when each first appeared in the window.
+    fixtures:
+      - file: apm_errors.json
+        note: "APM data-model docs example error documents (errors page) wrapped in the documented _search response envelope."
+        expect_rows: 2
+        expect_columns: {ts: "2017-05-09T15:04:05Z", service: abc, exception_type: DbError, message: "The username root is unknown", culprit: my.module.function_name, handled: false, grouping_key: 50f62f37edffc4630c6655ba3ecfcf46}
+    docs_url: https://www.elastic.co/docs/solutions/observability/apm/errors
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_apm_service_stats
+    title: APM service health summary (terms + avg/percentiles/failure filter)
+    description: >-
+      Per service (or per group_by field such as transaction.name) over the window: sampled
+      request count, failed count, failure rate, average / p95 / p99 latency in ms, computed from
+      APM transactions. One row per service. Use as the services inventory and to spot the unhealthy one.
+    kind: entities
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.ELASTICSEARCH_APM_TRACES_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 0
+        track_total_hits: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "@timestamp":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - term: {processor.event: transaction}
+              - "{{ {'terms': {'service.name': filters.service | as_list} } if filters.service else None }}"
+              - "{{ {'terms': {'service.environment': filters.env | as_list} } if filters.env else None }}"
+        aggs:
+          t:
+            terms:
+              field: "{{ filters.group_by or 'service.name' }}"
+              size: "{{ [(filters.top or limit or 50) | int, 500] | min }}"
+            aggs:
+              failures: {filter: {term: {event.outcome: failure} }}
+              latency_avg: {avg: {field: transaction.duration.us}}
+              latency_pct: {percentiles: {field: transaction.duration.us, percents: [95, 99]}}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Restrict to these services", examples: ["checkout-api"]}
+      - {column: env, ops: ["=", "in"], fan_out: false, examples: ["production"]}
+      - {column: group_by, description: "Field to group by (default service.name; e.g. transaction.name with service = X)", examples: ["service.name"]}
+      - {column: top, type: BIGINT, description: "Max groups (default 50)"}
+      - {column: index_pattern, description: "Default traces-apm*"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.aggregations.t.buckets[*]"
+    columns:
+      - {name: group_key, path: "key", description: "Service name (or group_by value)"}
+      - {name: requests, type: BIGINT, path: "doc_count", description: "Sampled transactions"}
+      - {name: failures, type: BIGINT, path: "failures.doc_count", description: "Transactions with event.outcome = failure"}
+      - {name: failure_rate, type: DOUBLE, expr: "(_['failures']['doc_count'] / _['doc_count']) if _['doc_count'] else none", description: "failures / requests (0-1)"}
+      - {name: avg_ms, type: DOUBLE, path: "latency_avg.value", transform: us_to_ms}
+      - {name: p95_ms, type: DOUBLE, path: "latency_pct.values['95.0']", transform: us_to_ms}
+      - {name: p99_ms, type: DOUBLE, path: "latency_pct.values['99.0']", transform: us_to_ms}
+      - {name: service, filter_only: true}
+      - {name: env, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Counts are of SAMPLED transactions; the failure_rate ratio is still meaningful, absolute throughput is not."
+      - "Compare against a baseline window (run twice with different ts ranges) before calling a service unhealthy."
+    examples:
+      - sql: >-
+          SELECT group_key AS service, requests, failure_rate, p95_ms FROM elasticsearch_apm_service_stats
+          WHERE env = 'production' ORDER BY failure_rate DESC
+        description: Services ranked by failure rate in the window.
+      - sql: >-
+          SELECT group_key AS endpoint, requests, failure_rate, p99_ms FROM elasticsearch_apm_service_stats
+          WHERE service = 'checkout-api' AND group_by = 'transaction.name' ORDER BY p99_ms DESC LIMIT 10
+        description: Slowest endpoints of one service.
+    fixtures:
+      - file: apm_service_stats.json
+        note: "Built from documented aggregation response shapes: terms buckets with filter ({doc_count}), avg ({value}) and percentiles ({values: {'95.0': ...} }) sub-aggregations; values illustrative."
+        expect_rows: 2
+        expect_columns: {group_key: checkout-api, requests: 1200, failures: 96, failure_rate: 0.08, avg_ms: 84.2505, p95_ms: 412.0, p99_ms: 1250.0}
+    docs_url: https://www.elastic.co/docs/reference/aggregations/search-aggregations-bucket-terms-aggregation
+
+  # ------------------------------------------------------------------------------------------
+  - name: elasticsearch_apm_dependencies
+    title: APM service dependencies (exit spans by destination)
+    description: >-
+      Service -> downstream dependency edges derived from APM exit spans
+      (span.destination.service.resource): call count, failed calls and average latency per edge.
+      One row per (service, dependency). Use as the service map.
+    kind: entities
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.ELASTICSEARCH_APM_TRACES_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 0
+        track_total_hits: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "@timestamp":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - term: {processor.event: span}
+              - exists: {field: span.destination.service.resource}
+              - "{{ {'terms': {'service.name': filters.service | as_list} } if filters.service else None }}"
+              - "{{ {'terms': {'service.environment': filters.env | as_list} } if filters.env else None }}"
+        aggs:
+          t:
+            terms: {field: service.name, size: 100}
+            aggs:
+              d:
+                terms: {field: span.destination.service.resource, size: 50}
+                aggs:
+                  failures: {filter: {term: {event.outcome: failure} }}
+                  latency_avg: {avg: {field: span.duration.us}}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Calling service(s)", examples: ["checkout-api"]}
+      - {column: env, ops: ["=", "in"], fan_out: false, examples: ["production"]}
+      - {column: index_pattern, description: "Default traces-apm*"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.aggregations.t.buckets[*]"
+      expand:
+        - {explode: "d.buckets", as: d}
+    columns:
+      - {name: service, path: "key", description: "Calling service"}
+      - {name: dependency, path: "@d.key", description: "span.destination.service.resource (e.g. postgresql, redis, payments:443)"}
+      - {name: calls, type: BIGINT, path: "@d.doc_count", description: "Sampled exit spans"}
+      - {name: failures, type: BIGINT, path: "@d.failures.doc_count"}
+      - {name: failure_rate, type: DOUBLE, expr: "(d['failures']['doc_count'] / d['doc_count']) if d['doc_count'] else none"}
+      - {name: avg_ms, type: DOUBLE, path: "@d.latency_avg.value", transform: us_to_ms}
+      - {name: env, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Edges only exist for instrumented exit spans; un-instrumented clients (raw sockets) are invisible."
+      - "Dependencies that are themselves instrumented services appear by host:port resource, not by service name."
+    examples:
+      - sql: >-
+          SELECT service, dependency, calls, failure_rate, avg_ms FROM elasticsearch_apm_dependencies
+          WHERE service = 'checkout-api' ORDER BY failure_rate DESC
+        description: Downstream dependencies of a service, failing first.
+    fixtures:
+      - file: apm_dependencies.json
+        note: "Built from documented terms-with-terms-sub-aggregation bucket shapes plus filter/avg sub-aggregation shapes; values illustrative."
+        expect_rows: 3
+        expect_columns: {service: checkout-api, dependency: postgresql, calls: 3000, failures: 12, failure_rate: 0.004, avg_ms: 3.781}
+    docs_url: https://www.elastic.co/docs/solutions/observability/apm/spans
+
+roles:
+  logs:
+    table: elasticsearch_search
+    filters:
+      service: "{{ service }}"
+      level: "{{ 'error' if error_only else '' }}"
+      query: "{{ query or '' }}"
+    columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id}
+    query_language: lucene_query_string
+  log_counts:
+    table: elasticsearch_log_counts
+    filters:
+      service: "{{ service }}"
+      level: "{{ 'error' if error_only else '' }}"
+      group_by: "service.name"
+    columns: {ts: ts, value: value, group: group_key}
+    query_language: lucene_query_string
+  metrics:
+    table: elasticsearch_esql
+    columns: {ts: ts, labels: result}
+    query_language: esql
+    notes: "Write ES|QL STATS ... BY ts = BUCKET(@timestamp, 1 minute); elasticsearch_metric_histogram is the no-code alternative."
+  active_alerts:
+    table: elasticsearch_alerts
+    filters: {status: active}
+    columns: {ts: ts, name: title, state: status, severity: severity, message: message, labels: doc, id: id}
+  alert_history:
+    table: elasticsearch_alerts
+    columns: {ts: ts, name: title, state: status, end: end_ts, message: message, id: id}
+  traces:
+    table: elasticsearch_apm_traces
+    filters:
+      service: "{{ service }}"
+      outcome: "{{ 'failure' if error_only else '' }}"
+    columns: {ts: ts, service: service, resource: resource, duration_ms: duration_ms, trace_id: trace_id, span_id: span_id, status: outcome}
+  trace_detail:
+    table: elasticsearch_apm_traces
+    columns: {ts: ts, service: service, resource: resource, duration_ms: duration_ms, trace_id: trace_id, span_id: span_id, parent_id: parent_id}
+  errors:
+    table: elasticsearch_apm_errors
+    filters: {service: "{{ service }}"}
+    columns: {ts: ts, service: service, title: exception_type, message: message, id: grouping_key, trace_id: trace_id}
+  services:
+    table: elasticsearch_apm_service_stats
+    filters: {env: "{{ env or '' }}"}
+    columns: {service: group_key, requests: requests, error_rate: failure_rate, p95_ms: p95_ms}
+  service_map:
+    table: elasticsearch_apm_dependencies
+    filters: {service: "{{ service }}"}
+    columns: {service: service, dependency: dependency, calls: calls, error_rate: failure_rate}
+  hosts:
+    table: elasticsearch_top_terms
+    filters: {field: host.name, index_pattern: "metrics-*"}
+    columns: {host: term, count: doc_count}

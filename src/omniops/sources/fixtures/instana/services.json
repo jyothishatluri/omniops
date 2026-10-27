@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "entityType": "SERVICE",
+      "id": "79f1430f4a42a707a97621ca00617e40bd51c31d",
+      "label": "Robot Shop",
+      "snapshotIds": [
+        "CywiRxmGIwtQIKezVs-XMcTX2xg"
+      ],
+      "technologies": [
+        "kafkaCluster"
+      ],
+      "types": [
+        "MESSAGING"
+      ]
+    }
+  ],
+  "page": 1,
+  "pageSize": 1,
+  "totalHits": 1
+}

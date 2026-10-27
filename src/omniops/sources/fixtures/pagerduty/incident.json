@@ -1,0 +1,218 @@
+{
+ "incident": {
+  "id": "PT4KHLK",
+  "type": "incident",
+  "summary": "[#1234] The server is on fire.",
+  "self": "https://api.pagerduty.com/incidents/PT4KHLK",
+  "html_url": "https://subdomain.pagerduty.com/incidents/PT4KHLK",
+  "incident_number": 1234,
+  "title": "The server is on fire.",
+  "created_at": "2015-10-06T21:30:42Z",
+  "updated_at": "2015-10-06T21:40:23Z",
+  "status": "acknowledged",
+  "incident_key": "baf7cf21b1da41b4b0221008339ff357",
+  "service": {
+   "id": "PIJ90N7",
+   "type": "service_reference",
+   "summary": "My Mail Service",
+   "self": "https://api.pagerduty.com/services/PIJ90N7",
+   "html_url": "https://subdomain.pagerduty.com/service-directory/PIJ90N7"
+  },
+  "assignments": [
+   {
+    "at": "2015-11-10T00:31:52Z",
+    "assignee": {
+     "id": "PXPGF42",
+     "type": "user_reference",
+     "summary": "Earline Greenholt",
+     "self": "https://api.pagerduty.com/users/PXPGF42",
+     "html_url": "https://subdomain.pagerduty.com/users/PXPGF42"
+    }
+   }
+  ],
+  "assigned_via": "escalation_policy",
+  "last_status_change_at": "2015-10-06T21:38:23Z",
+  "resolved_at": null,
+  "first_trigger_log_entry": {
+   "id": "Q02JTSNZWHSEKV",
+   "type": "trigger_log_entry_reference",
+   "summary": "Triggered through the API",
+   "self": "https://api.pagerduty.com/log_entries/Q02JTSNZWHSEKV?incident_id=PT4KHLK",
+   "html_url": "https://subdomain.pagerduty.com/incidents/PT4KHLK/log_entries/Q02JTSNZWHSEKV"
+  },
+  "alert_counts": {
+   "all": 2,
+   "triggered": 1,
+   "resolved": 1
+  },
+  "is_mergeable": true,
+  "incident_type": {
+   "name": "incident_default"
+  },
+  "escalation_policy": {
+   "id": "PT20YPA",
+   "type": "escalation_policy_reference",
+   "summary": "Another Escalation Policy",
+   "self": "https://api.pagerduty.com/escalation_policies/PT20YPA",
+   "html_url": "https://subdomain.pagerduty.com/escalation_policies/PT20YPA"
+  },
+  "teams": [
+   {
+    "id": "PQ9K7I8",
+    "type": "team_reference",
+    "summary": "Engineering",
+    "self": "https://api.pagerduty.com/teams/PQ9K7I8",
+    "html_url": "https://subdomain.pagerduty.com/teams/PQ9K7I8"
+   }
+  ],
+  "pending_actions": [
+   {
+    "type": "unacknowledge",
+    "at": "2015-11-10T01:02:52Z"
+   },
+   {
+    "type": "resolve",
+    "at": "2015-11-10T04:31:52Z"
+   }
+  ],
+  "acknowledgements": [
+   {
+    "at": "2015-11-10T00:32:52Z",
+    "acknowledger": {
+     "id": "PXPGF42",
+     "type": "user_reference",
+     "summary": "Earline Greenholt",
+     "self": "https://api.pagerduty.com/users/PXPGF42",
+     "html_url": "https://subdomain.pagerduty.com/users/PXPGF42"
+    }
+   }
+  ],
+  "alert_grouping": {
+   "grouping_type": "advanced",
+   "started_at": "2015-10-06T21:30:42Z",
+   "ended_at": null,
+   "alert_grouping_active": true
+  },
+  "last_status_change_by": {
+   "id": "PXPGF42",
+   "type": "user_reference",
+   "summary": "Earline Greenholt",
+   "self": "https://api.pagerduty.com/users/PXPGF42",
+   "html_url": "https://subdomain.pagerduty.com/users/PXPGF42"
+  },
+  "priority": {
+   "id": "P53ZZH5",
+   "type": "priority_reference",
+   "summary": "P2",
+   "self": "https://api.pagerduty.com/priorities/P53ZZH5"
+  },
+  "resolve_reason": null,
+  "conference_bridge": {
+   "conference_number": "+1-415-555-1212,,,,1234#",
+   "conference_url": "https://example.com/acb-123"
+  },
+  "incidents_responders": [
+   {
+    "state": "pending",
+    "user": {
+     "id": "PL7A2O4",
+     "type": "user_reference",
+     "summary": "Lee Turner",
+     "self": "https://api.pagerduty.com/users/PL7A2O4",
+     "html_url": "https://subdomain.pagerduty.com/users/PL7A2O4",
+     "avatar_url": "https://pd-static-assets.pagerduty.com/users/blank-avatar.png"
+    },
+    "incident": {
+     "id": "PXP12GZ",
+     "type": "incident_reference",
+     "summary": "Ongoing Incident in Mailroom",
+     "self": "https://api.pagerduty.com/incidents/PXP12GZ",
+     "html_url": "https://subdomain.pagerduty.com/incidents/PXP12GZ"
+    },
+    "updated_at": "2018-08-09T14:40:48-07:00",
+    "message": "Please help with issue - join bridge at +1(234)-567-8910",
+    "requester": {
+     "id": "P09TT3C",
+     "type": "user_reference",
+     "summary": "Jane Doe",
+     "self": "https://api.pagerduty.com/users/P09TT3C",
+     "html_url": "https://subdomain.pagerduty.com/users/P09TT3C",
+     "avatar_url": "https://pd-static-assets.pagerduty.com/users/blank-avatar.png"
+    },
+    "requested_at": "2018-08-09T21:40:49Z"
+   }
+  ],
+  "responder_requests": [
+   {
+    "incident": {
+     "id": "PXP12GZ",
+     "type": "incident_reference",
+     "summary": "Ongoing Incident in Mailroom",
+     "self": "https://api.pagerduty.com/incidents/PXP12GZ",
+     "html_url": "https://subdomain.pagerduty.com/incidents/PXP12GZ"
+    },
+    "requester": {
+     "id": "P09TT3C",
+     "type": "user_reference",
+     "summary": "Jane Doe",
+     "self": "https://api.pagerduty.com/users/P09TT3C",
+     "html_url": "https://subdomain.pagerduty.com/users/P09TT3C"
+    },
+    "requested_at": "2018-08-16T14:55:17-07:00",
+    "message": "Please help with issue - join bridge at +1(234)-567-8910",
+    "responder_request_targets": [
+     {
+      "responder_request_target": {
+       "type": "user",
+       "id": "PL7A2O4",
+       "incidents_responders": [
+        {
+         "state": "pending",
+         "user": {
+          "id": "PL7A2O4",
+          "type": "user_reference",
+          "summary": "Lee Turner",
+          "self": "https://api.pagerduty.com/users/PL7A2O4",
+          "html_url": "https://subdomain.pagerduty.com/users/PL7A2O4",
+          "avatar_url": "https://pd-static-assets.pagerduty.com/users/blank-avatar.png"
+         },
+         "incident": {
+          "id": "PXP12GZ",
+          "type": "incident_reference",
+          "summary": "Ongoing Incident in Mailroom",
+          "self": "https://api.pagerduty.com/incidents/PXP12GZ",
+          "html_url": "https://subdomain.pagerduty.com/incidents/PXP12GZ"
+         },
+         "updated_at": "2018-08-09T14:40:48-07:00",
+         "message": "Please help with issue - join bridge at +1(234)-567-8910",
+         "requester": {
+          "id": "P09TT3C",
+          "type": "user_reference",
+          "summary": "Jane Doe",
+          "self": "https://api.pagerduty.com/users/P09TT3C",
+          "html_url": "https://subdomain.pagerduty.com/users/P09TT3C",
+          "avatar_url": "https://pd-static-assets.pagerduty.com/users/blank-avatar.png"
+         },
+         "requested_at": "2018-08-09T21:40:49Z"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  ],
+  "urgency": "high",
+  "custom_fields": [
+   {
+    "id": "PT4KHEE",
+    "type": "field_value",
+    "name": "environment",
+    "display_name": "Runtime Environment",
+    "description": "environment where incident occurred",
+    "data_type": "string",
+    "field_type": "single_value_fixed",
+    "value": "production"
+   }
+  ]
+ }
+}

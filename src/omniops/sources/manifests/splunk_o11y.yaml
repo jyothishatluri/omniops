@@ -1,0 +1,1250 @@
+# Splunk Observability Cloud (formerly SignalFx) REST API, direct REST, no MCP.
+#
+# API host per realm: https://api.<realm>.observability.splunkcloud.com (legacy alias
+# https://api.<realm>.signalfx.com). Every reference page on dev.splunk.com declares its server:
+#   /v2/...                    incidents, alert muting, detectors, events, audit events,
+#                              metrics metadata, APM topology + traces, SLOs, dashboards, charts
+#   /v1/timeserieswindow       raw MTS data points (synchronous JSON)
+#   /v2/synthetics/...         Synthetic Monitoring tests and runs
+#   https://stream.<realm>.observability.splunkcloud.com/v2/signalflow/execute
+#                              SignalFlow: Server-Sent Events stream -> python escape hatch
+# Auth: header X-SF-TOKEN with an org access token that has the API scope (or a user session
+# token). Reference pages: https://dev.splunk.com/observability/reference
+# Research notes and doc links: docs/sources/splunk_o11y.md
+source: splunk_o11y
+display_name: Splunk Observability Cloud
+vendor: Splunk LLC (Cisco)
+description: >-
+  Splunk Observability Cloud (Infrastructure Monitoring / APM / Synthetics, ex-SignalFx):
+  alert incidents, detectors (alert rules), detector event history, custom events (deploys),
+  audit trail (who changed detectors/dashboards/integrations), muting rules, metric/MTS/dimension
+  metadata, MTS data points, SignalFlow analytics, APM service topology and traces, SLOs,
+  synthetic tests/runs, dashboards and chart programs.
+docs_url: https://dev.splunk.com/observability/reference
+categories: [metrics, traces, alerts, events, incidents, synthetics, changes]
+base_url: "{{ env.SPLUNK_O11Y_API_URL or ('https://api.' ~ env.SPLUNK_O11Y_REALM ~ '.observability.splunkcloud.com') }}"
+ui_base_url: "https://app.{{ env.SPLUNK_O11Y_REALM }}.observability.splunkcloud.com"
+env:
+  - {name: SPLUNK_O11Y_REALM, description: "Organization realm: us0, us1, us2, eu0, eu1, eu2, jp0, au0, sg0 ... (Settings > Organization; a wrong realm gives 401)"}
+  - {name: SPLUNK_O11Y_TOKEN, description: "Org access token with the API authorization scope (or a user session token), sent as X-SF-TOKEN. SignalFlow /execute and SLO search need a token of a power/admin user.", secret: true}
+  - {name: SPLUNK_O11Y_API_URL, description: "Optional API base override (no trailing slash), e.g. https://api.us1.signalfx.com. Default https://api.<realm>.observability.splunkcloud.com", default: ""}
+  - {name: SPLUNK_O11Y_STREAM_URL, description: "Optional SignalFlow stream base override. Default https://stream.<realm>.observability.splunkcloud.com", default: ""}
+required_env: [SPLUNK_O11Y_REALM, SPLUNK_O11Y_TOKEN]
+auth:
+  type: headers
+  headers:
+    X-SF-TOKEN: "{{ env.SPLUNK_O11Y_TOKEN }}"
+headers:
+  Content-Type: application/json
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 100
+  notes: >-
+    Org-level API rate limits return HTTP 429 (retried with backoff). The only published number
+    is the APM API limit of 100 requests/min per org (APM system limits); the engine enforces
+    rpm per source, so 100/min is applied to the whole source (SignalFlow included). Retrieve
+    endpoints return at most 10,000 objects per query regardless of offset/limit (incidents,
+    events, MTS, metrics, dimensions, muting rules, audit events): narrow the query instead of
+    paging deeper. APM topology returns at most 1,000 objects.
+retention:
+  metrics: "1-minute-or-coarser data 13 months; finer resolution 8 days (Standard) / 96 days (Enterprise)"
+  traces: "raw traces 8 days by default (extended retention for traces of interest up to 13 months)"
+  events: "detector events and custom events: 13 months"
+pitfalls:
+  - "Realm matters: a token from us1 against api.us0 is an HTTP 401, not empty data."
+  - "Query strings use <name>:<value> with AND/OR/NOT and * wildcards; quote values with non-alphanumeric characters: region:\"US East\". An unknown dimension name matches nothing (0 rows), it is not an error."
+  - "Detector names, metric names and dimension values are case-sensitive."
+query_languages:
+  signalflow: >-
+    SignalFlow (Python-like). A = data('cpu.utilization', filter=filter('host', 'web-*') and
+    filter('sf_environment', 'prod')).mean(by=['host']).publish(label='A'). Streams:
+    data(metric, filter=, rollup=), .sum/.mean/.max/.percentile(pct=95)(by=[dims]),
+    .mean(over='5m') for moving windows, .delta(), .rateofchange(); combine with A / B.
+    APM RED metrics: data('service.request.count', filter=filter('sf_service','checkout') and
+    filter('sf_error','true')).sum(). Every stream you want back needs .publish(label='X').
+  o11y_search: >-
+    Metadata/event search syntax (query= filters): sf_metric:cpu.utilization AND host:web-1,
+    region:"US East", _exists_:host, NOT env:dev, wildcards host:web-*. Events:
+    sf_eventType:deployment, sf_eventCategory:USER_DEFINED|ALERT.
+tables:
+  - name: splunk_o11y_incidents
+    title: Alert incidents (active by default)
+    description: >-
+      Latest alert incidents in the org, one per detector rule + time series (ETS): detector,
+      rule label, severity, anomaly state, trigger time (ts), duration, the triggering input
+      values and dimensions. Active incidents only unless include_resolved = true. Filter by
+      incident id (id), by a query on teamId / dimension / custom property values, or nothing.
+    kind: alerts
+    request:
+      method: GET
+      path: "/v2/incident{{ ('/' ~ (filters.incident_id | urlencode)) if filters.incident_id else '' }}"
+      query:
+        includeResolved: "{{ filters.include_resolved }}"
+        query: "{{ filters.query }}"
+        limit: 100
+    filters:
+      - {column: id, param: incident_id, ops: ["=", "in"], description: "Incident ID (fetches GET /v2/incident/{id})", examples: ['Cj5VGRiAEAM']}
+      - {column: include_resolved, type: BOOLEAN, description: "true to also return the latest resolved incidents (API default false = active only)"}
+      - {column: query, description: "Incident search: teamId:<id>, <dimension>:<value>, <customProperty>:<value>", examples: ['teamId:FO1Vq3ABXYZ']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 10}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: incidentId, description: "Incident ID"}
+      - {name: detector_id, path: detectorId}
+      - {name: detector_name, expr: "_['detectorName'] or ((_['events'] or [{}])[0]['detectorName'])", description: "Detector name (top-level in live responses, else from the first event)"}
+      - {name: detect_label, path: detectLabel, description: "Label of the detect() rule that fired"}
+      - {name: title, expr: "(_['detectorName'] or ((_['events'] or [{}])[0]['detectorName']) or _['detectorId'] or '') ~ ' / ' ~ (_['detectLabel'] or '')"}
+      - {name: severity, path: severity, description: "Critical | Major | Minor | Warning | Info"}
+      - {name: state, path: anomalyState, description: "ANOMALOUS (firing) | OK (auto-cleared) | MANUALLY_RESOLVED | STOPPED (detector restarted)"}
+      - {name: active, type: BOOLEAN, path: active}
+      - {name: ts, type: TIMESTAMP, expr: "(_['events'] or []) | map(attribute='timestamp') | min", transform: epoch_ms, description: "Earliest event (trigger) time of the incident"}
+      - {name: last_event_at, type: TIMESTAMP, expr: "(_['events'] or []) | map(attribute='timestamp') | max", transform: epoch_ms, description: "Latest event (re-trigger or clear) time"}
+      - {name: duration_ms, type: DOUBLE, path: duration, description: "Incident duration in ms (null while active)"}
+      - name: value
+        type: DOUBLE
+        expr: "(((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {}))['value'] if (((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {})) is mapping else (((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {}))"
+        description: "Value that triggered the rule: first input of the first event (inputs may be a list or an object keyed by stream label; both are handled)"
+      - name: dimensions
+        type: JSON
+        expr: "((((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {}))['dimensions'] or (((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {}))['key']) if (((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {})) is mapping else none"
+        description: "Dimensions of the time series that fired (input.dimensions, or input.key in the object form), e.g. dimensions->>'host'"
+      - {name: inputs, type: JSON, path: "events[0].inputs"}
+      - {name: events, type: JSON, path: events, description: "All trigger/clear events of the incident"}
+      - {name: linked_teams, type: JSON, path: linkedTeams}
+      - {name: is_muted, type: BOOLEAN, path: isMuted, description: "Muted by a muting rule (live responses / vendor SDK; not in the reference schema)"}
+      - {name: triggered_while_muted, type: BOOLEAN, path: triggeredWhileMuted, description: "Fired while muted, so no notification was sent (vendor SDK field)"}
+      - {name: include_resolved, type: BOOLEAN, filter_only: true}
+      - {name: query, filter_only: true}
+    sort_hint: "No server-side sort or time filter: ts predicates run in SQL; ORDER BY ts DESC."
+    pitfalls:
+      - "Only ACTIVE incidents by default: to look at an incident that already cleared, add include_resolved = true (state = 'OK' or 'MANUALLY_RESOLVED')."
+      - "One row per detector rule + time series (latest incident per ETS), max 10,000. Older incidents of the same series are not listed: use splunk_o11y_detector_events for history."
+      - "The trigger value/dimensions come from the first event's inputs; check `events` for the full trigger/clear sequence."
+      - "events[].inputs is documented as a list of {dimensions, fragment, value} for incidents but as an object keyed by stream label for detector events (and the vendor Go SDK models it as an object): value/dimensions handle both forms, the raw form stays in `inputs`."
+    examples:
+      - sql: >-
+          SELECT ts, severity, detector_name, detect_label, dimensions->>'host' AS host, value
+          FROM splunk_o11y_incidents ORDER BY ts DESC
+        description: What is firing right now, newest first, with the host that tripped the rule.
+      - sql: >-
+          SELECT id, ts, last_event_at, state, duration_ms, detector_id FROM splunk_o11y_incidents
+          WHERE include_resolved = true AND ts >= TIMESTAMP '2026-10-01 10:00:00' ORDER BY ts
+        description: Active and recently resolved incidents since 10:00 (ts filtered in SQL).
+      - sql: "SELECT detector_name, severity, state, events FROM splunk_o11y_incidents WHERE id = 'Cj5VGRiAEAM'"
+        description: One incident by ID (from the Slack alert link) with its full event sequence.
+    fixtures:
+      - file: incidents.json
+        expect_rows: 1
+        expect_columns: {id: string, severity: Critical, state: ANOMALOUS, active: true, ts: "2019-05-10T10:30:30Z", duration_ms: 0.0, detector_name: string, value: 0.0}
+        note: "Verbatim example response of GET /v2/incident from the dev.splunk.com 'Incidents and alerts' API reference."
+      - file: incident.json
+        filters: {incident_id: string}
+        expect_rows: 1
+        expect_columns: {id: string, severity: Critical, title: string / string}
+        note: "Verbatim example response of GET /v2/incident/{id} from the dev.splunk.com 'Incidents and alerts' API reference (single object)."
+      - file: incidents_inputs_object.json
+        filters: {query: 'teamId:FO1Vq3ABXYZ'}
+        expect_rows: 1
+        expect_columns: {id: string, severity: Critical, state: ANOMALOUS, value: 5.0, dimensions: null, ts: "2019-05-10T10:30:30Z"}
+        note: >-
+          Shape check for the object form of events[].inputs: the documented GET /v2/incident example
+          (Incidents and alerts reference) with its event's inputs replaced by the documented object
+          form {"A": 5, "B": 6} from the GET /v2/detector/{id}/events example (Detectors reference);
+          the vendor Go SDK (signalfx-go detector.Event.Inputs) also models inputs as an object.
+    docs_url: https://dev.splunk.com/observability/reference/api/incidents/latest
+
+  - name: splunk_o11y_detector_incidents
+    title: Active incidents of one detector
+    description: Active incidents generated by one detector (detector_id required). Same shape as splunk_o11y_incidents.
+    kind: alerts
+    request:
+      method: GET
+      path: "/v2/detector/{{ filters.detector_id | urlencode }}/incidents"
+      query: {limit: 100}
+    filters:
+      - {column: detector_id, required: true, description: "Detector ID", examples: ['FUbrSMYAEAA']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 10}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: incidentId}
+      - {name: detector_id, path: detectorId}
+      - {name: detector_name, expr: "_['detectorName'] or ((_['events'] or [{}])[0]['detectorName'])"}
+      - {name: detect_label, path: detectLabel}
+      - {name: severity, path: severity}
+      - {name: state, path: anomalyState}
+      - {name: active, type: BOOLEAN, path: active}
+      - {name: ts, type: TIMESTAMP, expr: "(_['events'] or []) | map(attribute='timestamp') | min", transform: epoch_ms}
+      - {name: value, type: DOUBLE, expr: "(((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {}))['value'] if (((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {})) is mapping else (((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {}))", description: "Triggering value (first input of the first event; list or object form)"}
+      - {name: dimensions, type: JSON, expr: "((((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {}))['dimensions'] or (((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {}))['key']) if (((((((_['events'] or [{}])[0]['inputs'] or {}).values() | list) if ((_['events'] or [{}])[0]['inputs'] or {}) is mapping else ((_['events'] or [{}])[0]['inputs'] | list)) | first) or {})) is mapping else none", description: "Dimensions of the series that fired"}
+      - {name: events, type: JSON, path: events}
+    examples:
+      - sql: "SELECT ts, severity, detect_label, dimensions, value FROM splunk_o11y_detector_incidents WHERE detector_id = 'FUbrSMYAEAA' ORDER BY ts DESC"
+        description: Everything one detector is currently alerting on.
+    fixtures:
+      - file: detector_incidents.json
+        filters: {detector_id: string}
+        expect_rows: 1
+        expect_columns: {detect_label: loadWarning, severity: Info, detector_name: JVM CPU Load detector, ts: "2019-05-10T10:30:30Z"}
+        note: "Verbatim example response of GET /v2/detector/{id}/incidents from the dev.splunk.com 'Detectors' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/detectors/latest
+
+  - name: splunk_o11y_detectors
+    title: Detectors (alert rules) - search
+    description: >-
+      Detector definitions: SignalFlow program (program_text), rules (severity, detect label,
+      notifications, runbook, tip), status, tags and teams. Filter by name (substring match on
+      the server) and/or tags. For one detector by ID use splunk_o11y_detector.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/detector
+      query:
+        name: "{{ (filters.name | replace('%', '')) if filters.name else none }}"
+        tags: "{{ filters.tags }}"
+        limit: 100
+    filters:
+      - {column: name, ops: ["=", "like"], description: "Server-side SUBSTRING match on the detector name ('cpu' also matches 'High CPU usage'); add title = '<exact>' for an exact match", examples: ['JVM CPU']}
+      - {column: tags, ops: ["=", "in"], fan_out: false, description: "Exact tag (repeatable)", examples: ['prod']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+    columns: &detector_columns
+      - {name: id, path: id, description: "Detector ID"}
+      - {name: name, path: name}
+      - {name: title, path: name, description: "Detector name (not pushed down: use for exact comparisons)"}
+      - {name: description, path: description}
+      - {name: program_text, path: programText, description: "SignalFlow program: the actual alert logic and thresholds"}
+      - {name: status, path: status, description: "ACTIVE | INITIALIZING | RETRYING_INITIALIZATION | ABORTED | FAILED (analytics job state)"}
+      - {name: severities, path: "rules[*].severity", transform: join, description: "Comma-separated rule severities"}
+      - {name: detect_labels, path: "rules[*].detectLabel", transform: join}
+      - {name: runbook_urls, path: "rules[*].runbookUrl", transform: join}
+      - {name: rules, type: JSON, path: rules, description: "Rules: detectLabel, severity, disabled, notifications, parameterizedBody, runbookUrl, tip"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: teams, type: JSON, path: teams}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms, description: "Last change of the detector (a recent edit can explain new/missing alerts)"}
+      - {name: creator, path: creator}
+      - {name: last_updated_by, path: lastUpdatedBy}
+      - {name: over_mts_limit, type: BOOLEAN, path: overMTSLimit, description: "true = detector matched too many MTS and was limited (it may miss alerts)"}
+      - {name: locked, type: BOOLEAN, path: locked}
+      - {name: detector_origin, path: detectorOrigin, description: "Standard | AutoDetect | AutoDetectCustomization"}
+      - {name: max_delay_ms, type: BIGINT, path: maxDelay}
+      - {name: min_delay_ms, type: BIGINT, path: minDelay}
+      - {name: label_resolutions, type: JSON, path: labelResolutions, description: "Evaluation resolution (ms) per publish label"}
+      - {name: custom_properties, type: JSON, path: customProperties}
+      - {name: timezone, path: timezone}
+    pitfalls:
+      - "name is a substring match on the server and the predicate is not re-checked in SQL: name = 'cpu' returns every detector whose name contains 'cpu'. Use title = '<exact name>' to pin one."
+      - "Returns at most 100 x 5 pages; filter by name or tags in large orgs."
+      - "status other than ACTIVE or over_mts_limit = true means the detector may not have been evaluating: absence of an alert is then not evidence of health."
+    examples:
+      - sql: >-
+          SELECT id, title, status, severities, program_text, last_updated FROM splunk_o11y_detectors
+          WHERE name LIKE '%checkout%' ORDER BY last_updated DESC
+        description: Detectors about checkout, with their SignalFlow logic and last edit time.
+      - sql: "SELECT title, status, over_mts_limit FROM splunk_o11y_detectors WHERE tags = 'prod' AND (status <> 'ACTIVE' OR over_mts_limit)"
+        description: Production detectors that are not evaluating normally.
+    fixtures:
+      - file: detectors.json
+        expect_rows: 1
+        expect_columns: {name: JVM CPU Load detector, status: ACTIVE, severities: Info, detect_labels: cpuLoad, created: "2019-05-02T19:30:30Z", over_mts_limit: false, program_text: "cpuLoad = data('jvm.cpu.load').percentile(pct=94).publish(label='cpuLoad'); detect(when(cpuLoad > 94)).publish('cpuLoad');"}
+        note: "Verbatim example response of GET /v2/detector from the dev.splunk.com 'Detectors' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/detectors/latest
+
+  - name: splunk_o11y_detector
+    title: Detector by ID
+    description: "One or more detectors by ID (e.g. detector_id of an incident): full SignalFlow program, rules, thresholds, status."
+    kind: entities
+    request:
+      method: GET
+      path: "/v2/detector/{{ filters.id | urlencode }}"
+    filters:
+      - {column: id, required: true, ops: ["=", "in"], description: "Detector ID", examples: ['FUbrSMYAEAA']}
+    response:
+      rows_path: "$"
+    columns: *detector_columns
+    examples:
+      - sql: "SELECT title, program_text, rules, status, last_updated FROM splunk_o11y_detector WHERE id = 'FUbrSMYAEAA'"
+        description: The rule behind an incident (detector_id from splunk_o11y_incidents).
+    fixtures:
+      - file: detector.json
+        filters: {id: string}
+        expect_rows: 1
+        expect_columns: {id: string, name: JVM CPU Load detector, severities: Info, last_updated: "2019-05-12T19:30:30Z"}
+        note: "Verbatim example response of GET /v2/detector/{id} from the dev.splunk.com 'Detectors' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/detectors/latest
+
+  - name: splunk_o11y_detector_events
+    title: Detector event history (trigger / clear)
+    description: >-
+      Alert and clear events generated by one detector in the ts window (detector_id required):
+      when each rule fired or cleared, severity, state transition and input values. The alert
+      history for a detector, including incidents that are no longer listed.
+    kind: events
+    request:
+      method: GET
+      path: "/v2/detector/{{ filters.detector_id | urlencode }}/events"
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        limit: 500
+    filters:
+      - {column: detector_id, required: true, description: "Detector ID", examples: ['FUbrSMYAEAA']}
+    time: {column: ts, default_lookback: 24h, max_window: 31d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 500, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: id, path: id, description: "Event ID"}
+      - {name: incident_id, path: incidentId}
+      - {name: detector_id, path: detectorId}
+      - {name: detector_name, path: detectorName}
+      - {name: detect_label, path: detectLabel}
+      - {name: severity, path: severity}
+      - {name: state, path: anomalyState, description: "ANOMALOUS = trigger event; OK / MANUALLY_RESOLVED / STOPPED = clear"}
+      - {name: inputs, type: JSON, path: inputs, description: "Detect-block input values at the event"}
+    sort_hint: "Order is not documented; ORDER BY ts."
+    examples:
+      - sql: >-
+          SELECT ts, state, severity, detect_label, incident_id FROM splunk_o11y_detector_events
+          WHERE detector_id = 'FUbrSMYAEAA' AND ts >= TIMESTAMP '2026-10-01 00:00:00' ORDER BY ts
+        description: Trigger/clear timeline of one detector (flapping, first onset).
+    fixtures:
+      - file: detector_events.json
+        filters: {detector_id: string}
+        expect_rows: 1
+        expect_columns: {state: ANOMALOUS, detect_label: loadWarning, detector_name: JVM CPU Load detector, ts: "1970-01-01T00:00:00Z"}
+        note: "Verbatim example response of GET /v2/detector/{id}/events from the dev.splunk.com 'Detectors' API reference (timestamp 0 as documented)."
+    docs_url: https://dev.splunk.com/observability/reference/api/detectors/latest
+
+  - name: splunk_o11y_events
+    title: Events (custom events such as deploys, and detector events)
+    description: >-
+      Events in the ts window matching a search query (required): custom events sent by CI/CD
+      or scripts (sf_eventCategory:USER_DEFINED, sf_eventType:<your type>) and alert events
+      (sf_eventCategory:ALERT). Use for deploys / config changes around an incident.
+    kind: changes
+    request:
+      method: GET
+      path: /v2/event/find
+      query:
+        query: "{{ filters.query }}"
+        start_time: "{{ time.start | epoch_ms }}"
+        end_time: "{{ time.end | epoch_ms }}"
+        order_by: "-sf_timestamp"
+        limit: 1000
+    filters:
+      - {column: query, required: true, description: "Event search, e.g. sf_eventType:deployment, sf_eventCategory:USER_DEFINED AND service:checkout", examples: ['sf_eventCategory:USER_DEFINED']}
+    time: {column: ts, default_lookback: 6h, max_window: 31d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: id, path: id}
+      - {name: event_type, path: sf_eventType, description: "Event type name (e.g. deployment)"}
+      - {name: title, path: sf_eventType}
+      - {name: category, path: sf_eventCategory, description: "USER_DEFINED | ALERT | AUDIT | JOB | COLLECTED | SERVICE_DISCOVERY | EXCEPTION"}
+      - {name: properties, type: JSON, path: properties, description: "Event properties (custom fields; for alert events: is/was/sf_notificationWasSent)"}
+      - {name: dimensions, type: JSON, path: metadata, description: "Event time series metadata (dimensions of the event)"}
+      - {name: service, expr: "(_['metadata'] or {})['service'] or (_['metadata'] or {})['sf_service'] or (_['properties'] or {})['service']"}
+      - {name: version, expr: "(_['properties'] or {})['version'] or (_['metadata'] or {})['version']"}
+      - {name: created, type: TIMESTAMP, path: sf_eventCreatedOnMs, transform: epoch_ms}
+      - {name: ts_id, path: tsId, description: "Event time series ID"}
+      - {name: query, filter_only: true}
+    sort_hint: "Sorted newest first (order_by=-sf_timestamp)."
+    pitfalls:
+      - "query is mandatory (HTTP 406 'At least one filtration clause must be specified'); use sf_eventCategory:USER_DEFINED for all custom events."
+      - "Field names in the query use the sf_ prefix for built-ins: sf_eventType, sf_eventCategory. Custom dimensions use their own names."
+      - "At most 10,000 events per query; limit max 9,999."
+    examples:
+      - sql: >-
+          SELECT ts, event_type, service, version, properties FROM splunk_o11y_events
+          WHERE query = 'sf_eventType:deployment'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Deployments recorded as custom events around the incident.
+    fixtures:
+      - file: event_find.json
+        filters: {query: 'sf_eventCategory:USER_DEFINED'}
+        expect_rows: 1
+        expect_columns: {id: AddBYZrEFEF, category: USER_DEFINED, ts: "2019-04-07T21:30:30Z", ts_id: XzZYApXCDCD}
+        note: "Verbatim example response (200) of GET /v2/event/find from the dev.splunk.com 'Retrieve events V2' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/retrieve_events_v2/latest
+
+  - name: splunk_o11y_audit_events
+    title: Audit events (configuration changes, API/UI requests)
+    description: >-
+      The org's audit trail in the ts window, newest first. category CUSTOMER_AUDIT (default):
+      configuration changes with operation (CREATE/UPDATE/DELETE), principal and resource
+      (event_type DASHBOARD | DETECTOR | DASHBOARD_GROUP | ORG_MEMBER | INTEGRATION | SLO).
+      category AUDIT: HTTP requests to the API/UI (HttpRequest: method, URI, status, user),
+      SessionLog and DetectorLog. Use it to answer "who changed the detector / muting /
+      integration right before the incident" and "was an alert rule deleted".
+    kind: changes
+    request:
+      method: GET
+      path: /v2/audit/events
+      query:
+        sf_eventCategory: "{{ filters.category or 'CUSTOMER_AUDIT' }}"
+        sf_eventType: "{{ filters.event_type }}"
+        startTime: "{{ time.start | epoch_ms }}"
+        endTime: "{{ time.end | epoch_ms }}"
+        sortBy: "-timestamp"
+        limit: 1000
+    filters:
+      - {column: category, ops: ["=", "in"], description: "CUSTOMER_AUDIT (configuration changes; default) | AUDIT (HTTP requests, sessions, detector logs)", examples: ['CUSTOMER_AUDIT']}
+      - {column: event_type, ops: ["=", "in"], description: "CUSTOMER_AUDIT: DASHBOARD | DETECTOR | DASHBOARD_GROUP | ORG_MEMBER | INTEGRATION | SLO; AUDIT: HttpRequest | SessionLog | DetectorLog", examples: ['DETECTOR']}
+    time: {column: ts, default_lookback: 24h, max_window: 31d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: id, path: id}
+      - {name: category, path: metadata.sf_eventCategory, description: "CUSTOMER_AUDIT | AUDIT"}
+      - {name: event_type, path: metadata.sf_eventType, description: "Resource kind (CUSTOMER_AUDIT) or HttpRequest / SessionLog / DetectorLog (AUDIT)"}
+      - {name: operation, path: properties.sf_operation, description: "CREATE | UPDATE | DELETE (CUSTOMER_AUDIT)"}
+      - {name: author, expr: "(_['properties'] or {})['sf_principal'] or (_['properties'] or {})['sf_email'] or (_['properties'] or {})['sf_userId']", description: "Who did it: sf_principal (config changes) or sf_email / sf_userId (requests)"}
+      - {name: resource_type, path: properties.sf_resourceType}
+      - {name: resource_id, path: properties.sf_resourceId, description: "ID of the changed object (e.g. a detector id usable with splunk_o11y_detector)"}
+      - {name: title, expr: "(_['properties'] or {})['sf_resourceName'] or (((_['properties'] or {})['sf_requestMethod'] or '') ~ ' ' ~ ((_['properties'] or {})['sf_requestUri'] or '')) | trim or none", description: "Changed resource name, or 'METHOD URI' for HTTP request events"}
+      - {name: request_method, path: properties.sf_requestMethod}
+      - {name: request_uri, path: properties.sf_requestUri}
+      - {name: status_code, type: BIGINT, path: properties.sf_responseStatus}
+      - {name: properties, type: JSON, path: properties, description: "All event properties"}
+      - {name: ts_id, path: tsId}
+    sort_hint: "Newest first (sortBy=-timestamp)."
+    pitfalls:
+      - "The token's user needs the READ_AUDIT_EVENTS capability (HTTP 403 otherwise); HTTP 404 'Feature not available' means audit events are not enabled for the org."
+      - "Only one category per request (CUSTOMER_AUDIT is the default): ask for category = 'AUDIT' to see raw API/UI requests (e.g. who called DELETE /v2/detector/...)."
+      - "offset + limit may not exceed 10,000 per query: narrow the window or add event_type."
+    examples:
+      - sql: >-
+          SELECT ts, event_type, operation, author, title, resource_id FROM splunk_o11y_audit_events
+          WHERE event_type IN ('DETECTOR', 'INTEGRATION')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 08:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Detector and integration changes in the hours before the incident (who changed alerting).
+      - sql: >-
+          SELECT ts, author, request_method, request_uri, status_code FROM splunk_o11y_audit_events
+          WHERE category = 'AUDIT' AND event_type = 'HttpRequest' AND request_method = 'DELETE'
+          ORDER BY ts DESC
+        description: Objects deleted through the API or UI in the analysis window.
+    fixtures:
+      - file: audit_events_customer.json
+        expect_rows: 1
+        expect_columns: {ts: "2024-12-05T23:48:20Z", category: CUSTOMER_AUDIT, event_type: DASHBOARD, operation: UPDATE, author: user@example.com, resource_id: E-dash456, title: Production Monitoring Dashboard}
+        note: "Verbatim 'customerAuditEvents' example response of GET /v2/audit/events from the dev.splunk.com 'Splunk Observability Cloud Audit Events' API reference."
+      - file: audit_events_http.json
+        filters: {category: AUDIT, event_type: HttpRequest}
+        expect_rows: 2
+        expect_columns: {id: E-xyz123abc, category: AUDIT, event_type: HttpRequest, author: user@example.com, request_method: POST, request_uri: /v2/detector, status_code: 200, title: POST /v2/detector, operation: null}
+        note: "Verbatim 'httpRequestEvents' example response of GET /v2/audit/events from the dev.splunk.com 'Splunk Observability Cloud Audit Events' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/audit_events/latest
+
+  - name: splunk_o11y_muting_rules
+    title: Alert muting rules
+    description: >-
+      Muting rules (maintenance windows) with their filters, start/stop time and recurrence.
+      Use to check whether an alert was muted (no notification) during the incident.
+      include = All (default) | Ongoing | Past | Future | Open.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/alertmuting
+      query:
+        include: "{{ filters.include or 'All' }}"
+        query: "{{ filters.query }}"
+        limit: 100
+    filters:
+      - {column: include, description: "All (default) | Ongoing | Past | Future | Open", examples: ['Ongoing']}
+      - {column: query, description: "sf_description:<pattern> or filter keywords, e.g. sf_description:cpu_*", examples: ['sf_description:*deploy*']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: description, path: description}
+      - {name: filters, type: JSON, path: filters, description: "Which detectors/dimensions are muted"}
+      - {name: start_time, type: TIMESTAMP, path: startTime, transform: epoch_ms}
+      - {name: stop_time, type: TIMESTAMP, path: stopTime, transform: epoch_ms, description: "1970-01-01 (0) means no end"}
+      - {name: recurrence, type: JSON, path: recurrence}
+      - {name: send_alerts_after_mute, type: BOOLEAN, path: sendAlertsOnceMutingPeriodHasEnded}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: creator, path: creator}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+      - {name: last_updated_by, path: lastUpdatedBy}
+      - {name: linked_teams, type: JSON, path: linkedTeams}
+      - {name: include, filter_only: true}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT id, description, filters, start_time, stop_time FROM splunk_o11y_muting_rules
+          WHERE start_time <= TIMESTAMP '2026-10-01 11:30:00'
+            AND (stop_time >= TIMESTAMP '2026-10-01 11:00:00' OR stop_time = TIMESTAMP '1970-01-01 00:00:00')
+        description: Muting rules active during the incident window (why nobody was paged).
+    fixtures:
+      - file: alertmuting.json
+        expect_rows: 1
+        expect_columns: {id: string, send_alerts_after_mute: true, created: "2019-05-02T19:30:30Z", start_time: "1970-01-01T00:00:00Z"}
+        note: "Verbatim example response of GET /v2/alertmuting from the dev.splunk.com 'Incidents and alerts' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/incidents/latest
+
+  - name: splunk_o11y_metric_timeseries
+    title: Metric time series (MTS) metadata search
+    description: >-
+      Active metric time series matching a search query (required): metric name, metric type
+      and the full dimension set of each series. Use it to discover which hosts/services report
+      a metric and the exact dimension names before writing SignalFlow.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/metrictimeseries
+      query:
+        query: "{{ filters.query }}"
+        searchInactive: "{{ filters.search_inactive }}"
+        limit: "{{ [limit or 1000, 10000] | min }}"
+    filters:
+      - {column: query, required: true, description: "sf_metric:<name> and/or <dimension>:<value>, _exists_:<dim>, AND/OR/NOT, * wildcards", examples: ['sf_metric:cpu.utilization AND host:web-*']}
+      - {column: search_inactive, type: BOOLEAN, description: "true to include inactive MTS (default false)"}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: id, path: id, description: "MTS id (tsId) when the API returns it; not listed in the reference schema"}
+      - {name: metric, path: metric}
+      - {name: type, path: type, description: "GAUGE | COUNTER | CUMULATIVE_COUNTER | HISTOGRAM"}
+      - {name: dimensions, type: JSON, path: dimensions, description: "All dimensions, e.g. dimensions->>'host'"}
+      - {name: host, expr: "(_['dimensions'] or {})['host'] or (_['dimensions'] or {})['host.name']"}
+      - {name: service, expr: "(_['dimensions'] or {})['sf_service'] or (_['dimensions'] or {})['service.name'] or (_['dimensions'] or {})['service']"}
+      - {name: custom_properties, type: JSON, path: customProperties}
+      - {name: tags, type: JSON, path: tags}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+      - {name: creator, path: creator}
+      - {name: query, filter_only: true}
+      - {name: search_inactive, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "Only ACTIVE MTS by default: a host that stopped reporting (crashed) disappears; set search_inactive = true to see it."
+      - "At most 10,000 MTS per query (isPartialCount=true when exceeded): add dimension terms."
+    examples:
+      - sql: >-
+          SELECT host, dimensions FROM splunk_o11y_metric_timeseries
+          WHERE query = 'sf_metric:cpu.utilization AND sf_environment:prod'
+        description: Which hosts report CPU in prod and with which dimensions.
+    fixtures:
+      - file: metrictimeseries.json
+        filters: {query: 'sf_metric:cpu.utilization'}
+        expect_rows: 1
+        expect_columns: {metric: string, type: GAUGE, created: "2019-05-13T10:30:30Z", id: null}
+        note: "Verbatim example response of GET /v2/metrictimeseries from the dev.splunk.com 'Metrics metadata' API reference (the example has no dimensions/id keys)."
+    docs_url: https://dev.splunk.com/observability/reference/api/metrics_metadata/latest
+
+  - name: splunk_o11y_mts
+    title: MTS metadata by ID (tsId)
+    description: "Metadata (metric, dimensions) of time series by ID: resolves the tsId keys returned by splunk_o11y_timeseries_window into hosts/services."
+    kind: entities
+    request:
+      method: GET
+      path: "/v2/metrictimeseries/{{ filters.id | urlencode }}"
+    filters:
+      - {column: id, required: true, ops: ["=", "in"], max_fan_out: 50, description: "MTS id (tsId)", examples: ['AAAAAAAAAAA']}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: metric, path: metric}
+      - {name: type, path: type}
+      - {name: dimensions, type: JSON, path: dimensions}
+      - {name: custom_properties, type: JSON, path: customProperties}
+      - {name: tags, type: JSON, path: tags}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+    examples:
+      - sql: "SELECT id, metric, dimensions FROM splunk_o11y_mts WHERE id IN ('AAAAAAAAAAA', 'AAAAAAAAAAE')"
+        description: Dimensions of the series returned by the timeserieswindow query.
+    fixtures:
+      - file: metrictimeseries_by_id.json
+        filters: {id: AAAAAAAAAAA}
+        expect_rows: 1
+        expect_columns: {id: AAAAAAAAAAA, metric: string, type: GAUGE}
+        note: "Verbatim example response of GET /v2/metrictimeseries/{id} from the dev.splunk.com 'Metrics metadata' API reference (id filled from the request)."
+    docs_url: https://dev.splunk.com/observability/reference/api/metrics_metadata/latest
+
+  - name: splunk_o11y_metrics
+    title: Metric names
+    description: Metric metadata (name, type, description, tags) by name; LIKE patterns become * wildcards. Use to find the exact metric name before SignalFlow.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/metric
+      query:
+        query: "{{ 'name:' ~ (filters.metric | replace('%', '*')) if filters.metric else 'name:*' }}"
+        limit: 1000
+    filters:
+      - {column: metric, ops: ["=", "like"], description: "Metric name; LIKE '%' becomes the * wildcard", examples: ['cpu.*']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$.*[*]"
+    columns:
+      - {name: metric, path: name}
+      - {name: type, path: type, description: "GAUGE | COUNTER | CUMULATIVE_COUNTER | HISTOGRAM"}
+      - {name: description, path: description}
+      - {name: custom_properties, type: JSON, path: customProperties}
+      - {name: tags, type: JSON, path: tags}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+    pitfalls:
+      - "The reference names the result array 'result' while the vendor Go SDK reads 'results'; rows_path $.*[*] accepts either (the only other top-level key, count, is a number)."
+      - "Metric names generated by Splunk start with sf. (e.g. sf.org.*); APM metrics are service.request.*, spans.*, traces.*."
+    examples:
+      - sql: "SELECT metric, type, description FROM splunk_o11y_metrics WHERE metric LIKE 'service.request%'"
+        description: APM request metrics available for SignalFlow.
+    fixtures:
+      - file: metrics.json
+        filters: {metric: 'cpu.*'}
+        expect_rows: 1
+        expect_columns: {metric: string, type: GAUGE, created: "2019-04-23T21:30:30Z"}
+        note: "Verbatim example response of GET /v2/metric from the dev.splunk.com 'Metrics metadata' API reference (array key 'result')."
+    docs_url: https://dev.splunk.com/observability/reference/api/metrics_metadata/latest
+
+  - name: splunk_o11y_dimensions
+    title: Dimension values
+    description: Dimension key/value pairs matching a query (required), e.g. key:host for all hosts, sf_service:* for all APM services; with their custom properties and tags.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/dimension
+      query:
+        query: "{{ filters.query }}"
+        limit: 1000
+    filters:
+      - {column: query, required: true, description: "key:<dimension> for all values of a dimension, or <dimension>:<value pattern>", examples: ['key:host']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: key, path: key}
+      - {name: value, path: value}
+      - {name: description, path: description}
+      - {name: custom_properties, type: JSON, path: customProperties}
+      - {name: tags, type: JSON, path: tags}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Dimension objects persist after a host stops reporting: presence here does not mean the host is alive (use splunk_o11y_metric_timeseries or SignalFlow)."
+    examples:
+      - sql: "SELECT value AS host, custom_properties FROM splunk_o11y_dimensions WHERE query = 'key:host'"
+        description: Host inventory (dimension values) with custom properties.
+    fixtures:
+      - file: dimensions.json
+        filters: {query: 'key:host'}
+        expect_rows: 1
+        expect_columns: {key: string, value: string, created: "2019-04-12T10:30:30Z"}
+        note: "Verbatim example response of GET /v2/dimension from the dev.splunk.com 'Metrics metadata' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/metrics_metadata/latest
+
+  - name: splunk_o11y_timeseries_window
+    title: MTS data points (timeserieswindow)
+    description: >-
+      Raw data points of every MTS matching a search query (required) in the ts window, one row
+      per (tsId, timestamp). Default rollup only (gauge: average, counter: sum, cumulative:
+      max); no aggregation or analytics (use splunk_o11y_signalflow for that). Resolution is
+      chosen from the window (1m up to 2 days, 5m up to 14 days, else 1h) unless resolution_ms
+      is given. Join ts_id to splunk_o11y_mts for dimensions.
+    kind: timeseries
+    request:
+      method: GET
+      path: /v1/timeserieswindow
+      query:
+        query: "{{ filters.query }}"
+        startMS: "{{ time.start | epoch_ms }}"
+        startMs: "{{ time.start | epoch_ms }}"
+        endMS: "{{ time.end | epoch_ms }}"
+        resolution: "{{ filters.resolution_ms if filters.resolution_ms else (60000 if time.range_s <= 172800 else (300000 if time.range_s <= 1209600 else 3600000)) }}"
+      accept_status: [404]
+    filters:
+      - {column: query, required: true, description: "sf_metric:<name> AND <dim>:<value> (same syntax as MTS search)", examples: ['sf_metric:cpu.utilization AND host:web-1']}
+      - {column: resolution_ms, type: BIGINT, description: "1000, 60000, 300000 or 3600000"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    response:
+      rows_path: "$.data"
+      expand:
+        - {entries: ".", as: s}
+        - {explode: "@s.value", as: p}
+      errors:
+        - {path: "$.errors", non_empty: true, message: "$.errors", hint: "timeserieswindow reported errors"}
+        - {path: "$.type", equals: error, message: "$.message", hint: "the documented error body {code, message, type: error} came back; check the query syntax and resolution"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ms}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: ts_id, path: "@s.key", description: "MTS id; resolve with splunk_o11y_mts"}
+      - {name: query, filter_only: true}
+      - {name: resolution_ms, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "HTTP 404 means 'query matched no MTS' and is returned as 0 rows: confirm the metric/dimension spelling with splunk_o11y_metric_timeseries."
+      - "Rows carry only the tsId; dimensions need a second query (splunk_o11y_mts WHERE id IN (...)). Prefer splunk_o11y_signalflow for grouped results."
+      - "The reference lists the start parameter as startMs while its text and endMS say startMS; both spellings are sent."
+      - "1-second data is only kept 8 days (Standard); older windows need resolution 60000 or coarser."
+    examples:
+      - sql: >-
+          SELECT ts_id, max(value) AS peak, arg_max(ts, value) AS peak_at FROM splunk_o11y_timeseries_window
+          WHERE query = 'sf_metric:cpu.utilization AND sf_environment:prod'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY ts_id ORDER BY peak DESC LIMIT 10
+        description: Top 10 CPU series by peak in the incident hour (then resolve ts_id via splunk_o11y_mts).
+    fixtures:
+      - file: timeserieswindow.json
+        filters: {query: 'sf_metric:cpu.utilization'}
+        expect_rows: 2
+        expect_columns: {ts_id: AAAAAAAAAAA, value: 227.07710813246499, ts: "2024-01-17T00:00:00Z"}
+        note: "Verbatim example response of GET /v1/timeserieswindow from the dev.splunk.com 'Retrieve metric time series (MTS)' API reference."
+      - file: timeserieswindow_error.json
+        filters: {query: 'sf_metric:cpu.utilization AND host:('}
+        expect_error: "API error: 400"
+        note: "Verbatim documented 400 error body of GET /v1/timeserieswindow ({code, message, type: error}); proves the error rule fires if such a body ever arrives with a 2xx status."
+    docs_url: https://dev.splunk.com/observability/reference/api/retrieve_timeserieswindow/latest
+
+  - name: splunk_o11y_signalflow
+    title: SignalFlow analytics (metrics query)
+    description: >-
+      Execute a SignalFlow program over the ts window and return one row per (published series,
+      timestamp) with the series' metric, stream label and dimensions. This is the native metrics
+      query language (aggregations, percentiles, by= grouping, APM RED metrics). program
+      (required) must publish() every stream you want. Python fetcher: POST
+      https://stream.<realm>.observability.splunkcloud.com/v2/signalflow/execute?start=<ms>&stop=<ms>&resolution=<ms>&immediate=true
+      with the program as text/plain; the response is a Server-Sent Events stream (control-message,
+      metadata, data, event, message, error) that the fetcher parses until END_OF_CHANNEL.
+    kind: timeseries
+    python: "omniops.sources.python.splunk_o11y:signalflow_execute"
+    filters:
+      - {column: program, required: true, description: "SignalFlow program with publish()", examples: ["data('cpu.utilization', filter=filter('sf_environment', 'prod')).mean(by=['host']).publish(label='A')"]}
+      - {column: resolution_ms, type: BIGINT, description: "Minimum resolution in ms (default: window / ~300 points, at least 10 s)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    columns:
+      - {name: ts, type: TIMESTAMP, description: "logicalTimestampMs of the data message"}
+      - {name: value, type: DOUBLE}
+      - {name: ts_id, description: "Output time series id (tsId)"}
+      - {name: label, description: "publish() label (sf_streamLabel)"}
+      - {name: metric, description: "sf_originatingMetric or sf_metric of the series"}
+      - {name: dimensions, type: JSON, description: "Non-internal metadata properties of the series (host, sf_service, ...)"}
+      - {name: properties, type: JSON, description: "All metadata properties of the series"}
+      - {name: program, filter_only: true}
+      - {name: resolution_ms, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Needs a token of a user/org token allowed to run SignalFlow (power or admin role); 401 otherwise."
+      - "Streams without publish() return nothing. One query, many series: aggregate with .mean(by=[...]) rather than fetching every host."
+      - "SSE data payloads span several 'data:' lines; the fetcher joins them before JSON-decoding (do not reimplement line by line)."
+      - "The computation is run with immediate=true so it stops at 'stop' instead of waiting for late data; the last bucket may be incomplete."
+    examples:
+      - sql: >-
+          SELECT dimensions->>'host' AS host, max(value) AS peak FROM splunk_o11y_signalflow
+          WHERE program = 'data(''cpu.utilization'', filter=filter(''sf_environment'', ''prod'')).mean(by=[''host'']).publish(label=''cpu'')'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC LIMIT 10
+        description: Hosts with the highest CPU during the incident hour.
+      - sql: >-
+          SELECT ts, value FROM splunk_o11y_signalflow
+          WHERE program = 'data(''service.request.count'', filter=filter(''sf_service'', ''checkout'') and filter(''sf_error'', ''true'')).sum().publish(label=''errors'')'
+          ORDER BY ts
+        description: Checkout APM error count over the analysis window.
+    docs_url: https://dev.splunk.com/observability/reference/api/signalflow/latest
+
+  - name: splunk_o11y_services
+    title: APM services (topology nodes)
+    description: Services (and inferred databases / pub-sub) seen in APM spans in the ts window, optionally for one environment (env). Window must be >= 5 minutes and within trace retention.
+    kind: entities
+    request:
+      method: POST
+      path: /v2/apm/topology
+      body: &topology_body
+        timeRange: "{{ [time.start | epoch_ms, (time.end | epoch_ms) - 360000] | min }}/{{ time.end | epoch_ms }}"
+        tagFilters: "{{ [{'name': 'sf_environment', 'operator': 'equals', 'scope': 'GLOBAL', 'value': filters.env}] if filters.env else none }}"
+    filters:
+      - {column: env, description: "APM environment (sf_environment), e.g. prod", examples: ['prod']}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, retention: 8d}
+    response:
+      rows_path: "$.nodes[*]"
+      errors:
+        - {path: "$.data.nodes", non_empty: true, message: "$.data", hint: "topology came back wrapped in 'data' (undocumented); rows_path must become $.data.nodes[*]"}
+    columns:
+      - {name: service, path: serviceName}
+      - {name: type, path: type, description: "service | database | pubsub"}
+      - {name: inferred, type: BOOLEAN, path: inferred, description: "Inferred (uninstrumented) service such as a database seen from client spans"}
+      - {name: env, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Without env, services of every environment are merged."
+      - "The documented constraint is 5 minutes < (end - start) < span retention (8 days by default): windows shorter than 6 minutes are widened to end - 6 min; longer than 7 days are clamped."
+      - "APM API requests are limited to 100 per minute per org (HTTP 429 beyond): avoid fanning out topology/trace calls."
+    examples:
+      - sql: "SELECT service, type, inferred FROM splunk_o11y_services WHERE env = 'prod' ORDER BY service"
+        description: Service inventory of the prod environment.
+    fixtures:
+      - file: apm_topology.json
+        filters: {env: prod}
+        expect_rows: 1
+        expect_columns: {service: service_five, type: database, inferred: false}
+        note: "Verbatim example response of POST /v2/apm/topology from the dev.splunk.com 'APM service topology' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/apm_service_topology/latest
+
+  - name: splunk_o11y_service_map
+    title: APM service map (topology edges)
+    description: Caller -> callee edges between services seen in APM spans in the ts window, optionally for one environment (env). Filter rows in SQL on from_service / to_service.
+    kind: entities
+    request:
+      method: POST
+      path: /v2/apm/topology
+      body: *topology_body
+    filters:
+      - {column: env, description: "APM environment (sf_environment)", examples: ['prod']}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, retention: 8d}
+    response:
+      rows_path: "$.edges[*]"
+      errors:
+        - {path: "$.data.edges", non_empty: true, message: "$.data", hint: "topology came back wrapped in 'data' (undocumented); rows_path must become $.data.edges[*]"}
+    columns:
+      - {name: from_service, path: fromNode, description: "Calling service"}
+      - {name: to_service, path: toNode, description: "Called service / database"}
+      - {name: env, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT from_service, to_service FROM splunk_o11y_service_map
+          WHERE env = 'prod' AND (from_service = 'checkout' OR to_service = 'checkout')
+        description: Upstream callers and downstream dependencies of checkout.
+    fixtures:
+      - file: apm_topology.json
+        filters: {env: prod}
+        expect_rows: 1
+        expect_columns: {from_service: service_start, to_service: service_end}
+        note: "Verbatim example response of POST /v2/apm/topology from the dev.splunk.com 'APM service topology' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/apm_service_topology/latest
+
+  - name: splunk_o11y_service_dependencies
+    title: Direct dependencies of one APM service
+    description: Inbound and outbound services of one service (service required) in the ts window, optionally for one env. One row per related service with direction.
+    kind: entities
+    request:
+      method: POST
+      path: "/v2/apm/topology/{{ filters.service | urlencode }}"
+      body: *topology_body
+    filters:
+      - {column: service, required: true, description: "APM service name (sf_service)", examples: ['checkout']}
+      - {column: env, description: "APM environment (sf_environment)", examples: ['prod']}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, retention: 8d}
+    response:
+      rows_path: "$.services[*]"
+    columns:
+      - {name: dependency, path: serviceName, description: "Related service"}
+      - {name: direction, expr: "'inbound' if _['serviceName'] in (root['inbound'] or []) else ('outbound' if _['serviceName'] in (root['outbound'] or []) else 'unknown')", description: "inbound or outbound, as listed by the API"}
+      - {name: type, path: type}
+      - {name: inferred, type: BOOLEAN, path: inferred}
+      - {name: inbound, type: JSON, path: "$.inbound"}
+      - {name: outbound, type: JSON, path: "$.outbound"}
+      - {name: service, filter_only: true}
+      - {name: env, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "An unknown service name returns HTTP 200 with an empty body (0 rows), not an error: check the name with splunk_o11y_services."
+      - "Transitive dependencies are not included."
+    examples:
+      - sql: "SELECT dependency, direction, type FROM splunk_o11y_service_dependencies WHERE service = 'checkout' AND env = 'prod'"
+        description: Direct neighbours of checkout.
+    fixtures:
+      - file: apm_topology_service.json
+        filters: {service: checkout}
+        expect_rows: 1
+        expect_columns: {dependency: service_five, type: database, direction: unknown, inferred: false}
+        note: "Verbatim example response of POST /v2/apm/topology/{serviceName} from the dev.splunk.com 'APM service topology' API reference (its placeholder services list does not repeat the inbound/outbound names, hence direction 'unknown')."
+    docs_url: https://dev.splunk.com/observability/reference/api/apm_service_topology/latest
+
+  - name: splunk_o11y_trace
+    title: APM trace by ID (latest segment)
+    description: "All persisted spans of one trace (trace_id required, hex): service, operation, start, duration, parent, tags and span logs. One row per span."
+    kind: spans
+    request:
+      method: GET
+      path: "/v2/apm/trace/{{ filters.trace_id | urlencode }}/latest"
+      headers: {Accept: application/json}
+    filters:
+      - {column: trace_id, required: true, description: "Trace ID (hex)", examples: ['4bf92f3577b34da6a3ce929d0e0e4736']}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: trace_id, path: traceId}
+      - {name: span_id, path: spanId}
+      - {name: parent_id, path: parentId, description: "Parent span id; the string 'null' for the root span"}
+      - {name: service, path: serviceName}
+      - {name: operation, path: operationName}
+      - {name: ts, type: TIMESTAMP, path: startTime, transform: auto_time}
+      - {name: duration_ms, type: DOUBLE, path: durationMicros, transform: us_to_ms}
+      - {name: status_code, expr: "(_['tags'] or {})['http.status_code'] or (_['tags'] or {})['http.response.status_code']"}
+      - {name: error, type: BOOLEAN, expr: "(_['tags'] or {})['error'] in (true, 'true') or (_['tags'] or {})['otel.status_code'] == 'ERROR'"}
+      - {name: kind, expr: "(_['tags'] or {})['span.kind']"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: process_tags, type: JSON, path: processTags}
+      - {name: logs, type: JSON, path: logs}
+      - {name: object_type, path: objectType}
+    pitfalls:
+      - "Raw traces are kept 8 days by default; an older or unknown trace id is an HTTP 404."
+      - "There is no public REST trace search: get trace ids from logs (trace_id field) or alert payloads."
+    examples:
+      - sql: >-
+          SELECT service, operation, duration_ms, error, status_code, parent_id FROM splunk_o11y_trace
+          WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736' ORDER BY duration_ms DESC
+        description: Slowest and failing spans of a trace referenced in an error log.
+    fixtures:
+      - file: apm_trace_latest.json
+        filters: {trace_id: string}
+        expect_rows: 1
+        expect_columns: {service: string, operation: string, duration_ms: 0.0, object_type: string}
+        note: "Verbatim example response of GET /v2/apm/trace/{traceId}/latest from the dev.splunk.com 'Download APM traces' API reference (placeholder values)."
+    docs_url: https://dev.splunk.com/observability/reference/api/trace_id/latest
+
+  - name: splunk_o11y_slos
+    title: SLOs
+    description: >-
+      Service level objectives: target (e.g. 99.9), compliance period, SLI program (good/total
+      events SignalFlow) and alert rules (breach, error budget left, burn rate). Filter by name,
+      service (sf_service metadata), id, or alerting = true for SLOs with active alerts.
+    kind: entities
+    request:
+      method: POST
+      path: /v2/slo/search
+      query: {limit: 100}
+      body:
+        name: "{{ (filters.name | replace('%', '')) if filters.name else none }}"
+        sloIds: "{{ (filters.id | as_list) if filters.id else none }}"
+        metadata: "{{ [['sf_service:' ~ filters.service]] if filters.service else none }}"
+        breachAlertsTriggered: "{{ true if filters.alert_type == 'breach' else none }}"
+        errorBudgetLeftAlertsTriggered: "{{ true if filters.alert_type == 'error_budget_left' else none }}"
+        burnRateAlertsTriggered: "{{ true if filters.alert_type == 'burn_rate' else none }}"
+    filters:
+      - {column: name, ops: ["=", "like"], description: "Substring match on the SLO name", examples: ['checkout']}
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "SLO id(s)"}
+      - {column: service, description: "APM service in the SLO metadata (sf_service)", examples: ['checkout']}
+      - {column: alert_type, ops: ["=", "in"], description: "Only SLOs whose alerts of this kind are triggered: breach | error_budget_left | burn_rate (IN fans out, one search per kind)", examples: ['breach']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: description, path: description}
+      - {name: type, path: type, description: "RequestBased | WindowBased"}
+      - {name: target, type: DOUBLE, path: "targets[0].slo", description: "Target percentage, e.g. 99.99"}
+      - {name: compliance_period, path: "targets[0].compliancePeriod"}
+      - {name: target_type, path: "targets[0].type", description: "RollingWindow | CalendarWindow"}
+      - {name: program_text, path: inputs.programText, description: "SignalFlow of the good/total event streams"}
+      - {name: inputs, type: JSON, path: inputs}
+      - {name: targets, type: JSON, path: targets, description: "Targets with their alert rules"}
+      - {name: metadata, type: JSON, path: metadata}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+      - {name: creator, path: creator}
+      - {name: service, filter_only: true}
+      - {name: alert_type, filter_only: true, description: "breach | error_budget_left | burn_rate (pushdown only)"}
+    pitfalls:
+      - "Requires a power or admin token (read_only gets 403)."
+      - "The response has no current compliance or remaining error budget: evaluate the SLI with splunk_o11y_signalflow using program_text, or check the SLO's alerting status with alert_type = 'breach' / 'burn_rate' / 'error_budget_left'."
+      - "Without filters the search body is {} (all body properties are optional) and returns every SLO, newest change first (orderBy default -lastUpdated)."
+    examples:
+      - sql: "SELECT name, target, compliance_period, program_text FROM splunk_o11y_slos WHERE service = 'checkout'"
+        description: SLOs defined for checkout.
+      - sql: "SELECT DISTINCT id, name, target, alert_type FROM splunk_o11y_slos WHERE alert_type IN ('breach', 'burn_rate', 'error_budget_left')"
+        description: SLOs with an active breach / burn-rate / error-budget alert (one search per kind).
+    fixtures:
+      - file: slo_search.json
+        filters: {service: checkout}
+        expect_rows: 1
+        expect_columns: {id: FrvcMakAAAA, name: Test SLO, target: 99.99, compliance_period: 30d, type: RequestBased, target_type: RollingWindow}
+        note: "Verbatim example response of POST /v2/slo/search from the dev.splunk.com 'SLOs' API reference."
+      - file: slo_search.json
+        filters: {alert_type: burn_rate}
+        expect_rows: 1
+        expect_columns: {name: Test SLO, alert_type: burn_rate}
+        note: "Same documented POST /v2/slo/search example; checks that the alert_type pushdown value is carried into rows."
+    docs_url: https://dev.splunk.com/observability/reference/api/slo/latest
+
+  - name: splunk_o11y_synthetic_tests
+    title: Synthetic tests
+    description: >-
+      Synthetic Monitoring tests (browser, API, HTTP, port, SSL) with their last run status and
+      time, frequency and locations. Filter by search (name/type text), type, last_run_status
+      (success | failed | pending) or active.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/synthetics/tests
+      query:
+        search: "{{ filters.search }}"
+        testType: "{{ filters.type }}"
+        lastRunStatus: "{{ filters.last_run_status }}"
+        active: "{{ filters.active }}"
+    filters:
+      - {column: search, description: "Text matched against test name or type", examples: ['checkout']}
+      - {column: type, description: "browser | api | http | port | ssl | uptime", examples: ['browser']}
+      - {column: last_run_status, ops: ["=", "in"], fan_out: false, description: "success | failed | pending", examples: ['failed']}
+      - {column: active, type: BOOLEAN, description: "true = running tests, false = paused"}
+    pagination: {type: page, page_param: query.page, limit_param: query.perPage, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$.tests[*]"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: type, path: type}
+      - {name: active, type: BOOLEAN, path: active}
+      - {name: last_run_status, path: lastRunStatus}
+      - {name: state, path: lastRunStatus}
+      - {name: last_run_at, type: TIMESTAMP, path: lastRunAt, transform: auto_time}
+      - {name: frequency_min, type: BIGINT, path: frequency, description: "Run frequency in minutes"}
+      - {name: location_ids, type: JSON, path: locationIds}
+      - {name: scheduling_strategy, path: schedulingStrategy}
+      - {name: automatic_retries, type: BIGINT, path: automaticRetries}
+      - {name: custom_properties, type: JSON, path: customProperties}
+      - {name: created_at, type: TIMESTAMP, path: createdAt, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: auto_time}
+      - {name: search, filter_only: true}
+    examples:
+      - sql: "SELECT id, name, type, last_run_at FROM splunk_o11y_synthetic_tests WHERE last_run_status = 'failed' AND active = true"
+        description: Synthetic checks currently failing (user-facing impact).
+    fixtures:
+      - file: synthetics_tests.json
+        expect_rows: 1
+        expect_columns: {id: 1, name: My Test, type: browser, last_run_status: success, last_run_at: "2022-09-14T14:36:45Z", frequency_min: 5}
+        note: "Verbatim example response of GET /v2/synthetics/tests from the dev.splunk.com 'Synthetics tests' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/synthetics_tests/latest
+
+  - name: splunk_o11y_synthetic_runs
+    title: Synthetic test runs
+    description: "Runs of one synthetic test (test_id required) in the ts window: per location, success, duration, message. Filter success = false for failures."
+    kind: events
+    request:
+      method: GET
+      path: "/v2/synthetics/tests/{{ filters.test_id }}/runs"
+      query:
+        startTime: "{{ time.start | rfc3339 }}"
+        endTime: "{{ time.end | rfc3339 }}"
+        success: "{{ filters.success }}"
+    filters:
+      - {column: test_id, type: BIGINT, required: true, description: "Synthetic test id", examples: ['1']}
+      - {column: success, type: BOOLEAN, description: "true = successful runs only, false = failed runs only"}
+    time: {column: ts, default_lookback: 6h, max_window: 31d}
+    pagination: {type: page, page_param: query.page, limit_param: query.perPage, page_size: 500, start: 1, max_pages: 5}
+    response:
+      rows_path: "$.runs[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time}
+      - {name: run_id, path: runId}
+      - {name: test_id, type: BIGINT, path: testId}
+      - {name: test_type, path: testType}
+      - {name: location, path: location}
+      - {name: location_id, path: locationId}
+      - {name: success, type: BOOLEAN, path: success}
+      - {name: message, path: message}
+      - {name: duration_ms, type: DOUBLE, path: runDurationMs}
+      - {name: trigger_type, path: triggerType}
+      - {name: auto_retry, type: BOOLEAN, path: autoRetry}
+    examples:
+      - sql: >-
+          SELECT ts, location, message, duration_ms FROM splunk_o11y_synthetic_runs
+          WHERE test_id = 1 AND success = false ORDER BY ts
+        description: "Failed runs of a synthetic test: when failures started and from which locations."
+    fixtures:
+      - file: synthetics_runs.json
+        filters: {test_id: 1}
+        expect_rows: 1
+        expect_columns: {run_id: string, success: true, test_type: browser, trigger_type: scheduled, duration_ms: 0.0}
+        note: "Verbatim example response of GET /v2/synthetics/tests/{id}/runs from the dev.splunk.com 'Synthetics tests' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/synthetics_tests/latest
+
+  - name: splunk_o11y_dashboards
+    title: Dashboards
+    description: Dashboards (name substring filter) with their chart ids, filters and group; use to find the dashboard engineers look at for a service.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/dashboard
+      query:
+        name: "{{ (filters.name | replace('%', '')) if filters.name else none }}"
+        chartId: "{{ filters.chart_id }}"
+        limit: 100
+    filters:
+      - {column: name, ops: ["=", "like"], description: "Substring match on dashboard name (ASCII only)", examples: ['Latency']}
+      - {column: chart_id, description: "Only the dashboard(s) containing this chart ID", examples: ['XY1XX5']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: description, path: description}
+      - {name: group_id, path: groupId}
+      - {name: chart_ids, path: "charts[*].chartId", transform: join}
+      - {name: charts, type: JSON, path: charts}
+      - {name: filters, type: JSON, path: filters, description: "Dashboard filters (sources, time, variables)"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+      - {name: creator, path: creator}
+      - {name: last_updated_by, path: lastUpdatedBy}
+      - {name: chart_id, filter_only: true, description: "Chart ID pushdown (dashboards containing it)"}
+    examples:
+      - sql: "SELECT id, title, description, chart_ids FROM splunk_o11y_dashboards WHERE name LIKE '%checkout%'"
+        description: Dashboards about checkout.
+    fixtures:
+      - file: dashboards.json
+        expect_rows: 1
+        expect_columns: {id: ZZZXXXX, name: Latency, group_id: YYXXYY, chart_ids: XY1XX5}
+        note: "Verbatim example response of GET /v2/dashboard from the dev.splunk.com 'Dashboards' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/dashboards/latest
+
+  - name: splunk_o11y_chart
+    title: Chart by ID (the SignalFlow behind a dashboard chart)
+    description: >-
+      One or more charts by ID (e.g. from splunk_o11y_dashboards.chart_ids): name, SignalFlow
+      program_text, chart type, time range, publish labels and related detector IDs. Use it to
+      reproduce exactly what an engineer's dashboard chart shows with splunk_o11y_signalflow.
+    kind: entities
+    request:
+      method: GET
+      path: "/v2/chart/{{ filters.id | urlencode }}"
+    filters:
+      - {column: id, required: true, ops: ["=", "in"], max_fan_out: 30, description: "Chart ID", examples: ['XY1XX5']}
+    response:
+      rows_path: "$"
+    columns: &chart_columns
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: description, path: description}
+      - {name: program_text, path: programText, description: "SignalFlow program of the chart (run it with splunk_o11y_signalflow)"}
+      - {name: type, path: options.type, description: "TimeSeriesChart | SingleValue | List | Heatmap | Text | TableChart | Event ..."}
+      - {name: time_range, type: JSON, path: options.time, description: "Chart time setting (relative range in ms or absolute start/end)"}
+      - {name: publish_labels, type: JSON, path: options.publishLabelOptions, description: "Display name, unit, prefix/suffix per publish() label"}
+      - {name: related_detector_ids, type: JSON, path: relatedDetectorIds}
+      - {name: auto_detect_related_detector_ids, type: JSON, path: autoDetectRelatedDetectorIds}
+      - {name: tags, type: JSON, path: tags}
+      - {name: options, type: JSON, path: options}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+      - {name: last_updated_by, path: lastUpdatedBy}
+      - {name: creator, path: creator}
+    pitfalls:
+      - "Text and event-feed charts have no SignalFlow (program_text is null or empty)."
+      - "Chart programs often use dashboard filters/variables that are applied on top of programText in the UI; add the dashboard's filters (splunk_o11y_dashboards.filters) to the program to reproduce the exact series."
+    examples:
+      - sql: >-
+          SELECT c.title, c.program_text FROM splunk_o11y_chart c
+          WHERE c.id IN ('XY1XX5', 'XY1XX6')
+        description: SignalFlow behind two charts of the service dashboard (ids from splunk_o11y_dashboards.chart_ids).
+    fixtures:
+      - file: chart.json
+        filters: {id: string}
+        expect_rows: 1
+        expect_columns: {id: string, name: string, program_text: string, type: Heatmap, created: "2019-05-11T00:30:30Z"}
+        note: "Verbatim example response of GET /v2/chart/{id} from the dev.splunk.com 'Charts' API reference."
+    docs_url: https://dev.splunk.com/observability/reference/api/charts/latest
+
+  - name: splunk_o11y_charts
+    title: Charts - search by name / tags
+    description: Charts whose name contains the given text (server-side substring) and/or carry a tag; one row per chart with the same columns as splunk_o11y_chart.
+    kind: entities
+    request:
+      method: GET
+      path: /v2/chart
+      query:
+        name: "{{ (filters.name | replace('%', '')) if filters.name else none }}"
+        tags: "{{ filters.tags }}"
+        limit: 100
+    filters:
+      - {column: name, ops: ["=", "like"], description: "Substring match on the chart name", examples: ['latency']}
+      - {column: tags, ops: ["=", "in"], fan_out: false, description: "Chart tag; several tags are OR-ed by the API", examples: ['checkout']}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+    columns: *chart_columns
+    pitfalls:
+      - "name is a server-side substring match and is not re-checked in SQL; compare title for an exact name."
+      - "The documented list example omits programText; if program_text is null here, fetch the chart by id with splunk_o11y_chart."
+    examples:
+      - sql: "SELECT id, title, type, program_text FROM splunk_o11y_charts WHERE name LIKE '%latency%'"
+        description: Latency charts and their SignalFlow.
+    fixtures:
+      - file: charts.json
+        filters: {name: string}
+        expect_rows: 1
+        expect_columns: {id: string, type: Heatmap, program_text: null, last_updated: "2019-05-13T00:30:30Z"}
+        note: "Verbatim example response of GET /v2/chart from the dev.splunk.com 'Charts' API reference (the list example has no programText)."
+    docs_url: https://dev.splunk.com/observability/reference/api/charts/latest
+
+roles:
+  active_alerts:
+    table: splunk_o11y_incidents
+    columns: {ts: ts, name: detector_name, title: title, state: state, severity: severity, id: id, labels: dimensions}
+  alert_rules:
+    - table: splunk_o11y_detector
+      filters: {id: "{{ alert_id }}"}
+      columns: {name: name, title: title, query: program_text, severity: severities}
+    - table: splunk_o11y_detectors
+      columns: {name: name, title: title, query: program_text, severity: severities}
+  alert_history:
+    - table: splunk_o11y_detector_events
+      filters: {detector_id: "{{ alert_id }}"}
+      columns: {ts: ts, state: state, severity: severity, id: incident_id}
+    - table: splunk_o11y_events
+      filters: {query: "sf_eventCategory:ALERT"}
+      columns: {ts: ts, title: title, labels: dimensions}
+  incidents:
+    table: splunk_o11y_incidents
+    filters: {include_resolved: "true"}
+    columns: {ts: ts, title: title, state: state, severity: severity, id: id}
+  metrics:
+    - table: splunk_o11y_signalflow
+      query_language: signalflow
+      columns: {ts: ts, value: value, metric: metric, labels: dimensions}
+    - table: splunk_o11y_timeseries_window
+      query_language: o11y_search
+      columns: {ts: ts, value: value}
+  change_events:
+    - table: splunk_o11y_events
+      filters: {query: "sf_eventCategory:USER_DEFINED"}
+      columns: {ts: ts, title: title, service: service, version: version, labels: properties}
+      notes: "Deploy / config-change events sent by CI/CD as custom events"
+    - table: splunk_o11y_audit_events
+      filters: {category: CUSTOMER_AUDIT}
+      columns: {ts: ts, title: title, author: author, id: resource_id, labels: properties}
+      notes: "Changes to detectors, dashboards, SLOs, integrations and members inside Splunk Observability Cloud"
+  services:
+    table: splunk_o11y_services
+    filters: {env: "{{ env or '' }}"}
+    columns: {service: service}
+  service_map:
+    table: splunk_o11y_service_map
+    filters: {env: "{{ env or '' }}"}
+    columns: {from: from_service, to: to_service}
+  trace_detail:
+    table: splunk_o11y_trace
+    columns: {trace_id: trace_id, span_id: span_id, service: service, resource: operation, ts: ts, duration_ms: duration_ms, status_code: status_code}
+  hosts:
+    table: splunk_o11y_dimensions
+    filters: {query: "key:host"}
+    columns: {host: value}
+  slo:
+    table: splunk_o11y_slos
+    filters: {service: "{{ service or '' }}"}
+    columns: {title: title, id: id}
+  dashboards:
+    - table: splunk_o11y_dashboards
+      columns: {title: title, id: id}
+    - table: splunk_o11y_chart
+      columns: {title: title, id: id, query: program_text}
+      notes: "Chart definitions (SignalFlow) by id, from dashboard chart_ids"

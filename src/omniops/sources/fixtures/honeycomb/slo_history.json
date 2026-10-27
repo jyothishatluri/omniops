@@ -1,0 +1,21 @@
+{
+ "2LBq9LckbcA": [
+  {
+   "timestamp": 1744650000,
+   "compliance": 91.44851657940663,
+   "budget_remaining": 14.48516579406632
+  },
+  {
+   "timestamp": 1744653600,
+   "compliance": 97.98746514671242,
+   "budget_remaining": 88.13453467953423
+  }
+ ],
+ "CzcpPs7cJ4d": [
+  {
+   "timestamp": 1744650000,
+   "compliance": 93.53414567784128,
+   "budget_remaining": -71.02966841186735
+  }
+ ]
+}

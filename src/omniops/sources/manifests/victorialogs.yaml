@@ -1,0 +1,443 @@
+# VictoriaLogs (single-node or cluster vlselect): LogsQL over HTTP. Logs come back as JSON lines; hits,
+# facets, streams and field names/values are JSON; stats endpoints answer in Prometheus query format.
+# Docs: https://docs.victoriametrics.com/victorialogs/querying/   (LogsQL: https://docs.victoriametrics.com/victorialogs/logsql/)
+source: victorialogs
+display_name: VictoriaLogs
+vendor: VictoriaMetrics Inc.
+description: >-
+  VictoriaLogs LogsQL API: raw log search, log hit counts over time, stats (instant and range), facets,
+  streams and field names/values, per tenant.
+docs_url: https://docs.victoriametrics.com/victorialogs/querying/
+categories: [logs]
+base_url: "{{ env.VICTORIALOGS_URL.rstrip('/') }}"
+env:
+  - {name: VICTORIALOGS_URL, description: "VictoriaLogs (or vlselect / vmauth) root, e.g. http://victorialogs:9428 (no /select path)"}
+  - {name: VICTORIALOGS_ACCOUNT_ID, description: "Optional tenant AccountID header (default tenant 0:0)"}
+  - {name: VICTORIALOGS_PROJECT_ID, description: "Optional tenant ProjectID header"}
+  - {name: VICTORIALOGS_TOKEN, description: "Optional bearer token for the auth proxy (vmauth)", secret: true}
+  - {name: VICTORIALOGS_USERNAME, description: "Optional basic-auth user for the proxy"}
+  - {name: VICTORIALOGS_PASSWORD, description: "Optional basic-auth password for the proxy", secret: true}
+required_env: [VICTORIALOGS_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Bearer ' ~ env.VICTORIALOGS_TOKEN) if env.VICTORIALOGS_TOKEN
+      else (('Basic ' ~ ((env.VICTORIALOGS_USERNAME ~ ':' ~ env.VICTORIALOGS_PASSWORD) | b64)) if env.VICTORIALOGS_USERNAME else None) }}
+headers:
+  AccountID: "{{ env.VICTORIALOGS_ACCOUNT_ID or None }}"
+  ProjectID: "{{ env.VICTORIALOGS_PROJECT_ID or None }}"
+rate_limit:
+  concurrency: 4
+  notes: "No API rate limit; -search.maxConcurrentRequests queues queries (up to -search.maxQueueDuration) and -search.maxQueryDuration aborts slow ones."
+retention:
+  logs: "-retentionPeriod (default 7d)"
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "LogsQL error: fix the query (stats endpoints need a '| stats ...' pipe); do not retry unchanged"}
+query_languages:
+  logsql: >-
+    LogsQL. Words match _msg: error, i(error) is case-insensitive, "exact phrase". Field filters:
+    level:=error (exact), level:~"err|crit" (regex), service.name:="checkout", -field:=x (NOT). Combine with
+    AND (implicit), OR and parentheses. Stream filter: {app="nginx",env="prod"} (fast, uses stream labels).
+    Pipes: | fields _time, level, _msg  | sort by (_time desc)  | stats by (level) count() as n  | limit 10.
+    Time is supplied by the engine (start/end args); do not add _time filters unless you need a sub-window.
+pitfalls:
+  - "Field names depend on the ingestion pipeline (service.name vs service vs app; level vs severity): check victorialogs_field_names before filtering on a field. A filter on a missing field matches nothing - 0 rows, no error."
+  - "Stream filters {label=\"x\"} are much faster than field filters but only work for fields declared as stream fields at ingestion (see victorialogs_streams)."
+  - "Without a limit /select/logsql/query streams every match unsorted; the engine always sends limit, which returns the newest N logs."
+  - "Cluster: a vlstorage node down returns 502 unless partial responses are allowed; a wrong AccountID/ProjectID returns no logs."
+tables:
+  - name: victorialogs_logs
+    title: Log search (LogsQL)
+    description: >-
+      Raw log entries matching a LogsQL query in the time window (GET /select/logsql/query, JSON lines), newest
+      first, up to LIMIT (default 1000, max 5000). Canonical columns are picked from common field names; every
+      field is in the fields JSON column (fields->>'kubernetes.pod_name').
+    kind: logs
+    request:
+      method: GET
+      path: /select/logsql/query
+      query:
+        query: "{{ filters.query or '*' }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        limit: "{{ [limit or 1000, 5000] | min }}"
+      response_format: ndjson
+      timeout_s: 90
+    filters:
+      - {column: query, description: "LogsQL query (default '*')", examples: ['{app="checkout"} i(error) | fields _time, level, _msg, trace_id']}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: _time}
+      - {name: message, path: _msg}
+      - {name: level, expr: "_.level or _.severity or _['log.level'] or _.severity_text or _.lvl"}
+      - {name: service, expr: "_['service.name'] or _.service or _.app or _['kubernetes.container_name'] or _.kubernetes_container_name"}
+      - {name: host, expr: "_.host or _.hostname or _['host.name'] or _['kubernetes.pod_node_name']"}
+      - {name: pod, expr: "_['kubernetes.pod_name'] or _.kubernetes_pod_name or _.pod"}
+      - {name: trace_id, expr: "_.trace_id or _.traceId or _['trace.id'] or _.traceID"}
+      - {name: stream, path: _stream, description: "Stream labels, e.g. {app=\"checkout\",env=\"prod\"}"}
+      - {name: stream_id, path: _stream_id}
+      - {name: fields, type: JSON, path: ".", description: "All returned fields"}
+      - {name: query, filter_only: true}
+    max_rows: 5000
+    sort_hint: "newest first (limit returns the N most recent logs)"
+    pitfalls:
+      - "A query ending in | fields ... only returns those fields: canonical columns built from other fields become null."
+      - "Field values are strings; cast in SQL (CAST(fields->>'status' AS INT))."
+    examples:
+      - sql: >-
+          SELECT ts, service, level, message, trace_id FROM victorialogs_logs
+          WHERE query = '{app="checkout"} (level:~"(?i)err|fatal" OR i(error))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:45:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Checkout errors during the incident window.
+      - sql: >-
+          SELECT regexp_replace(message, '[0-9]+', 'N', 'g') AS pattern, count(*) AS n, min(ts) AS first_seen
+          FROM victorialogs_logs WHERE query = 'service.name:="checkout" i(exception)'
+          GROUP BY 1 ORDER BY n DESC LIMIT 20
+        description: Top exception message patterns and when each first appeared.
+    tests:
+      - {sql: "SELECT count(*) AS n FROM victorialogs_logs WHERE query = '*' LIMIT 1", min_rows: 1}
+    fixtures:
+      - file: query.ndjson
+        filters: {query: error}
+        expect_rows: 2
+        expect_columns: {ts: "2023-01-01T13:32:13Z", message: "error: disconnect from 19.54.37.22: Auth fail [preauth]", stream: "{}"}
+        note: "VictoriaLogs querying docs, 'Querying logs' example response (JSON lines)."
+    docs_url: https://docs.victoriametrics.com/victorialogs/querying/#querying-logs
+
+  - name: victorialogs_hits
+    title: Log hit counts over time
+    description: >-
+      Number of matching logs per time bucket (GET /select/logsql/hits), optionally grouped by fields
+      (group_by -> field=...). Buckets use the engine's auto step (~300 points) and empty buckets are zero-filled.
+      One row per (group, bucket). The cheapest way to see when an error burst started and stopped.
+    kind: timeseries
+    request:
+      method: GET
+      path: /select/logsql/hits
+      query:
+        query: "{{ filters.query or '*' }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        step: "{{ time.step_s | prom_duration }}"
+        field: "{{ filters.group_by }}"
+        fields_limit: "{{ filters.group_by and 50 or None }}"
+    filters:
+      - {column: query, description: "LogsQL filter (pipes are applied; ignore with ignore_pipes)", examples: ['{app="checkout"} level:=error']}
+      - {column: group_by, ops: ["=", "in"], fan_out: false, description: "Field name(s) to group buckets by (sent as repeated field=)", examples: [level]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.hits[*]"
+      expand:
+        - {zip: {t: timestamps, v: values}, as: pt}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@pt.t", description: "Bucket start (aligned to the step)"}
+      - {name: value, type: BIGINT, path: "@pt.v", description: "Matching logs in the bucket"}
+      - {name: group_key, path: fields, transform: join, transform_arg: ",", description: "Group as field:value pairs ('' = ungrouped / other)"}
+      - {name: level, path: "fields.level"}
+      - {name: fields, type: JSON, path: fields}
+      - {name: total, type: BIGINT, path: total, description: "Total hits of the group over the window"}
+      - {name: query, filter_only: true}
+      - {name: group_by, filter_only: true}
+    zero_fill: true
+    pitfalls:
+      - "The first bucket can start before the window (buckets are aligned to the step)."
+      - "With group_by, groups beyond the top 50 by total are folded into the fields = {} group."
+    examples:
+      - sql: >-
+          SELECT ts, value FROM victorialogs_hits
+          WHERE query = '{app="checkout"} level:=error'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Error-log volume for checkout, minute by minute.
+      - sql: "SELECT level, sum(value) AS logs FROM victorialogs_hits WHERE query = '{app=\"checkout\"}' AND group_by = 'level' GROUP BY 1 ORDER BY logs DESC"
+        description: Log volume per level.
+    fixtures:
+      - file: hits.json
+        filters: {query: error}
+        expect_rows: 3
+        expect_columns: {ts: "2024-01-01T00:00:00Z", value: 410339, total: 1760176, group_key: ""}
+        note: "VictoriaLogs querying docs, 'Querying hits stats' first example response."
+      - file: hits_by_level.json
+        filters: {query: "*", group_by: level}
+        expect_rows: 6
+        expect_columns: {level: error, value: 25, group_key: "level:error", total: 60}
+        note: "VictoriaLogs querying docs, 'Querying hits stats' example grouped by field=level."
+    docs_url: https://docs.victoriametrics.com/victorialogs/querying/#querying-hits-stats
+
+  - name: victorialogs_stats_range
+    title: LogsQL stats over time
+    description: >-
+      Evaluate a LogsQL query ending in '| stats ...' over the window with a step (GET
+      /select/logsql/stats_query_range), returned like a Prometheus range query: one row per (series, timestamp);
+      labels hold the stats 'by (...)' fields, metric the stats function name (e.g. count(*)).
+    kind: timeseries
+    request:
+      method: GET
+      path: /select/logsql/stats_query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        step: "{{ (filters.step | prom_duration) if filters.step else (time.step_s | prom_duration) }}"
+    filters:
+      - {column: query, required: true, description: "LogsQL query with a stats pipe; no pipe may alter _time before it", examples: ['{app="checkout"} | stats by (level) count(*)']}
+      - {column: step, type: BIGINT, description: "Bucket size in seconds (default: auto, ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.data.result[*]"
+      expand:
+        - {explode: values, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: metric, path: "metric.__name__", description: "Stats function / result name, e.g. count(*)"}
+      - {name: labels, type: JSON, path: metric, description: "by (...) fields"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT ts, labels->>'level' AS level, value FROM victorialogs_stats_range
+          WHERE query = '{app="checkout"} | stats by (level) count(*)'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Log counts per level over time.
+      - sql: >-
+          SELECT ts, value AS p99_ms FROM victorialogs_stats_range
+          WHERE query = '{app="nginx"} | stats quantile(0.99, request_time_ms) as p99'
+            AND step = 60
+        description: p99 of a numeric log field per minute.
+    fixtures:
+      - file: stats_query_range.json
+        filters: {query: "* | stats by (level) count(*)"}
+        expect_rows: 8
+        expect_columns: {ts: "2024-01-01T00:00:00Z", value: 103125.0, metric: "count(*)"}
+        note: "VictoriaLogs querying docs, 'Querying log range stats' example response."
+    docs_url: https://docs.victoriametrics.com/victorialogs/querying/#querying-log-range-stats
+
+  - name: victorialogs_stats
+    title: LogsQL stats for the window
+    description: >-
+      Evaluate a LogsQL query ending in '| stats ...' over the whole window (GET /select/logsql/stats_query with
+      start/end, time = window end), returned like a Prometheus instant query: one row per stats group.
+    kind: timeseries
+    request:
+      method: GET
+      path: /select/logsql/stats_query
+      query:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | rfc3339 }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+    filters:
+      - {column: query, required: true, description: "LogsQL query with a stats pipe", examples: ['{app="checkout"} | stats by (level) count(*)']}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, reapply: false}
+    response:
+      rows_path: "$.data.result[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: level, path: "metric.level"}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Rows are stamped with the evaluation time (the window end), so time predicates select the window and are not re-applied in SQL."
+    examples:
+      - sql: >-
+          SELECT labels->>'service.name' AS service, value AS errors FROM victorialogs_stats
+          WHERE query = 'level:=error | stats by (service.name) count() as errors'
+          ORDER BY value DESC LIMIT 10
+        description: Services with the most error logs in the window.
+    fixtures:
+      - file: stats_query.json
+        filters: {query: "_time:1d | stats by (level) count(*)"}
+        expect_rows: 3
+        expect_columns: {level: info, value: 20395342.0, metric: "count(*)", ts: "2024-01-02T00:00:00Z"}
+        note: "VictoriaLogs querying docs, 'Querying log stats' example response (trailing comma in the doc JSON fixed)."
+    docs_url: https://docs.victoriametrics.com/victorialogs/querying/#querying-log-stats
+
+  - name: victorialogs_facets
+    title: Most frequent field values
+    description: >-
+      For logs matching a query in the window, the most frequent values of every field (GET
+      /select/logsql/facets): one row per (field_name, field_value) with hits. Great first look at what is
+      special about an error burst (which pod, version, endpoint dominates).
+    kind: generic
+    request:
+      method: GET
+      path: /select/logsql/facets
+      query:
+        query: "{{ filters.query or '*' }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        limit: "{{ filters.values_per_field or 5 }}"
+        keep_const_fields: "{{ 1 if filters.keep_const_fields else None }}"
+    filters:
+      - {column: query, description: "LogsQL filter", examples: ['{app="checkout"} level:=error']}
+      - {column: values_per_field, type: BIGINT, description: "Max values returned per field (sent as limit=, default 5)"}
+      - {column: keep_const_fields, type: BOOLEAN, description: "true = also return fields that have one constant value across all matching logs (keep_const_fields=1)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.facets[*]"
+      expand:
+        - {explode: values, as: v}
+    columns:
+      - {name: field_name, path: field_name}
+      - {name: field_value, path: "@v.field_value"}
+      - {name: hits, type: BIGINT, path: "@v.hits"}
+      - {name: query, filter_only: true}
+      - {name: values_per_field, type: BIGINT, filter_only: true}
+      - {name: keep_const_fields, type: BOOLEAN, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Fields with too many unique values or too-long values, and fields constant across all matches, are omitted by default."
+    examples:
+      - sql: >-
+          SELECT field_name, field_value, hits FROM victorialogs_facets
+          WHERE query = '{app="checkout"} level:=error'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:45:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY hits DESC LIMIT 30
+        description: What dominates the checkout errors (pod, version, route...).
+    fixtures:
+      - file: facets.json
+        filters: {query: "_time:1h error"}
+        expect_rows: 4
+        expect_columns: {field_name: kubernetes_container_name, field_value: victoria-logs, hits: 442378}
+        note: "VictoriaLogs querying docs, 'Querying facets' example response (a missing comma in the doc JSON fixed)."
+    docs_url: https://docs.victoriametrics.com/victorialogs/querying/#querying-facets
+
+  - name: victorialogs_streams
+    title: Log streams
+    description: >-
+      Log streams (stream-label sets) that have logs matching a query in the window, with hit counts
+      (GET /select/logsql/streams). Use it to discover the right {stream filter} for a service.
+    kind: entities
+    request:
+      method: GET
+      path: /select/logsql/streams
+      query:
+        query: "{{ filters.query or '*' }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        limit: "{{ [limit or 500, 5000] | min }}"
+    filters:
+      - {column: query, description: "LogsQL filter", examples: ['error']}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.values[*]"
+    columns:
+      - {name: stream, path: value}
+      - {name: hits, type: BIGINT, path: hits, description: "0 when the limit was reached (counts unreliable)"}
+      - {name: query, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT stream, hits FROM victorialogs_streams WHERE query = 'error' ORDER BY hits DESC LIMIT 20"
+        description: Which streams produce the most error logs.
+    fixtures:
+      - file: streams.json
+        filters: {query: error}
+        expect_rows: 3
+        expect_columns: {stream: '{host="host-123",app="foo"}', hits: 34980}
+        note: "VictoriaLogs querying docs, 'Querying streams' example response."
+    docs_url: https://docs.victoriametrics.com/victorialogs/querying/#querying-streams
+
+  - name: victorialogs_field_names
+    title: Field names
+    description: >-
+      Field names present in logs matching a query in the window, with hit counts (GET /select/logsql/field_names).
+      Check it before filtering on a field: unknown fields silently match nothing.
+    kind: entities
+    request:
+      method: GET
+      path: /select/logsql/field_names
+      query:
+        query: "{{ filters.query or '*' }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        filter: "{{ filters.contains }}"
+    filters:
+      - {column: query, description: "LogsQL filter", examples: ['{app="checkout"}']}
+      - {column: contains, description: "Only field names containing this substring", examples: [level]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.values[*]"
+    columns:
+      - {name: field, path: value}
+      - {name: hits, type: BIGINT, path: hits}
+      - {name: query, filter_only: true}
+      - {name: contains, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT field, hits FROM victorialogs_field_names WHERE query = '{app=\"checkout\"}' ORDER BY hits DESC"
+        description: Which fields checkout logs carry (pick the level / service field names).
+    fixtures:
+      - file: field_names.json
+        filters: {query: error}
+        expect_rows: 3
+        expect_columns: {field: _msg, hits: 1033300623}
+        note: "VictoriaLogs querying docs, 'Querying field names' example response."
+    docs_url: https://docs.victoriametrics.com/victorialogs/querying/#querying-field-names
+
+  - name: victorialogs_field_values
+    title: Values of one field
+    description: >-
+      Unique values of one field in logs matching a query in the window, with hit counts (GET
+      /select/logsql/field_values). Confirms a value exists (service, level, host) before filtering.
+    kind: entities
+    request:
+      method: GET
+      path: /select/logsql/field_values
+      query:
+        query: "{{ filters.query or '*' }}"
+        field: "{{ filters.field }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        limit: "{{ [limit or 500, 5000] | min }}"
+        filter: "{{ filters.contains }}"
+    filters:
+      - {column: field, required: true, description: "Field name", examples: [host]}
+      - {column: query, description: "LogsQL filter", examples: ['error']}
+      - {column: contains, description: "Only values containing this substring (filter=)", examples: [checkout]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.values[*]"
+    columns:
+      - {name: value, path: value}
+      - {name: hits, type: BIGINT, path: hits, description: "0 when the limit was reached"}
+      - {name: field, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: contains, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value AS host, hits FROM victorialogs_field_values WHERE field = 'host' AND query = 'error' ORDER BY hits DESC"
+        description: Hosts producing error logs.
+    fixtures:
+      - file: field_values.json
+        filters: {field: host, query: error}
+        expect_rows: 3
+        expect_columns: {value: host-1, hits: 69426656}
+        note: "VictoriaLogs querying docs, 'Querying field values' example response."
+    docs_url: https://docs.victoriametrics.com/victorialogs/querying/#querying-field-values
+roles:
+  logs:
+    table: victorialogs_logs
+    filters:
+      query: >-
+        {{ ((([query] if '|' in query else ['(' ~ query ~ ')']) if query else [])
+        + (['(service.name:=' ~ (service | quote) ~ ' OR service:=' ~ (service | quote) ~ ' OR app:=' ~ (service | quote) ~ ')'] if service else [])
+        + (['(level:~"(?i)err|fatal|crit|panic" OR i(error))'] if error_only else [])) | join(' ') or '*' }}
+    columns: {ts: ts, message: message, level: level, service: service, host: host, trace_id: trace_id}
+    query_language: logsql
+  log_counts:
+    table: victorialogs_hits
+    filters:
+      query: >-
+        {{ ((([query] if '|' in query else ['(' ~ query ~ ')']) if query else [])
+        + (['(service.name:=' ~ (service | quote) ~ ' OR service:=' ~ (service | quote) ~ ' OR app:=' ~ (service | quote) ~ ')'] if service else [])
+        + (['(level:~"(?i)err|fatal|crit|panic" OR i(error))'] if error_only else [])) | join(' ') or '*' }}
+    columns: {ts: ts, value: value, level: level}
+    query_language: logsql

@@ -1,0 +1,41 @@
+{
+  "platform": "grafana_oncall",
+  "description": "Grafana OnCall / Grafana IRM alert group posted by its Slack app for a Grafana Alerting integration: '#<n> <title>' linked to the alert group, 'via <integration>', a source link, and the alert's labels.",
+  "provenance": "Grafana OnCall docs (Slack integration; default Slack title template '*<{{ grafana_oncall_link }}|#{{ grafana_oncall_incident_id }} {{ title }}>* via {{ integration_name }}' with '(*<{{ source_link }}|source>*)', message template rendering status, labels and annotations; alert group URLs /a/grafana-irm-app/alert-groups/<public id> (formerly grafana-oncall-app)). Block layout reconstructed.",
+  "event": {
+    "type": "message",
+    "user": "U18ONCALL1",
+    "bot_id": "B18ONCALL1",
+    "app_id": "A18GRAFIRM",
+    "bot_profile": {"id": "B18ONCALL1", "app_id": "A18GRAFIRM", "name": "Grafana IRM", "deleted": false, "team_id": "T01ACME"},
+    "text": "#142 CheckoutHighErrorRate via Grafana Alerting",
+    "blocks": [
+      {"type": "section", "block_id": "g1", "text": {"type": "mrkdwn", "text": "*<https://acme.grafana.net/a/grafana-irm-app/alert-groups/I5Q2K8W9MZ1R7|#142 CheckoutHighErrorRate>* via Grafana Alerting\n(*<https://acme.grafana.net/alerting/grafana/fe2kq1x9abcd0e/view?orgId=1|source>*)"}},
+      {"type": "section", "block_id": "g2", "text": {"type": "mrkdwn", "text": "*Status*: firing\n*Labels:*\n- alertname: CheckoutHighErrorRate\n- namespace: shop\n- service: checkout\n- severity: critical\n*Annotations:*\n- summary: Checkout 5xx error rate above 5%"}},
+      {"type": "context", "block_id": "g3", "elements": [{"type": "mrkdwn", "text": "Alert Group *Firing* · 1 alert in the group"}]},
+      {"type": "actions", "block_id": "g4", "elements": [
+        {"type": "button", "action_id": "acknowledge", "text": {"type": "plain_text", "text": "Acknowledge"}, "value": "ack"},
+        {"type": "button", "action_id": "resolve", "text": {"type": "plain_text", "text": "Resolve"}, "value": "resolve"}
+      ]}
+    ],
+    "ts": "1792504972.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504972.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "grafana_oncall",
+    "rule_id": "fe2kq1x9abcd0e",
+    "rule_name": "CheckoutHighErrorRate",
+    "title": "CheckoutHighErrorRate",
+    "status": "firing",
+    "raw_status": "firing",
+    "severity": "critical",
+    "service": "checkout",
+    "namespace": "shop",
+    "group": "namespace=shop,service=checkout",
+    "incident_id": "I5Q2K8W9MZ1R7",
+    "url": "https://acme.grafana.net/a/grafana-irm-app/alert-groups/I5Q2K8W9MZ1R7",
+    "tags": {"alert_group": "142"}
+  }
+}

@@ -1,0 +1,60 @@
+{
+   "warning": "",
+   "fields":[
+      {"name":"_messageid","fieldType":"long","keyField":false},
+      {"name":"_sourceid","fieldType":"long","keyField":false},
+      {"name":"_sourceName","fieldType":"string","keyField":false},
+      {"name":"_sourceHost","fieldType":"string","keyField":false},
+      {"name":"_sourceCategory","fieldType":"string","keyField":false},
+      {"name":"_format","fieldType":"string","keyField":false},
+      {"name":"_size","fieldType":"long","keyField":false},
+      {"name":"_messagetime","fieldType":"long","keyField":false},
+      {"name":"_receipttime","fieldType":"long","keyField":false},
+      {"name":"_messagecount","fieldType":"int","keyField":false},
+      {"name":"_raw","fieldType":"string","keyField":false},
+      {"name":"_source","fieldType":"string","keyField":false},
+      {"name":"_collectorId","fieldType":"long","keyField":false},
+      {"name":"_collector","fieldType":"string","keyField":false},
+      {"name":"_blockid","fieldType":"long","keyField":false}
+   ],
+   "messages":[
+      {
+         "map":{
+            "_receipttime":"1359407350899",
+            "_source":"service",
+            "_collector":"local",
+            "_format":"plain:atp:o:0:l:29:p:yyyy-MM-dd HH:mm:ss,SSS ZZZZ",
+            "_blockid":"-9223372036854775669",
+            "_messageid":"-9223372036854773763",
+            "_messagetime":"1359407350333",
+            "_collectorId":"1579",
+            "_sourceName":"/Users/christian/Development/sumo/ops/assemblies/latest/service-20.1-SNAPSHOT/logs/service.log",
+            "_sourceHost":"Chiapet.local",
+            "_raw":"2013-01-28 13:09:10,333 -0800 INFO  [module=SERVICE] [logger=util.scala.zk.discovery.AWSServiceRegistry] [thread=pool-1-thread-1] FINISHED findRunningInstances(ListBuffer((Service: name: elasticache-1, defaultProps: Map()), (Service: name: userAndOrgCache, defaultProps: Map()), (Service: name: rds_cloudcollector, defaultProps: Map()))) returning Map((Service: name: elasticache-1, defaultProps: Map()) -> [], (Service: name: userAndOrgCache, defaultProps: Map()) -> [], (Service: name: rds_cloudcollector, defaultProps: Map()) -> []) after 1515 ms",
+            "_size":"549",
+            "_sourceCategory":"service",
+            "_sourceid":"1640",
+            "_messagecount":"2044"
+         }
+      },
+      {
+         "map":{
+            "_receipttime":"1359407051885",
+            "_source":"service",
+            "_collector":"local",
+            "_format":"plain:atp:o:0:l:29:p:yyyy-MM-dd HH:mm:ss,SSS ZZZZ",
+            "_blockid":"-9223372036854775674",
+            "_messageid":"-9223372036854773772",
+            "_messagetime":"1359407049529",
+            "_collectorId":"1579",
+            "_sourceName":"/Users/christian/Development/sumo/ops/assemblies/latest/service-20.1-SNAPSHOT/logs/service.log",
+            "_sourceHost":"Chiapet.local",
+            "_raw":"2013-01-28 13:04:09,529 -0800 INFO  [module=SERVICE] [logger=com.netflix.config.sources.DynamoDbConfigurationSource] [thread=pollingConfigurationSource] Successfully polled Dynamo for a new configuration based on table:raychaser-chiapetProperties",
+            "_size":"246",
+            "_sourceCategory":"service",
+            "_sourceid":"1640",
+            "_messagecount":"2035"
+         }
+      }
+   ]
+}

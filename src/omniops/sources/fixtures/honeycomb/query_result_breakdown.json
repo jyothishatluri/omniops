@@ -1,0 +1,56 @@
+{
+ "query": {
+  "calculations": [
+   {
+    "op": "COUNT"
+   }
+  ],
+  "breakdowns": [
+   "user_agent"
+  ],
+  "filters": [
+   {
+    "op": ">=",
+    "column": "response.status_code",
+    "value": 400
+   }
+  ],
+  "orders": [
+   {
+    "op": "COUNT",
+    "order": "descending"
+   }
+  ],
+  "limit": 10000,
+  "time_range": 7200
+ },
+ "complete": false,
+ "id": "hij678a",
+ "data": {
+  "series": [],
+  "results": [
+   {
+    "data": {
+     "COUNT": 2728,
+     "user_agent": "Mozilla/5.0 (X11; Linux x86_64)"
+    }
+   },
+   {
+    "data": {
+     "COUNT": 4,
+     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+   },
+   {
+    "data": {
+     "COUNT": 7,
+     "user_agent": "Mozilla/5.0 (Linux; Android 7.1.2; AFTMM Build/NS6265; wv)"
+    }
+   }
+  ]
+ },
+ "links": {
+  "query_url": "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/hij678a",
+  "graph_image_url": "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/hij678a/snapshot"
+ }
+}

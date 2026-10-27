@@ -1,0 +1,59 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "meta": {
+          "github-html-url": "string",
+          "ingested-schema-version": "string",
+          "ingestion-source": "string",
+          "last-modified-time": "string",
+          "origin": "string",
+          "origin-detail": "string",
+          "warnings": [
+            {
+              "instance-location": "string",
+              "keyword-location": "string",
+              "message": "string"
+            }
+          ]
+        },
+        "schema": {
+          "contact": {
+            "email": "contact@datadoghq.com",
+            "slack": "https://yourcompany.slack.com/archives/channel123"
+          },
+          "extensions": {
+            "myorg/extension": "extensionValue"
+          },
+          "external-resources": [
+            {
+              "name": "Runbook",
+              "type": "runbook",
+              "url": "https://my-runbook"
+            }
+          ],
+          "info": {
+            "dd-service": "myservice",
+            "description": "A shopping cart service",
+            "display-name": "My Service",
+            "service-tier": "Tier 1"
+          },
+          "integrations": {
+            "pagerduty": "https://my-org.pagerduty.com/service-directory/PMyService"
+          },
+          "org": {
+            "application": "E-Commerce",
+            "team": "my-team"
+          },
+          "schema-version": "v1",
+          "tags": [
+            "my:tag",
+            "service:tag"
+          ]
+        }
+      },
+      "id": "string",
+      "type": "string"
+    }
+  ]
+}

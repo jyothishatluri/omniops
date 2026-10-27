@@ -1,0 +1,50 @@
+{
+  "links": {"_acl": "/services/server/health/_acl"},
+  "origin": "https://10.141.65.213:42270/services/server/health",
+  "updated": "2018-04-03T20:05:34+00:00",
+  "generator": {"build": "b233a6c1ade2", "version": "7.2.0"},
+  "entry": [
+    {
+      "name": "splunkd",
+      "id": "https://10.141.65.213:42270/services/server/health/splunkd",
+      "updated": "1970-01-01T00:00:00+00:00",
+      "links": {"alternate": "/services/server/health/splunkd/details", "list": "/services/server/health/splunkd/details"},
+      "author": "system",
+      "acl": {"app": "", "can_list": true, "can_write": true, "modifiable": false, "owner": "system", "perms": {"read": ["admin", "splunk-system-role"], "write": []}, "removable": false, "sharing": "system"},
+      "content": {
+        "eai:acl": null,
+        "features": {
+          "Data Forwarding": {
+            "features": {
+              "Splunk-2-Splunk Forwarding": {
+                "features": {"TCPOutAutoLB-0": {"health": "green"}},
+                "health": "green"
+              }
+            },
+            "health": "green"
+          },
+          "File Monitor Input": {
+            "features": {
+              "BatchReader-0": {"health": "green"},
+              "TailReader-0": {"health": "green"}
+            },
+            "health": "green"
+          },
+          "Indexer Clustering": {
+            "features": {
+              "Cluster Bundles": {"health": "green"},
+              "Data Durability": {"health": "green"},
+              "Data Searchable": {"health": "green"},
+              "Indexers": {"health": "green"},
+              "Indexing Ready": {"health": "green"}
+            },
+            "health": "green"
+          }
+        },
+        "health": "green"
+      }
+    }
+  ],
+  "paging": {"total": 1, "perPage": 30, "offset": 0},
+  "messages": []
+}

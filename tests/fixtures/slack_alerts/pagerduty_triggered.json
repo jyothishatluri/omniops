@@ -1,0 +1,42 @@
+{
+  "platform": "pagerduty",
+  "description": "PagerDuty Slack app incident notification (high urgency, triggered) with incident link, status, urgency, service and assignee, and action buttons.",
+  "provenance": "PagerDuty Slack integration guide (incident notifications show incident number and title linked to the incident, status, urgency/priority, service, assignee; Acknowledge / Resolve actions). Incident URLs are https://<subdomain>.pagerduty.com/incidents/<incident ID>. Block layout reconstructed from those documented elements.",
+  "event": {
+    "type": "message",
+    "user": "U06PDAPP01",
+    "bot_id": "B06PAGERDT",
+    "app_id": "A06PAGERDT",
+    "bot_profile": {"id": "B06PAGERDT", "app_id": "A06PAGERDT", "name": "PagerDuty", "deleted": false, "team_id": "T01ACME"},
+    "text": "Triggered: [#4521] Error rate above 5% on checkout-api",
+    "blocks": [
+      {"type": "section", "block_id": "p1", "text": {"type": "mrkdwn", "text": ":red_circle: *<https://acme.pagerduty.com/incidents/Q1ABCDEF2GHIJK|[#4521] Error rate above 5% on checkout-api>*"}},
+      {"type": "section", "block_id": "p2", "fields": [
+        {"type": "mrkdwn", "text": "*Status:*\nTriggered"},
+        {"type": "mrkdwn", "text": "*Urgency:*\nHigh"},
+        {"type": "mrkdwn", "text": "*Service:*\ncheckout-api"},
+        {"type": "mrkdwn", "text": "*Assigned:*\n<@U02ONCALL1>"}
+      ]},
+      {"type": "actions", "block_id": "p3", "elements": [
+        {"type": "button", "action_id": "acknowledge", "text": {"type": "plain_text", "text": "Acknowledge"}, "value": "Q1ABCDEF2GHIJK"},
+        {"type": "button", "action_id": "resolve", "text": {"type": "plain_text", "text": "Resolve"}, "value": "Q1ABCDEF2GHIJK"}
+      ]}
+    ],
+    "ts": "1792505003.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792505003.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "pagerduty",
+    "title": "[#4521] Error rate above 5% on checkout-api",
+    "rule_name": "Error rate above 5% on checkout-api",
+    "status": "firing",
+    "raw_status": "Triggered",
+    "severity": "High",
+    "service": "checkout-api",
+    "incident_id": "Q1ABCDEF2GHIJK",
+    "url": "https://acme.pagerduty.com/incidents/Q1ABCDEF2GHIJK",
+    "tags": {"incident_number": "4521"}
+  }
+}

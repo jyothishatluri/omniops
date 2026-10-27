@@ -1,0 +1,27 @@
+{
+ "auditLogs": [
+  {
+   "category": "CONFIG",
+   "entityId": "MOBILE_RUM: MOBILE_APPLICATION-752C223D59734CD2",
+   "environmentId": "prod-env-13",
+   "eventType": "UPDATE",
+   "logId": "197425568800060000",
+   "patch": [
+    {
+     "oldValue": 20000,
+     "op": "replace",
+     "path": "/refreshTimeIntervalMillis",
+     "value": 30000
+    }
+   ],
+   "success": true,
+   "timestamp": 1974255688445,
+   "user": "test.user@company.com",
+   "userOrigin": "webui (192.168.0.2)",
+   "userType": "USER_NAME"
+  }
+ ],
+ "nextPageKey": "___a7acX3q0AAAAAACJidWlsdGluOnNlcnZpY2lUVEJCUzBaNVIxVjJOSGt6Y3oyLTcwMUZWRkxlclH__9rtpxferQ",
+ "pageSize": 5,
+ "totalCount": 10
+}

@@ -1,0 +1,185 @@
+[
+ {
+  "annotations": [],
+  "assignedTo": {
+   "type": "user",
+   "id": "1",
+   "name": "John Doe",
+   "email": "john.doe@example.com"
+  },
+  "count": "150",
+  "culprit": "raven.scripts.runner in main",
+  "firstSeen": "2018-11-06T21:19:55Z",
+  "filtered": null,
+  "inbox": {
+   "reason": 0,
+   "reason_details": null,
+   "date_added": "2018-11-06T21:19:55Z"
+  },
+  "hasSeen": false,
+  "id": "1",
+  "isBookmarked": false,
+  "isPublic": false,
+  "isSubscribed": true,
+  "lastSeen": "2018-12-06T21:19:55Z",
+  "level": "error",
+  "logger": null,
+  "metadata": {
+   "title": "This is an example Python exception"
+  },
+  "numComments": 0,
+  "permalink": "https://sentry.io/the-interstellar-jurisdiction/pump-station/issues/1/",
+  "project": {
+   "id": "2",
+   "name": "Pump Station",
+   "slug": "pump-station",
+   "platform": "python"
+  },
+  "shareId": "123def456abc",
+  "shortId": "PUMP-STATION-1",
+  "stats": {
+   "24h": [
+    [
+     1541455200,
+     473
+    ],
+    [
+     1541458800,
+     914
+    ],
+    [
+     1541462400,
+     991
+    ],
+    [
+     1541466000,
+     925
+    ],
+    [
+     1541469600,
+     881
+    ],
+    [
+     1541473200,
+     182
+    ],
+    [
+     1541476800,
+     490
+    ],
+    [
+     1541480400,
+     820
+    ],
+    [
+     1541484000,
+     322
+    ],
+    [
+     1541487600,
+     836
+    ],
+    [
+     1541491200,
+     565
+    ],
+    [
+     1541494800,
+     758
+    ],
+    [
+     1541498400,
+     880
+    ],
+    [
+     1541502000,
+     677
+    ],
+    [
+     1541505600,
+     381
+    ],
+    [
+     1541509200,
+     814
+    ],
+    [
+     1541512800,
+     329
+    ],
+    [
+     1541516400,
+     446
+    ],
+    [
+     1541520000,
+     731
+    ],
+    [
+     1541523600,
+     111
+    ],
+    [
+     1541527200,
+     926
+    ],
+    [
+     1541530800,
+     772
+    ],
+    [
+     1541534400,
+     400
+    ],
+    [
+     1541538000,
+     943
+    ]
+   ]
+  },
+  "priority": "medium",
+  "priorityLockedAt": null,
+  "owners": {
+   "type": "user",
+   "owner": "1",
+   "date_added": "2018-11-06T21:19:55Z"
+  },
+  "platform": "python",
+  "lifetime": {
+   "count": "150",
+   "userCount": 0,
+   "firstSeen": "2018-11-06T21:19:55Z",
+   "lastSeen": "2018-12-06T21:19:55Z"
+  },
+  "seerAutofixLastTriggered": null,
+  "seerExplorerAutofixLastTriggered": null,
+  "seerFixabilityScore": null,
+  "status": "ignored",
+  "substatus": "archived_until_condition_met",
+  "statusDetails": {},
+  "subscriptionDetails": null,
+  "title": "This is an example Python exception",
+  "type": "default",
+  "userCount": 0,
+  "integrationIssues": [],
+  "sentryAppIssues": [],
+  "isUnhandled": false,
+  "issueCategory": "performance",
+  "issueType": "performance_n_plus_one_db_queries",
+  "sessionCount": 0,
+  "latestEventHasAttachments": false,
+  "matchingEventId": null,
+  "matchingEventEnvironment": null,
+  "derivedData": {
+   "blocker": "none",
+   "progress": "fix_applied",
+   "status": "open",
+   "viewCount": 42,
+   "hasOpenFixPr": false,
+   "isAssigned": true,
+   "hasRootCause": true,
+   "lastCompletedAutofixStep": "pr_created",
+   "lastProgressedAt": "2018-12-06T21:19:55Z"
+  }
+ }
+]

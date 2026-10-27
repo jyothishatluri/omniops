@@ -1,0 +1,28 @@
+{
+  "data": {
+    "actor": {
+      "entity": {
+        "guid": "MXxJTkZSQXxOQXwyNzQ4NzYxMTIzNDU2Nzg5",
+        "name": "orders-table",
+        "entityType": "INFRASTRUCTURE_AWS_DYNAMODB_TABLE_ENTITY",
+        "goldenMetrics": {
+          "metrics": [
+            {
+              "name": "getItemLatency",
+              "title": "GetItem latency (ms)",
+              "metricName": "newrelic.goldenmetrics.infra.awsdynamodbtable.getItemLatency",
+              "unit": "MS",
+              "query": "SELECT average(provider.getSuccessfulRequestLatency.Average) FROM DatastoreSample WHERE entityGuid IN ('MXxJTkZSQXxOQXwyNzQ4NzYxMTIzNDU2Nzg5') AND provider = 'DynamoDbTable' TIMESERIES"
+            }
+          ]
+        },
+        "goldenTags": {
+          "tags": [
+            {"key": "aws.awsRegion"},
+            {"key": "aws.accountId"}
+          ]
+        }
+      }
+    }
+  }
+}

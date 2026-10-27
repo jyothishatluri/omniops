@@ -1,0 +1,102 @@
+{
+ "count": 25,
+ "results": [
+  {
+   "authorizedWriters": {
+    "teams": [
+     "DevOps"
+    ],
+    "users": [
+     "AAXYAAAAAZ4"
+    ]
+   },
+   "created": 1556825430000,
+   "creator": "AAXYAAAAAZ3",
+   "customProperties": {
+    "property1": "detectorArea",
+    "value1": "internal detectors"
+   },
+   "description": "jvm CPU load warning",
+   "detectorOrigin": "Standard",
+   "id": "string",
+   "labelResolutions": {
+    "DetectorA": 3000,
+    "DetectorB": 5000
+   },
+   "lastUpdated": 1557689430000,
+   "lastUpdatedBy": "ZZyZZZZXXXQ",
+   "locked": false,
+   "maxDelay": 60000,
+   "minDelay": 60000,
+   "name": "JVM CPU Load detector",
+   "overMTSLimit": false,
+   "packageSpecifications": "string",
+   "parentDetectorId": "string",
+   "programText": "cpuLoad = data('jvm.cpu.load').percentile(pct=94).publish(label='cpuLoad'); detect(when(cpuLoad > 94)).publish('cpuLoad');",
+   "rules": [
+    {
+     "description": "JVM CPU Load test",
+     "detectLabel": "cpuLoad",
+     "disabled": false,
+     "notifications": [
+      {
+       "email": "user@example.com",
+       "type": "Email"
+      },
+      {
+       "credentialId": "myCredentialId",
+       "type": "ServiceNow"
+      }
+     ],
+     "parameterizedBody": "{{#if anomalous}}\n\tRule \"{{{ruleName}}}\" in detector \"{{{detectorName}}}\" triggered at {{dateTimeFormat timestamp format=\"full\"}}.\n{{else}}\n\tRule \"{{{ruleName}}}\" in detector \"{{{detectorName}}}\" cleared at {{dateTimeFormat timestamp format=\"full\"}}.\n{{/if}}\n\n{{#if anomalous}}\nTriggering condition: {{{readableRule}}}\n{{/if}}\n\nMean value of signal in the last {{event_annotations.current_window}}: {{inputs.summary.value}}\n{{#if anomalous}}Trigger threshold: {{inputs.fire_top.value}}\n{{else}}Clear threshold: {{inputs.clear_top.value}}.\n{{/if}}\n\n{{#notEmpty dimensions}}\nSignal details:\n{{{dimensions}}}\n{{/notEmpty}}\n\n{{#if anomalous}}\n{{#if runbookUrl}}Runbook: {{{runbookUrl}}}{{/if}}\n{{#if tip}}Tip: {{{tip}}}{{/if}}\n{{/if}}",
+     "parameterizedSubject": "Notification for {{{rulename}}} in detector {{{detectorName}}}",
+     "reminderNotification": {
+      "interval": 300000,
+      "timeout": 3600000,
+      "type": "TIMEOUT"
+     },
+     "runbookUrl": "www.example.com",
+     "severity": "Info",
+     "skipClearNotificationStates": [
+      "MANUALLY_RESOLVED",
+      "AUTO_RESOLVED"
+     ],
+     "tip": "Check detector in Splunk Observability Cloud"
+    }
+   ],
+   "status": "ACTIVE",
+   "tags": [
+    "dev",
+    "oregon",
+    "offline"
+   ],
+   "teams": [
+    "DevOps",
+    "Engineering",
+    "Support"
+   ],
+   "timezone": "America/Detroit",
+   "visualizationOptions": {
+    "disableSampling": false,
+    "publishLabelOptions": [
+     {
+      "displayName": "JVM CPU load",
+      "label": "cpuLoad",
+      "paletteIndex": 9,
+      "valuePrefix": "Avg ",
+      "valueSuffix": "pct",
+      "valueUnit": "Second"
+     }
+    ],
+    "showDataMarkers": true,
+    "showEventLines": true,
+    "time": {
+     "end": 1557693030000,
+     "range": 0,
+     "start": 1557682230000,
+     "type": "absolute"
+    }
+   }
+  }
+ ]
+}

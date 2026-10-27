@@ -1,0 +1,11 @@
+{
+  "called_by": [
+    "service-a",
+    "service-b"
+  ],
+  "calls": [
+    "service-d",
+    "service-e"
+  ],
+  "name": "service-c"
+}

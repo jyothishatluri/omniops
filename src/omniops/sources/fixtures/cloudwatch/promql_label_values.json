@@ -1,0 +1,8 @@
+{
+    "status": "success",
+    "data": [
+        "myservice",
+        "checkout-api",
+        "billing-worker"
+    ]
+}

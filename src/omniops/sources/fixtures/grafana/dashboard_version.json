@@ -1,0 +1,47 @@
+{
+  "id": 1,
+  "dashboardId": 1,
+  "uid": "QA7wKklGz",
+  "parentVersion": 0,
+  "restoredFrom": 0,
+  "version": 1,
+  "created": "2017-04-26T17:18:38-04:00",
+  "message": "Initial save",
+  "data": {
+    "annotations": {
+      "list": []
+    },
+    "editable": true,
+    "gnetId": null,
+    "graphTooltip": 0,
+    "id": 1,
+    "links": [],
+    "rows": [
+      {
+        "collapse": false,
+        "height": "250px",
+        "panels": [],
+        "repeat": null,
+        "repeatIteration": null,
+        "repeatRowId": null,
+        "showTitle": false,
+        "title": "Dashboard Row",
+        "titleSize": "h6"
+      }
+    ],
+    "schemaVersion": 14,
+    "tags": [],
+    "templating": {
+      "list": []
+    },
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "timepicker": {},
+    "timezone": "browser",
+    "title": "test",
+    "version": 1
+  },
+  "createdBy": "admin"
+}

@@ -1,0 +1,37 @@
+{
+  "hits": {
+    "total": {
+      "value": 2,
+      "relation": "eq"
+    },
+    "max_score": 1.0,
+    "hits": [
+      {
+        "_index": "my_index",
+        "_id": "1",
+        "_score": 1.0,
+        "fields": {
+          "author": [
+            "John Doe"
+          ],
+          "publication_date": [
+            "2021-01-01T00:00:00.000Z"
+          ]
+        }
+      },
+      {
+        "_index": "my_index",
+        "_id": "2",
+        "_score": 1.0,
+        "fields": {
+          "author": [
+            "Jane Smith"
+          ],
+          "publication_date": [
+            "2022-01-01T00:00:00.000Z"
+          ]
+        }
+      }
+    ]
+  }
+}

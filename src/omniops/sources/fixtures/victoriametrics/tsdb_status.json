@@ -1,0 +1,27 @@
+{
+ "status": "success",
+ "data": {
+  "totalSeries": 2187430,
+  "totalLabelValuePairs": 9480211,
+  "seriesCountByMetricName": [
+   {"name": "http_request_duration_seconds_bucket", "value": 812400, "requestsCount": 5120, "lastRequestTimestamp": 1790855940},
+   {"name": "container_memory_working_set_bytes", "value": 104322}
+  ],
+  "seriesCountByLabelName": [
+   {"name": "__name__", "value": 2187430},
+   {"name": "pod", "value": 1650233}
+  ],
+  "seriesCountByFocusLabelValue": [
+   {"name": "checkout-7d9f8b6c5-x2x9q", "value": 120400},
+   {"name": "cart-5c6d7e8f9-abcde", "value": 8120}
+  ],
+  "seriesCountByLabelValuePair": [
+   {"name": "job=kubernetes-pods", "value": 1820044},
+   {"name": "namespace=checkout", "value": 640112}
+  ],
+  "labelValueCountByLabelName": [
+   {"name": "pod", "value": 48211},
+   {"name": "request_id", "value": 31007}
+  ]
+ }
+}

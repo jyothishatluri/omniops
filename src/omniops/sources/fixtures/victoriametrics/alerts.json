@@ -1,0 +1,24 @@
+{
+ "status": "success",
+ "data": {
+  "alerts": [
+   {
+    "state": "firing",
+    "name": "my-alert",
+    "value": "1e+00",
+    "labels": {
+     "alertname": "my-alert"
+    },
+    "annotations": {},
+    "activeAt": "2018-07-04T20:27:12.60602144+02:00",
+    "id": "7130393458392312045",
+    "rule_id": "11483540384185702862",
+    "group_id": "13916400863425340342",
+    "expression": "up == 0",
+    "source": "http://vmalert:8880/vmalert/alert?group_id=13916400863425340342&alert_id=7130393458392312045",
+    "restored": false,
+    "stabilizing": false
+   }
+  ]
+ }
+}

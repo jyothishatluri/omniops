@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "status": "done",
+    "request_id": "U1VfQTc4M19SWldjNkJFUkh2R2R1Z3w3Uk9lajlmQklnUnZyQnpCV0k1Tmtn",
+    "elapsed": 152
+  },
+  "data": {
+    "buckets": [
+      {
+        "computes": {
+          "c0": [
+            {
+              "value": 1856,
+              "time": "2020-08-10T19:00:00.000Z"
+            },
+            {
+              "value": 1614,
+              "time": "2020-08-10T19:01:00.000Z"
+            }
+          ]
+        },
+        "by": {
+          "status": "info"
+        }
+      },
+      {
+        "computes": {
+          "c0": [
+            {
+              "value": 25,
+              "time": "2020-08-10T19:00:00.000Z"
+            },
+            {
+              "value": 24,
+              "time": "2020-08-10T19:01:00.000Z"
+            }
+          ]
+        },
+        "by": {
+          "status": "error"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+[
+  {
+    "id": "3c5b2f8e-1a4d-4b6e-9f70-8e9d0a1b2c3d",
+    "tag": "prod-k8s",
+    "cluster_name": "prod-us-east-1",
+    "environment": "Kubernetes",
+    "fleet_type": "Edge",
+    "fleet_subtype": "Edge",
+    "status": "running",
+    "purpose": "user-defined",
+    "version": "v3",
+    "runtime": "go",
+    "description": "production cluster pipeline",
+    "creator": "sre@example.com",
+    "created": "2026-03-02T10:15:00Z",
+    "updater": "alice@example.com",
+    "updated": "2026-10-01T10:52:11Z",
+    "deployed_timestamp": 1790851931000
+  }
+]

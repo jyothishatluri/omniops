@@ -1,0 +1,31 @@
+{
+  "items": [
+    {
+      "snapshotId": "ZoKkksp277FMLSXIghPKdjZcvfE",
+      "plugin": "host",
+      "from": 1706785156000,
+      "to": null,
+      "tags": [],
+      "label": "ip-10-255-200-30.instana.io",
+      "host": "EC2-i-03afb0ac5188f57f3"
+    },
+    {
+      "snapshotId": "ONRQyD-iztZX6QS9QnjKbFFy-oI",
+      "plugin": "host",
+      "from": 1706756437000,
+      "to": null,
+      "tags": [],
+      "label": "ip-10-255-218-45.instana.io",
+      "host": "EC2-i-091cba86bac58cc77"
+    },
+    {
+      "snapshotId": "0GvRrdko-0Ds9OWPzJVEm0j0vTA",
+      "plugin": "host",
+      "from": 1706785131000,
+      "to": null,
+      "tags": [],
+      "label": "ip-10-255-203-60.instana.io",
+      "host": "EC2-i-0d2743935b9596c85"
+    }
+  ]
+}

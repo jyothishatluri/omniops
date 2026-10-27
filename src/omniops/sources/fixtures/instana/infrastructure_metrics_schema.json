@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "snapshotId": "ZoKkksp277FMLSXIghPKdjZcvfE",
+      "plugin": "host",
+      "from": 1706785156000,
+      "to": null,
+      "tags": [],
+      "label": "ip-10-255-200-30.instana.io",
+      "host": "EC2-i-03afb0ac5188f57f3",
+      "metrics": {
+        "cpu.user": [[1706785200000, 0.12], [1706785260000, 0.35]],
+        "memory.used": [[1706785200000, 0.61]]
+      }
+    }
+  ]
+}

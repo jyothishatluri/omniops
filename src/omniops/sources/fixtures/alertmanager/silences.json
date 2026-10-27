@@ -1,0 +1,29 @@
+[
+  {
+    "id": "7d8f9e0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a",
+    "status": {"state": "active"},
+    "updatedAt": "2026-10-01T11:30:00.000Z",
+    "annotations": {},
+    "matchers": [
+      {"name": "alertname", "value": "HighLatency", "isRegex": false, "isEqual": true},
+      {"name": "service", "value": "api-.*", "isRegex": true, "isEqual": true}
+    ],
+    "startsAt": "2026-10-01T11:30:00.000Z",
+    "endsAt": "2026-10-01T13:30:00.000Z",
+    "createdBy": "jane.doe",
+    "comment": "Planned api-gateway rollout, latency expected"
+  },
+  {
+    "id": "0c1d2e3f-4a5b-4c6d-8e7f-8091a2b3c4d5",
+    "status": {"state": "expired"},
+    "updatedAt": "2026-09-30T18:00:00.000Z",
+    "annotations": {},
+    "matchers": [
+      {"name": "namespace", "value": "staging", "isRegex": false, "isEqual": true}
+    ],
+    "startsAt": "2026-09-30T16:00:00.000Z",
+    "endsAt": "2026-09-30T18:00:00.000Z",
+    "createdBy": "ci-bot",
+    "comment": "Staging load test"
+  }
+]

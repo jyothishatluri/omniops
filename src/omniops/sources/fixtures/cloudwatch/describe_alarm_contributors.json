@@ -1,0 +1,22 @@
+{
+ "AlarmContributors": [
+  {
+   "ContributorId": "9f3c2a1b7d4e5f60",
+   "ContributorAttributes": {
+    "@resource.service.name": "checkout-api",
+    "@resource.deployment.environment": "prod"
+   },
+   "StateReason": "p99 2.84 > 2 for 120 s",
+   "StateTransitionedTimestamp": 1790855520.0
+  },
+  {
+   "ContributorId": "1a2b3c4d5e6f7081",
+   "ContributorAttributes": {
+    "@resource.service.name": "payments-api",
+    "@resource.deployment.environment": "prod"
+   },
+   "StateReason": "p99 2.21 > 2 for 120 s",
+   "StateTransitionedTimestamp": 1790855610.0
+  }
+ ]
+}

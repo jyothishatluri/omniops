@@ -1,0 +1,57 @@
+{
+  "aggregations": {
+    "h": {
+      "buckets": [
+        {
+          "key_as_string": "2015-01-01",
+          "key": 1420070400000,
+          "doc_count": 3,
+          "g": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "checkout-api",
+                "doc_count": 2,
+                "m": {
+                  "values": {
+                    "95.0": 940.0
+                  }
+                }
+              },
+              {
+                "key": "payments",
+                "doc_count": 1,
+                "m": {
+                  "values": {
+                    "95.0": 445.0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string": "2015-02-01",
+          "key": 1422748800000,
+          "doc_count": 2,
+          "g": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "checkout-api",
+                "doc_count": 2,
+                "m": {
+                  "values": {
+                    "95.0": 980.0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,123 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "from": {
+          "kind": "string",
+          "name": "string",
+          "namespace": "string"
+        },
+        "to": {
+          "kind": "string",
+          "name": "string",
+          "namespace": "string"
+        },
+        "type": "string"
+      },
+      "id": "string",
+      "meta": {
+        "createdAt": "2019-09-19T10:00:00.000Z",
+        "definedBy": "string",
+        "modifiedAt": "2019-09-19T10:00:00.000Z",
+        "source": "string"
+      },
+      "relationships": {
+        "fromEntity": {
+          "data": {
+            "id": "string",
+            "type": "string"
+          },
+          "meta": {
+            "createdAt": "string",
+            "ingestionSource": "string",
+            "modifiedAt": "string",
+            "origin": "string"
+          }
+        },
+        "toEntity": {
+          "data": {
+            "id": "string",
+            "type": "string"
+          },
+          "meta": {
+            "createdAt": "string",
+            "ingestionSource": "string",
+            "modifiedAt": "string",
+            "origin": "string"
+          }
+        }
+      },
+      "subtype": "string",
+      "type": "string"
+    }
+  ],
+  "included": [
+    {
+      "attributes": {
+        "apiVersion": "string",
+        "description": "string",
+        "displayName": "string",
+        "kind": "string",
+        "name": "string",
+        "namespace": "string",
+        "owner": "string",
+        "tags": []
+      },
+      "id": "string",
+      "meta": {
+        "createdAt": "string",
+        "ingestionSource": "string",
+        "modifiedAt": "string",
+        "origin": "string"
+      },
+      "relationships": {
+        "incidents": {
+          "data": [
+            {
+              "id": "string",
+              "type": "string"
+            }
+          ]
+        },
+        "oncall": {
+          "data": [
+            {
+              "id": "string",
+              "type": "string"
+            }
+          ]
+        },
+        "rawSchema": {
+          "data": {
+            "id": "string",
+            "type": "string"
+          }
+        },
+        "relatedEntities": {
+          "data": [
+            {
+              "id": "string",
+              "type": "string"
+            }
+          ]
+        },
+        "schema": {
+          "data": {
+            "id": "string",
+            "type": "string"
+          }
+        }
+      },
+      "type": "string"
+    }
+  ],
+  "links": {
+    "next": "/api/v2/catalog/relation?filter[from_ref]=service:service-catalog&include=entity&page[limit]=2&page[offset]=2",
+    "previous": "string",
+    "self": "/api/v2/catalog/relation?filter[from_ref]=service:service-catalog&include=entity&page[limit]=2&page[offset]=0"
+  },
+  "meta": {
+    "count": "integer",
+    "includeCount": "integer"
+  }
+}

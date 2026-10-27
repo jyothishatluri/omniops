@@ -1,0 +1,52 @@
+{
+  "platform": "grafana",
+  "description": "Grafana Alerting Slack contact point with the default title/text templates: one firing Grafana-managed alert with dashboard and panel annotations.",
+  "provenance": "grafana/alerting templates/default_template.go (__subject, default.message, __text_alert_list, __text_values_list, slack.default.footer 'Grafana v<version>'), receivers/slack/v1 (username default 'Grafana', title_link = the common GeneratorURL else <root>/alerting/list, color #D63232 firing / #36a64f resolved, footer_icon, ts) and templates/template_data.go (Source /alerting/grafana/<ruleUID>/view?orgId=1; Silence /alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__=<uid>...; Dashboard /d/<uid>?from=<StartsAt-1h ms>&orgId=1&to=<now ms>; Panel adds viewPanel). Slack escapes & as &amp; in message text.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B02GRAFANA",
+    "username": "Grafana",
+    "icons": {"image_48": "https://grafana.com/static/assets/img/fav32.png"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "D63232",
+        "fallback": "[FIRING:1] CheckoutHighErrorRate Shop (shop checkout critical payments)",
+        "title": "[FIRING:1] CheckoutHighErrorRate Shop (shop checkout critical payments)",
+        "title_link": "https://grafana.acme.example/alerting/grafana/fe2kq1x9abcd0e/view?orgId=1",
+        "text": "**Firing**\n\nValue: A=0.0712, C=1\nLabels:\n - alertname = CheckoutHighErrorRate\n - grafana_folder = Shop\n - namespace = shop\n - service = checkout\n - severity = critical\n - team = payments\nAnnotations:\n - description = 7.1% of checkout requests are failing with 5xx (threshold 5%).\n - runbook_url = https://wiki.acme.example/runbooks/checkout-errors\n - summary = Checkout 5xx error rate above 5%\nSource: https://grafana.acme.example/alerting/grafana/fe2kq1x9abcd0e/view?orgId=1\nSilence: https://grafana.acme.example/alerting/silence/new?alertmanager=grafana&amp;matcher=__alert_rule_uid__%3Dfe2kq1x9abcd0e&amp;matcher=namespace%3Dshop&amp;matcher=service%3Dcheckout&amp;matcher=severity%3Dcritical&amp;matcher=team%3Dpayments&amp;orgId=1\nDashboard: https://grafana.acme.example/d/checkout-red?from=1792501320000&amp;orgId=1&amp;to=1792504950000\nPanel: https://grafana.acme.example/d/checkout-red?from=1792501320000&amp;orgId=1&amp;to=1792504950000&amp;viewPanel=4\n",
+        "footer": "Grafana v12.2.1",
+        "footer_icon": "https://grafana.com/static/assets/img/fav32.png",
+        "ts": 1792504950
+      }
+    ],
+    "ts": "1792504951.123459",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504951.123459",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "grafana",
+    "rule_id": "fe2kq1x9abcd0e",
+    "rule_name": "CheckoutHighErrorRate",
+    "status": "firing",
+    "raw_status": "FIRING",
+    "alert_count": 1,
+    "is_recovery": false,
+    "severity": "critical",
+    "service": "checkout",
+    "namespace": "shop",
+    "group": "namespace=shop,service=checkout,team=payments",
+    "value": "A=0.0712, C=1",
+    "summary": "Checkout 5xx error rate above 5%",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "window_start": "2026-10-20T13:02:00Z",
+    "window_end": "2026-10-20T14:02:30Z",
+    "url": "https://grafana.acme.example/alerting/grafana/fe2kq1x9abcd0e/view?orgId=1",
+    "tags": {"grafana_folder": "Shop", "team": "payments"},
+    "links_include": ["https://grafana.acme.example/d/checkout-red?from=1792501320000&orgId=1&to=1792504950000&viewPanel=4"],
+    "anchor": {"source": "link_window", "window_start": "2026-10-20T13:02:00Z", "window_end": "2026-10-20T14:07:00Z"}
+  }
+}

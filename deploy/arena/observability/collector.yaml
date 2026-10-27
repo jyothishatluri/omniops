@@ -1,0 +1,46 @@
+# The Arena shop's OpenTelemetry collector (telemetry/otel-collector, contrib 0.139), re-pointed from
+# its placeholder debug exporter to the in-cluster LGTM stack. Receivers and service names are
+# unchanged, so the shop is untouched. The spanmetrics connector derives RED metrics from server
+# spans (traces_span_metrics_calls_total / traces_span_metrics_duration_milliseconds_bucket, labels
+# service_name, span_name, span_kind, status_code) for the generic error-ratio, latency and
+# request-rate alert rules.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
+connectors:
+  spanmetrics:
+    namespace: traces.span.metrics
+    histogram:
+      unit: ms
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s, 10s, 30s]
+    metrics_flush_interval: 15s
+exporters:
+  otlp/lgtm:
+    endpoint: lgtm.observability.svc.cluster.local:4317
+    tls:
+      insecure: true
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/lgtm, spanmetrics]
+    metrics:
+      receivers: [otlp, spanmetrics]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/lgtm]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/lgtm]

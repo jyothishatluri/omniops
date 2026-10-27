@@ -1,0 +1,26 @@
+[
+  {
+    "id": 163,
+    "uid": "000000163",
+    "orgId": 1,
+    "title": "Folder",
+    "url": "/dashboards/f/000000163/folder",
+    "type": "dash-folder",
+    "tags": [],
+    "isStarred": false,
+    "uri": "db/folder"
+  },
+  {
+    "id": 1,
+    "uid": "cIBgcSjkk",
+    "orgId": 1,
+    "title": "Production Overview",
+    "url": "/d/cIBgcSjkk/production-overview",
+    "type": "dash-db",
+    "tags": [
+      "prod"
+    ],
+    "isStarred": true,
+    "uri": "db/production-overview"
+  }
+]

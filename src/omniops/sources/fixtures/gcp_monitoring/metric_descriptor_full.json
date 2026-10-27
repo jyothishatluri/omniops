@@ -1,0 +1,16 @@
+{
+  "metricDescriptors": [
+    {
+      "name": "projects/PROJECT_ID/metricDescriptors/compute.googleapis.com/firewall/dropped_packets_count",
+      "labels": [
+        {"key": "instance_name", "description": "The name of the VM instance."}
+      ],
+      "metricKind": "DELTA",
+      "valueType": "INT64",
+      "unit": "1",
+      "description": "Count of incoming packets dropped by the firewall.",
+      "displayName": "Dropped packets",
+      "type": "compute.googleapis.com/firewall/dropped_packets_count"
+    }
+  ]
+}

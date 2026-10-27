@@ -1,0 +1,105 @@
+{
+  "schema": [
+    {
+      "name": "account_number",
+      "type": "long"
+    },
+    {
+      "name": "firstname",
+      "type": "text"
+    },
+    {
+      "name": "address",
+      "type": "text"
+    },
+    {
+      "name": "balance",
+      "type": "long"
+    },
+    {
+      "name": "gender",
+      "type": "text"
+    },
+    {
+      "name": "city",
+      "type": "text"
+    },
+    {
+      "name": "employer",
+      "type": "text"
+    },
+    {
+      "name": "state",
+      "type": "text"
+    },
+    {
+      "name": "age",
+      "type": "long"
+    },
+    {
+      "name": "email",
+      "type": "text"
+    },
+    {
+      "name": "lastname",
+      "type": "text"
+    }
+  ],
+  "datarows": [
+    [
+      1,
+      "Amber",
+      "880 Holmes Lane",
+      39225,
+      "M",
+      "Brogan",
+      "Pyrami",
+      "IL",
+      32,
+      "amberduke@pyrami.com",
+      "Duke"
+    ],
+    [
+      6,
+      "Hattie",
+      "671 Bristol Street",
+      5686,
+      "M",
+      "Dante",
+      "Netagy",
+      "TN",
+      36,
+      "hattiebond@netagy.com",
+      "Bond"
+    ],
+    [
+      13,
+      "Nanette",
+      "789 Madison Street",
+      32838,
+      "F",
+      "Nogal",
+      "Quility",
+      "VA",
+      28,
+      "nanettebates@quility.com",
+      "Bates"
+    ],
+    [
+      18,
+      "Dale",
+      "467 Hutchinson Court",
+      4180,
+      "M",
+      "Orick",
+      null,
+      "MD",
+      33,
+      "daleadams@boink.com",
+      "Adams"
+    ]
+  ],
+  "total": 4,
+  "size": 4,
+  "status": 200
+}

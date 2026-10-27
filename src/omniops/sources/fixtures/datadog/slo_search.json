@@ -1,0 +1,153 @@
+{
+  "data": {
+    "attributes": {
+      "facets": {
+        "all_tags": [
+          {
+            "count": "integer",
+            "name": "string"
+          }
+        ],
+        "creator_name": [
+          {
+            "count": "integer",
+            "name": "string"
+          }
+        ],
+        "env_tags": [
+          {
+            "count": "integer",
+            "name": "string"
+          }
+        ],
+        "service_tags": [
+          {
+            "count": "integer",
+            "name": "string"
+          }
+        ],
+        "slo_type": [
+          {
+            "count": "integer",
+            "name": "number"
+          }
+        ],
+        "target": [
+          {
+            "count": "integer",
+            "name": "number"
+          }
+        ],
+        "team_tags": [
+          {
+            "count": "integer",
+            "name": "string"
+          }
+        ],
+        "timeframe": [
+          {
+            "count": "integer",
+            "name": "string"
+          }
+        ]
+      },
+      "slos": [
+        {
+          "data": {
+            "attributes": {
+              "all_tags": [
+                "env:prod",
+                "app:core"
+              ],
+              "created_at": "integer",
+              "creator": {
+                "email": "string",
+                "id": "integer",
+                "name": "string"
+              },
+              "description": "string",
+              "env_tags": [],
+              "groups": [
+                "env:prod",
+                "role:mysql"
+              ],
+              "modified_at": "integer",
+              "monitor_ids": [],
+              "name": "Custom Metric SLO",
+              "overall_status": [
+                {
+                  "error": "string",
+                  "error_budget_remaining": 100,
+                  "indexed_at": 1662496260,
+                  "raw_error_budget_remaining": {
+                    "unit": "requests",
+                    "value": 60
+                  },
+                  "span_precision": 2,
+                  "state": "ok",
+                  "status": 100,
+                  "target": 99,
+                  "timeframe": "30d"
+                }
+              ],
+              "query": {
+                "denominator": "sum:my.custom.metric{*}.as_count()",
+                "metrics": [
+                  "my.custom.metric",
+                  "my.other.custom.metric"
+                ],
+                "numerator": "sum:my.custom.metric{type:good}.as_count()"
+              },
+              "service_tags": [],
+              "slo_type": "metric",
+              "status": {
+                "calculation_error": "string",
+                "error_budget_remaining": 100,
+                "indexed_at": 1662496260,
+                "raw_error_budget_remaining": {
+                  "unit": "requests",
+                  "value": 60
+                },
+                "sli": 100,
+                "span_precision": 2,
+                "state": "ok"
+              },
+              "team_tags": [],
+              "thresholds": [
+                {
+                  "target": 99.9,
+                  "target_display": "99.9",
+                  "timeframe": "30d",
+                  "warning": 90,
+                  "warning_display": "90.0"
+                }
+              ]
+            },
+            "id": "string",
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "type": ""
+  },
+  "links": {
+    "first": "string",
+    "last": "string",
+    "next": "string",
+    "prev": "string",
+    "self": "string"
+  },
+  "meta": {
+    "pagination": {
+      "first_number": "integer",
+      "last_number": "integer",
+      "next_number": "integer",
+      "number": "integer",
+      "prev_number": "integer",
+      "size": "integer",
+      "total": "integer",
+      "type": "string"
+    }
+  }
+}

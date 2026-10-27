@@ -1,0 +1,43 @@
+{
+  "platform": "splunk",
+  "description": "Splunk Enterprise / Splunk Cloud scheduled search alert sent with the 'Slack Notification Alert' alert action (Splunkbase), including the first result's fields and a link to the results.",
+  "provenance": "Splunk 'Slack Notification Alert' add-on docs: the message supports $name$, $result.<field>$, $results_link$ tokens and can attach the first result as fields with a link to the results; results links are <splunk>/app/search/@go?sid=<sid>; scheduled-search sids embed the scheduled time as '_at_<epoch seconds>_'. Message text is the alert's configured message.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B12SPLUNK1",
+    "username": "Splunk",
+    "text": "Splunk Alert: Checkout 5xx spike\n412 checkout requests failed with 5xx in the last 5 minutes.",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "danger",
+        "fallback": "View results in Splunk",
+        "title": "View results in Splunk",
+        "title_link": "https://splunk.acme.example:8000/app/search/@go?sid=scheduler__admin__search__RMD5e3a4b2c1d0f9e8d7_at_1792504920_1234",
+        "fields": [
+          {"title": "status", "value": "503", "short": true},
+          {"title": "host", "value": "web-01", "short": true},
+          {"title": "count", "value": "412", "short": true}
+        ],
+        "footer": "Splunk"
+      }
+    ],
+    "ts": "1792504990.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504990.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "splunk",
+    "rule_name": "Checkout 5xx spike",
+    "title": "Checkout 5xx spike",
+    "status": "firing",
+    "host": "web-01",
+    "value": "412",
+    "incident_id": "scheduler__admin__search__RMD5e3a4b2c1d0f9e8d7_at_1792504920_1234",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "url": "https://splunk.acme.example:8000/app/search/@go?sid=scheduler__admin__search__RMD5e3a4b2c1d0f9e8d7_at_1792504920_1234",
+    "tags": {"status": "503"}
+  }
+}

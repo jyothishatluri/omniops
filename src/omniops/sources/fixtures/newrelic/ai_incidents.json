@@ -1,0 +1,50 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "aiIssues": {
+          "incidents": {
+            "incidents": [
+              {
+                "accountIds": "1",
+                "conditionFamilyId": "685305",
+                "description": [
+                  "Policy: 'Roi nov Test'. Condition: 'RB PV '"
+                ],
+                "incidentId": "a86493e4-2d25-4023-a9e5-975bfaae19a8",
+                "policyIds": "195617",
+                "priority": "HIGH",
+                "state": "CREATED",
+                "title": "[\"PageView query result is > 1.3 for 2 minutes on 'RB PV '\"]",
+                "updatedAt": 1651058532782
+              },
+              {
+                "accountIds": "1",
+                "conditionFamilyId": "1284850",
+                "description": [
+                  "Policy: 'Itzik first policy'. Condition: 'error logs in nrb'"
+                ],
+                "incidentId": "5de80214-6444-4e0c-aaee-fb1c42fb2f23",
+                "policyIds": "707052",
+                "priority": "CRITICAL",
+                "state": "CREATED",
+                "title": "[\"notification-request-builder query result is < 10.0 for 1 minutes on 'error logs in nrb'\"]",
+                "updatedAt": 1651058523473
+              },
+              {
+                "description": [
+                  "Anomaly: Error rate"
+                ],
+                "incidentId": "df4ba4f3-9463-4389-873f-b13efb67dca5",
+                "priority": "MEDIUM",
+                "state": "CREATED",
+                "title": "[\"Anomaly: Error rate\"]",
+                "updatedAt": 1651058478828
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

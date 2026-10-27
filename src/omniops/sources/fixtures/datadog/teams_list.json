@@ -1,0 +1,127 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "avatar": "🥑",
+        "banner": "integer",
+        "created_at": "2019-09-19T10:00:00.000Z",
+        "description": "string",
+        "handle": "example-team",
+        "handles": [],
+        "hidden_modules": [],
+        "is_managed": false,
+        "is_open_membership": false,
+        "link_count": "integer",
+        "modified_at": "2019-09-19T10:00:00.000Z",
+        "name": "Example Team",
+        "provisioned_by": "teams_api",
+        "summary": "string",
+        "user_count": "integer",
+        "visible_modules": []
+      },
+      "id": "aeadc05e-98a8-11ec-ac2c-da7ad0900001",
+      "relationships": {
+        "team_links": {
+          "data": [
+            {
+              "id": "f9bb8444-af7f-11ec-ac2c-da7ad0900001",
+              "type": "team_links"
+            }
+          ],
+          "links": {
+            "related": "/api/v2/team/c75a4a8e-20c7-11ee-a3a5-da7ad0900002/links"
+          }
+        },
+        "user_team_permissions": {
+          "data": {
+            "id": "UserTeamPermissions-aeadc05e-98a8-11ec-ac2c-da7ad0900001-416595",
+            "type": "user_team_permissions"
+          },
+          "links": {
+            "related": "/api/v2/team/c75a4a8e-20c7-11ee-a3a5-da7ad0900002/links"
+          }
+        }
+      },
+      "type": "team"
+    }
+  ],
+  "included": [
+    {
+      "attributes": {
+        "created_at": "2019-09-19T10:00:00.000Z",
+        "disabled": false,
+        "email": "string",
+        "handle": "string",
+        "icon": "string",
+        "last_login_time": "2019-09-19T10:00:00.000Z",
+        "mfa_enabled": false,
+        "modified_at": "2019-09-19T10:00:00.000Z",
+        "name": "string",
+        "service_account": false,
+        "status": "string",
+        "title": "string",
+        "uuid": "string",
+        "verified": false
+      },
+      "id": "string",
+      "relationships": {
+        "org": {
+          "data": {
+            "id": "00000000-0000-beef-0000-000000000000",
+            "type": "orgs"
+          }
+        },
+        "other_orgs": {
+          "data": [
+            {
+              "id": "00000000-0000-beef-0000-000000000000",
+              "type": "orgs"
+            }
+          ]
+        },
+        "other_users": {
+          "data": [
+            {
+              "id": "00000000-0000-0000-2345-000000000000",
+              "type": "users"
+            }
+          ]
+        },
+        "roles": {
+          "data": [
+            {
+              "id": "3653d3c6-0c75-11ea-ad28-fb5701eabc7d",
+              "type": "roles"
+            }
+          ]
+        }
+      },
+      "type": "users"
+    }
+  ],
+  "links": {
+    "first": "string",
+    "last": "string",
+    "next": "string",
+    "prev": "string",
+    "self": "string"
+  },
+  "meta": {
+    "pagination": {
+      "first_number": "integer",
+      "first_offset": "integer",
+      "last_number": "integer",
+      "last_offset": "integer",
+      "limit": "integer",
+      "next_number": "integer",
+      "next_offset": "integer",
+      "number": "integer",
+      "offset": "integer",
+      "prev_number": "integer",
+      "prev_offset": "integer",
+      "size": "integer",
+      "total": "integer",
+      "type": "string"
+    }
+  }
+}

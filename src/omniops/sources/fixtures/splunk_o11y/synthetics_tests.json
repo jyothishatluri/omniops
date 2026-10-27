@@ -1,0 +1,31 @@
+{
+ "nextPageLink": 0,
+ "perPage": 50,
+ "tests": [
+  {
+   "active": true,
+   "automaticRetries": 1,
+   "createdAt": "2022-09-14T14:35:37.801Z",
+   "createdBy": "abcdefgh1234",
+   "customProperties": [
+    {
+     "key": "foo",
+     "value": "bar"
+    }
+   ],
+   "frequency": 5,
+   "id": 1,
+   "lastRunAt": "2022-09-14T14:36:45.156Z",
+   "lastRunStatus": "success",
+   "locationIds": [
+    "aws-us-east-1"
+   ],
+   "name": "My Test",
+   "schedulingStrategy": "round_robin",
+   "type": "browser",
+   "updatedAt": "2022-09-14T14:35:38.099Z",
+   "updatedBy": "abcdefgh1234"
+  }
+ ],
+ "totalCount": 1
+}

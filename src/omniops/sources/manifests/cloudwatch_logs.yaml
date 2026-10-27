@@ -1,0 +1,594 @@
+# Amazon CloudWatch Logs reached directly over HTTPS (no MCP, no SDK).
+#
+# Protocol: AWS JSON 1.1 (service model: protocol json, jsonVersion 1.1, targetPrefix Logs_20140328)
+#   POST https://logs.<region>.amazonaws.com/
+#   Content-Type: application/x-amz-json-1.1
+#   X-Amz-Target: Logs_20140328.<Operation>
+#   auth: SigV4, signing name "logs"
+# Every API reference page shows this exact request (e.g. API_StartQuery "Sample Request").
+# Time units differ per operation and are the #1 trap here:
+#   StartQuery startTime/endTime          -> epoch SECONDS
+#   GetLogGroupFields time                -> epoch SECONDS (centre of a +-8 min window)
+#   FilterLogEvents startTime/endTime     -> epoch MILLISECONDS
+#   event timestamps / creationTime / lastEventTimestamp / anomaly firstSeen -> epoch MILLISECONDS
+#   Logs Insights @timestamp result value  -> "YYYY-MM-DD HH:MM:SS.mmm" (UTC) string
+# Research notes: docs/sources/cloudwatch_logs.md
+source: cloudwatch_logs
+display_name: Amazon CloudWatch Logs
+vendor: Amazon Web Services
+description: >-
+  CloudWatch Logs Insights queries (StartQuery + GetQueryResults polling), raw log event search
+  (FilterLogEvents), log group / log stream inventory, field discovery (GetLogGroupFields) and
+  log anomaly detection results (ListAnomalies) via SigV4-signed AWS JSON 1.1.
+docs_url: https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/Welcome.html
+categories: [logs]
+base_url: >-
+  {{ env.AWS_ENDPOINT_URL_CLOUDWATCH_LOGS if (env.AWS_ENDPOINT_URL_CLOUDWATCH_LOGS and env.AWS_ENDPOINT_URL_CLOUDWATCH_LOGS != 'auto') else
+     ('https://logs.' ~ env.AWS_REGION ~ ('.amazonaws.com.cn' if (env.AWS_REGION or '').startswith('cn-') else '.amazonaws.com')) }}
+env:
+  - {name: AWS_REGION, description: "Region to query, e.g. us-east-1. Log groups live in one region."}
+  - {name: AWS_ENDPOINT_URL_CLOUDWATCH_LOGS, default: auto, description: "Optional endpoint override (VPC endpoint, FIPS https://logs-fips.<region>.amazonaws.com, LocalStack). 'auto' = https://logs.<region>.amazonaws.com"}
+  - {name: AWS_PROFILE, description: "Optional named profile; credentials come from the standard AWS chain (not read by templates)."}
+  - {name: AWS_ACCESS_KEY_ID, description: "Optional static key (AWS credential chain)", secret: true}
+  - {name: AWS_SECRET_ACCESS_KEY, description: "Optional static secret (AWS credential chain)", secret: true}
+  - {name: AWS_SESSION_TOKEN, description: "Optional session token (AWS credential chain)", secret: true}
+required_env: [AWS_REGION]
+auth:
+  type: aws_sigv4
+  service: logs
+  region: "{{ env.AWS_REGION }}"
+headers:
+  Content-Type: application/x-amz-json-1.1
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 300
+  # Throttling is HTTP 400 ThrottlingException; StartQuery over the concurrent-query quota is HTTP
+  # 400 LimitExceededException. Both are worth a short backoff and retry.
+  retry_body_patterns: ["ThrottlingException", "Rate exceeded", "LimitExceededException"]
+  notes: >-
+    Per account per region: StartQuery 10 TPS, GetQueryResults 10 TPS, FilterLogEvents 10 TPS
+    (25 in us-east-1, 5 in some regions), DescribeLogGroups 10 TPS, DescribeLogStreams 25 TPS.
+    Max 100 concurrent Logs Insights QL queries (15 for PPL/SQL) shared with dashboards and
+    scheduled queries.
+retention:
+  logs: 3650d
+ui_base_url: "https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}"
+pitfalls:
+  - "Log groups are regional and named per service convention: Lambda /aws/lambda/<function>, ECS (awslogs driver) usually /ecs/<task-family> or /aws/ecs/<cluster>, EKS Container Insights /aws/containerinsights/<cluster>/application, API Gateway API-Gateway-Execution-Logs_<apiId>/<stage>, RDS /aws/rds/instance/<db>/<log>, X-Ray Transaction Search spans aws/spans. List them with cloudwatch_logs_log_groups before guessing."
+  - "Retention is per log group (retention_days; null = never expire). A window older than the group's retention returns 0 rows - that is missing data, not absence of errors."
+  - "Logs Insights bills per GB scanned: narrow the window and the log groups first, then widen."
+  - "Field names are case-sensitive and unknown fields are silently null: filter level = 'ERROR' on logs that write \"level\":\"error\" returns nothing. Check field names with cloudwatch_logs_fields, or filter @message like /(?i)error/."
+query_languages:
+  cloudwatch_logs_insights: >-
+    Logs Insights QL (CWLI): pipe commands. fields @timestamp, @message, @logStream, @log | filter
+    @message like /(?i)(error|exception|timeout)/ | parse @message "* * *" as a, b, c | stats
+    count(*) as value by bin(1m) as ts | sort value desc | limit 50. System fields: @timestamp,
+    @message, @logStream, @log (account-id:log-group), @ingestionTime, @ptr; Lambda adds @requestId,
+    @duration, @billedDuration, @maxMemoryUsed, @type; JSON logs are auto-discovered (nested keys
+    with dots: level, error.code). filter supports = != < > like /regex/ in [..] and/or/not.
+    Alias aggregates "as value" and the time bin "by bin(1m) as ts" so they land in the value/ts
+    columns. sort/limit must come after the last stats. pattern @message clusters similar lines
+    (top log patterns). Use "SOURCE logGroups(namePrefix: ['/aws/lambda/checkout'])" as the first
+    command when no log_group filter is given (<= 5 prefixes). queryLanguage PPL/SQL (OpenSearch)
+    is also accepted via query_language.
+  cloudwatch_logs_filter_pattern: >-
+    Filter pattern (FilterLogEvents): space-separated terms are AND-ed and case-sensitive exact
+    matches (ERROR matches ERROR, not error); ?term1 ?term2 is OR; -term excludes; "quoted phrase";
+    JSON logs: { $.level = "error" && $.latencyMs > 1000 }; regex between percent signs: %timeout|refused%.
+    Empty pattern = all events.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_logs_insights
+    title: Logs Insights query (StartQuery -> GetQueryResults)
+    description: >-
+      Run a CloudWatch Logs Insights query and return its result rows. `query` (required) is the
+      Logs Insights QL text; `log_group` is one log group name/ARN or a comma-separated list (up to
+      50) - omit it only when the query starts with a SOURCE logGroups(...) command. Raw-event
+      queries fill ts/message/log_stream; `fields` always holds every returned field as JSON (use
+      fields->>'name'); stats queries should alias "as value" and "by bin(1m) as ts". The engine
+      starts the query, polls GetQueryResults until status = Complete (fails loudly on
+      Failed/Cancelled/Timeout) and pages through nextToken. Best table for error search, top error
+      messages, error rate per minute, latency from structured logs, Lambda timeouts/cold starts,
+      and Transaction Search spans (log_group = 'aws/spans').
+    kind: logs
+    steps:
+      - name: start
+        method: POST
+        path: /
+        headers: {X-Amz-Target: Logs_20140328.StartQuery}
+        body:
+          queryLanguage: "{{ filters.query_language or 'CWLI' }}"
+          queryString: "{{ filters.query }}"
+          logGroupIdentifiers: "{{ ((filters.log_group or '').split(',') | map('trim') | reject('equalto', '') | list) or None }}"
+          startTime: "{{ time.start | epoch_s }}"
+          endTime: "{{ time.end | epoch_s }}"
+          limit: "{{ ([limit or 1000, 10000] | min) if (filters.query_language or 'CWLI') == 'CWLI' else None }}"
+        capture: {query_id: "$.queryId"}
+      - name: results
+        method: POST
+        path: /
+        headers: {X-Amz-Target: Logs_20140328.GetQueryResults}
+        body:
+          queryId: "{{ captures.query_id }}"
+          maxItems: 10000
+        poll:
+          until: "response.status == 'Complete'"
+          fail_if: "response.status in ['Failed', 'Cancelled', 'Timeout', 'Unknown']"
+          interval_s: 1.5
+          timeout_s: 120
+    filters:
+      - column: query
+        required: true
+        description: "Logs Insights QL query text (max 10,000 chars). See query_languages.cloudwatch_logs_insights."
+        examples:
+          - 'fields @timestamp, @message, @logStream | filter @message like /(?i)(error|exception|timeout)/ | sort @timestamp desc | limit 200'
+          - 'filter @message like /(?i)error/ | stats count(*) as value by bin(1m) as ts'
+      - column: log_group
+        ops: ["=", "in"]
+        max_fan_out: 10
+        description: >-
+          Log group name or ARN, or a comma-separated list of up to 50 (one query over all of them).
+          IN (...) instead runs one query per group. Omit only when the query begins with SOURCE logGroups(...).
+        examples: ["/aws/lambda/checkout-api"]
+      - {column: query_language, description: "CWLI (default) | PPL | SQL. For SQL the log groups go inside the query text, not log_group."}
+    # Positive control re-runs the query on the preceding window: bounded to 1-7 h because
+    # Logs Insights bills per GB scanned and the poll budget is 120 s.
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 1h}
+    pagination: {type: cursor, cursor_path: "$.nextToken", cursor_param: "body.nextToken", max_pages: 3}
+    response:
+      rows_path: "$.results[*]"
+      errors:
+        - {path: "$.status", equals: "Failed", message: "$.status", hint: "Logs Insights query failed: check the query syntax and field names"}
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_ | selectattr('field', 'in', ['@timestamp', 'ts', '@t']) | map(attribute='value') | first", transform: auto_time, description: "@timestamp for event rows; the bin aliased 'as ts' for stats rows (UTC)"}
+      - {name: message, expr: "_ | selectattr('field', 'equalto', '@message') | map(attribute='value') | first", description: "@message (raw event)"}
+      - {name: log_stream, expr: "_ | selectattr('field', 'equalto', '@logStream') | map(attribute='value') | first", description: "@logStream (Lambda: one per execution environment; ECS: per task/container)"}
+      - {name: log_group_ref, expr: "_ | selectattr('field', 'equalto', '@log') | map(attribute='value') | first", description: "@log = account-id:log-group-name (tells groups apart in multi-group queries)"}
+      - {name: value, type: DOUBLE, expr: "_ | selectattr('field', 'equalto', 'value') | map(attribute='value') | first", description: "The field aliased 'as value' in stats queries"}
+      - {name: ptr, expr: "_ | selectattr('field', 'equalto', '@ptr') | map(attribute='value') | first", description: "@ptr: pointer to the full log record (GetLogRecord)"}
+      - {name: fields, type: JSON, expr: "dict(_ | map('dictsort') | map('map', attribute=1) | map('list') | list)", description: "Every returned field as an object (values are strings): fields->>'@requestId', fields->>'level', fields->>'count(*)'"}
+      - {name: records_matched, type: BIGINT, path: "$.statistics.recordsMatched", description: "Events that matched the query in total (compare with the row count: more matched than returned = capped by limit)"}
+      - {name: bytes_scanned, type: BIGINT, path: "$.statistics.bytesScanned", description: "Bytes scanned (billing)"}
+      - {name: query, filter_only: true}
+      - {name: log_group, filter_only: true}
+      - {name: query_language, filter_only: true}
+    max_rows: 10000
+    sort_hint: "whatever the query's sort command says; without sort, event queries are not ordered - add | sort @timestamp desc"
+    pitfalls:
+      - "Results are capped by `limit` (SQL LIMIT, default 1000, max 10,000 per page; CWLI up to 100,000 via nextToken). A capped event list is a sample, not a count: use stats count(*) for volumes (records_matched shows the true match count)."
+      - "stats ... by bin(1m) omits bins with no matching events (no zero rows): a burst that stops looks like it ends at its last non-empty bin."
+      - "All result values are strings; value/ts are converted, everything in `fields` stays text - CAST(fields->>'n' AS BIGINT)."
+      - "A query running past the engine's 120 s poll timeout fails loudly; queries themselves time out after 60 min. Narrow the window or the log groups."
+      - "SOURCE logGroups(namePrefix: [...]) can select up to 10,000 groups and scans all of them: prefer explicit log_group values."
+      - "If the log group uses log transformation, Insights sees transformed events while cloudwatch_logs_events sees the originals."
+      - "Fields with a leading @ in JSON logs are shown with an extra @ (@@field)."
+      - "INFREQUENT_ACCESS log groups are queryable here; DELIVERY-class groups are not."
+    examples:
+      - sql: >-
+          SELECT ts, log_stream, message FROM cloudwatch_logs_insights
+          WHERE log_group = '/aws/lambda/checkout-api'
+            AND query = 'fields @timestamp, @message, @logStream | filter @message like /(?i)(error|exception|timeout)/ | sort @timestamp desc | limit 200'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:30:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Error lines of one Lambda function during the incident.
+      - sql: >-
+          SELECT ts, value AS errors FROM cloudwatch_logs_insights
+          WHERE log_group = '/ecs/payments-api,/ecs/payments-worker'
+            AND query = 'filter @message like /(?i)error/ | stats count(*) as value by bin(1m) as ts'
+          ORDER BY ts
+        description: Errors per minute across two log groups in one query (bins without errors are absent).
+      - sql: >-
+          SELECT fields->>'msg' AS message, CAST(fields->>'n' AS BIGINT) AS occurrences
+          FROM cloudwatch_logs_insights
+          WHERE log_group = '/ecs/payments-api'
+            AND query = 'filter level = "error" | stats count(*) as n by msg | sort n desc | limit 20'
+          ORDER BY occurrences DESC
+        description: Top error messages in structured JSON logs.
+      - sql: >-
+          SELECT fields->>'@requestId' AS request_id, CAST(fields->>'@duration' AS DOUBLE) AS duration_ms
+          FROM cloudwatch_logs_insights
+          WHERE log_group = '/aws/lambda/checkout-api'
+            AND query = 'filter @type = "REPORT" | fields @requestId, @duration | sort @duration desc | limit 20'
+        description: Slowest Lambda invocations from REPORT lines.
+      - sql: >-
+          SELECT fields->>'@pattern' AS pattern, CAST(fields->>'@sampleCount' AS BIGINT) AS events
+          FROM cloudwatch_logs_insights
+          WHERE log_group = '/ecs/payments-api'
+            AND query = 'filter @message like /(?i)(error|exception)/ | pattern @message | sort @sampleCount desc | limit 20'
+        description: Top error log patterns (similar lines clustered by Logs Insights).
+    fixtures:
+      - file: get_query_results.json
+        filters: {query: "fields @timestamp, @message", log_group: my-log-group}
+        expect_rows: 3
+        expect_columns:
+          fields: '{"LogEvent1-field1-name":"LogEvent1-field1-value","LogEvent1-field2-name":"LogEvent1-field2-value","LogEvent1-fieldX-name":"LogEvent1-fieldX-value"}'
+          log_group: my-log-group
+          records_matched: 360851
+          bytes_scanned: 81349723
+        note: >-
+          Sample response of "Get results from a recent query" from
+          https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_GetQueryResults.html
+          with the literal "..." placeholder lines removed so it parses as JSON.
+      - file: get_query_results_system_fields.json
+        filters: {query: "fields @timestamp, @message, @logStream, @log | filter @message like /ERROR/", log_group: /aws/lambda/checkout-api}
+        expect_rows: 2
+        expect_columns:
+          ts: "2026-10-01T11:58:02Z"
+          log_stream: "2026/10/01/[$LATEST]6f1c2b9e0d4a4c7f8e2a1b3c5d7e9f01"
+          log_group_ref: "123456789012:/aws/lambda/checkout-api"
+        note: >-
+          Built strictly from the documented GetQueryResults schema (results = array of arrays of
+          {field, value}, status, statistics) and the documented system fields @timestamp, @message,
+          @logStream, @log, @ptr (https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_AnalyzeLogData-discoverable-fields.html).
+          @timestamp uses the "YYYY-MM-DD HH:MM:SS.mmm" UTC string form that GetQueryResults returns. Values are illustrative.
+      - file: get_query_results_stats.json
+        filters: {query: "filter @message like /(?i)error/ | stats count(*) as value by bin(1m) as ts", log_group: /aws/lambda/checkout-api}
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:55:00Z", value: 3.0}
+        note: >-
+          Built strictly from the documented GetQueryResults schema for a stats query whose
+          aggregate is aliased "as value" and whose bin is aliased "as ts" (alias syntax "BY BIN(5m) as @t"
+          per https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax-Stats.html). Values are illustrative.
+      - file: get_query_results_failed.json
+        filters: {query: "filter level = ", log_group: /aws/lambda/checkout-api}
+        expect_error: "Failed"
+        note: >-
+          Built strictly from the GetQueryResults schema with status = Failed (one of the documented
+          status values: Scheduled | Running | Complete | Failed | Cancelled | Timeout | Unknown).
+          Proves a failed query is a loud error, never an empty result.
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#logsV2:logs-insights
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_logs_events
+    title: Raw log events with a filter pattern (FilterLogEvents)
+    description: >-
+      Fetch raw log events from ONE log group (required), newest first, optionally narrowed by a
+      filter pattern (filter_pattern, e.g. '?ERROR ?Exception' or '{ $.level = "error" }'), an exact
+      log stream (log_stream) or a stream prefix (log_stream_prefix). Cheaper and faster than Logs
+      Insights for "show me the last N matching lines" and for reading the lines around a known
+      event; no aggregation. One row per event.
+    kind: logs
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: Logs_20140328.FilterLogEvents}
+      body:
+        logGroupIdentifier: "{{ filters.log_group }}"
+        filterPattern: "{{ filters.filter_pattern }}"
+        logStreamNames: "{{ [filters.log_stream] if filters.log_stream else None }}"
+        logStreamNamePrefix: "{{ filters.log_stream_prefix if (filters.log_stream_prefix and not filters.log_stream) else None }}"
+        startTime: "{{ time.start | epoch_ms }}"
+        endTime: "{{ time.end | epoch_ms }}"
+        # startFromHead=false (newest first) is only accepted for startTime >= 2024-01-01T00:00:00Z.
+        startFromHead: "{{ false if (time.start | epoch_s) >= 1704067200 else None }}"
+        limit: "{{ [limit or 1000, 10000] | min }}"
+    filters:
+      - {column: log_group, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Log group name or ARN (IN fans out one request per group)", examples: ["/aws/lambda/checkout-api"]}
+      - {column: filter_pattern, description: "CloudWatch filter pattern (see query_languages.cloudwatch_logs_filter_pattern); empty = all events", examples: ["?ERROR ?Exception ?Task timed out"]}
+      - {column: log_stream, ops: ["=", "in"], description: "Exact log stream name (IN fans out)", examples: ["2026/10/01/[$LATEST]6f1c2b9e0d4a4c7f8e2a1b3c5d7e9f01"]}
+      - {column: log_stream_prefix, description: "Only streams whose name starts with this prefix (ignored when log_stream is set)", examples: ["2026/10/01/"]}
+    time: {column: ts, default_lookback: 30m, max_window: 7d}
+    pagination: {type: cursor, cursor_path: "$.nextToken", cursor_param: "body.nextToken", max_pages: 5}
+    response:
+      rows_path: "$.events[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms, description: "Event time (UTC)"}
+      - {name: message, path: message}
+      - {name: log_stream, path: logStreamName}
+      - {name: ingestion_time, type: TIMESTAMP, path: ingestionTime, transform: epoch_ms, description: "When CloudWatch received the event (ingestion lag = ingestion_time - ts)"}
+      - {name: event_id, path: eventId}
+      - {name: log_group, filter_only: true}
+      - {name: filter_pattern, filter_only: true}
+      - {name: log_stream_prefix, filter_only: true}
+    max_rows: 10000
+    sort_hint: "newest first (startFromHead=false) for windows starting on/after 2024-01-01; oldest first otherwise"
+    pitfalls:
+      - "Filter-pattern terms are case-sensitive exact matches: 'ERROR' does not match 'error'. Use '?ERROR ?Error ?error' or a regex term %[Ee]rror%."
+      - "Pages can be partially full or even empty while more data exists; the engine follows nextToken up to 5 pages, so a short result with a truncation note is not the full set."
+      - "Returns the original events even when the log group uses log transformation (Insights sees transformed events)."
+      - "One log group per request; use cloudwatch_logs_insights to search many groups at once or to count."
+      - "INFREQUENT_ACCESS log groups do not support FilterLogEvents: use cloudwatch_logs_insights for them."
+    examples:
+      - sql: >-
+          SELECT ts, log_stream, message FROM cloudwatch_logs_events
+          WHERE log_group = '/aws/lambda/checkout-api' AND filter_pattern = '?ERROR ?Exception ?"Task timed out"'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:45:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 100
+        description: Latest error lines of one function in the incident window.
+      - sql: >-
+          SELECT ts, message FROM cloudwatch_logs_events
+          WHERE log_group = '/ecs/payments-api' AND log_stream = 'ecs/payments-api/3f9a2c1d8b7e4f60a1b2c3d4e5f6a7b8'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:57:30' AND TIMESTAMP '2026-10-01 11:58:30'
+          ORDER BY ts
+        description: Context lines around one failing task's error.
+      - sql: >-
+          SELECT ts, message FROM cloudwatch_logs_events
+          WHERE log_group = '/ecs/payments-api' AND filter_pattern = '{ $.level = "error" && $.status >= 500 }'
+          ORDER BY ts DESC LIMIT 50
+        description: JSON-structured logs filtered server-side on fields.
+    fixtures:
+      - file: filter_log_events.json
+        filters: {log_group: my-log-group, filter_pattern: ERROR}
+        expect_rows: 3
+        expect_columns: {ts: "2014-03-28T19:36:18Z", message: "ERROR Event 3", log_stream: my-log-stream-3, log_group: my-log-group}
+        note: >-
+          Verbatim sample response of "To list the most recent events in a log group in reverse
+          order" (startFromHead=false) from https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_FilterLogEvents.html
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#logsV2:log-groups/log-group/{{ (filters.log_group or '') | replace('/', '$252F') }}/log-events
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_logs_log_groups
+    title: Log group inventory (DescribeLogGroups)
+    description: >-
+      List log groups with retention, size and class. Use it to find the right log group for a
+      service before querying (log_group_prefix '/aws/lambda/checkout' or a case-sensitive substring
+      log_group LIKE '%checkout%'), and to check retention before concluding that old logs are absent.
+    kind: entities
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: Logs_20140328.DescribeLogGroups}
+      body:
+        # log_group = 'x' -> prefix x; LIKE 'x%' -> prefix x; LIKE '%x%' -> substring pattern x (DuckDB re-applies the predicate).
+        logGroupNamePrefix: >-
+          {{ filters.log_group_prefix
+             or (filters.log_group if (filters.log_group and not filters.log_group__op) else None)
+             or ((filters.log_group[:-1]) if (filters.log_group__op == 'like' and filters.log_group.endswith('%')
+                  and not filters.log_group.startswith('%') and '%' not in filters.log_group[:-1] and '_' not in filters.log_group[:-1]) else None) }}
+        logGroupNamePattern: >-
+          {{ None if (filters.log_group_prefix or (filters.log_group and not filters.log_group__op)
+                      or (filters.log_group__op == 'like' and filters.log_group.endswith('%') and not filters.log_group.startswith('%') and '%' not in filters.log_group[:-1] and '_' not in filters.log_group[:-1]))
+             else (filters.log_group_pattern or ((filters.log_group[1:-1]) if (filters.log_group__op == 'like' and filters.log_group | length > 2
+                   and filters.log_group.startswith('%') and filters.log_group.endswith('%') and '%' not in filters.log_group[1:-1] and '_' not in filters.log_group[1:-1]) else None)) }}
+        logGroupClass: "{{ filters.log_group_class }}"
+        includeLinkedAccounts: "{{ true if filters.include_linked_accounts else None }}"
+        limit: 50
+    filters:
+      - {column: log_group, ops: ["=", "like"], description: "Log group name: = 'x' and LIKE 'x%' are pushed as a name prefix, LIKE '%x%' as a substring pattern", examples: ["/aws/lambda/checkout-api"]}
+      - {column: log_group_prefix, description: "Name prefix, e.g. /aws/lambda/ or /ecs/payments", examples: ["/aws/lambda/"]}
+      - {column: log_group_pattern, description: "Case-sensitive substring of the name (ignored when a prefix is given)", examples: ["checkout"]}
+      - {column: log_group_class, description: "STANDARD | INFREQUENT_ACCESS | DELIVERY"}
+      - {column: include_linked_accounts, type: BOOLEAN, description: "Monitoring account: also list log groups of linked source accounts"}
+    pagination: {type: cursor, cursor_path: "$.nextToken", cursor_param: "body.nextToken", max_pages: 10}
+    response:
+      rows_path: "$.logGroups[*]"
+    columns:
+      - {name: log_group, path: logGroupName}
+      - {name: arn, expr: "_.logGroupArn or _.arn", description: "Log group ARN (logGroupArn has no trailing :*)"}
+      - {name: created_at, type: TIMESTAMP, path: creationTime, transform: epoch_ms}
+      - {name: retention_days, type: BIGINT, path: retentionInDays, description: "null = never expire (also null when the substring pattern filter was used)"}
+      - {name: stored_bytes, type: BIGINT, expr: "_.storedBytes if _.storedBytes is number else _.storageBytes", description: "Stored bytes (schema field storedBytes; the docs example says storageBytes)"}
+      - {name: metric_filter_count, type: BIGINT, path: metricFilterCount}
+      - {name: log_group_class, path: logGroupClass}
+      - {name: kms_key_id, path: kmsKeyId}
+      - {name: data_protection_status, path: dataProtectionStatus}
+      - {name: deletion_protection, type: BOOLEAN, path: deletionProtectionEnabled}
+      - {name: log_group_prefix, filter_only: true}
+      - {name: log_group_pattern, filter_only: true}
+      - {name: include_linked_accounts, type: BOOLEAN, filter_only: true}
+    max_rows: 2000
+    sort_hint: "alphabetical (ASCII) by log group name"
+    pitfalls:
+      - "Prefix and pattern are case-sensitive and mutually exclusive."
+      - "With a substring pattern (log_group LIKE '%x%') AWS returns ONLY arn, creationTime and logGroupName: retention_days and stored_bytes are null. Re-query with the exact name or prefix for those."
+      - "INFREQUENT_ACCESS log groups support Logs Insights but not FilterLogEvents/live tail; DELIVERY groups keep events one day and are not queryable."
+    examples:
+      - sql: >-
+          SELECT log_group, created_at FROM cloudwatch_logs_log_groups
+          WHERE log_group LIKE '%checkout%' ORDER BY log_group
+        description: Find every log group that belongs to the checkout service (pushed as a substring pattern).
+      - sql: >-
+          SELECT log_group, retention_days, stored_bytes FROM cloudwatch_logs_log_groups
+          WHERE log_group_prefix = '/aws/lambda/' AND retention_days < 7
+        description: Lambda log groups whose short retention may hide older evidence.
+    tests:
+      - {sql: "SELECT log_group FROM cloudwatch_logs_log_groups LIMIT 5", min_rows: 0}
+    fixtures:
+      - file: describe_log_groups.json
+        filters: {log_group_prefix: my-log-group}
+        expect_rows: 2
+        expect_columns: {log_group: my-log-group-1, retention_days: 14, created_at: "2014-02-28T00:00:00Z", deletion_protection: true, stored_bytes: 1048576}
+        note: >-
+          Sample response of "To list all log groups" from
+          https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_DescribeLogGroups.html;
+          the doc JSON lacks two commas after deletionProtectionEnabled, added so it parses.
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_logs_log_streams
+    title: Log streams of a log group, most recently active first (DescribeLogStreams)
+    description: >-
+      Log streams of ONE log group (required), ordered by last event time, newest first. A stream
+      is one Lambda execution environment, one ECS task container or one EC2 instance agent, so
+      this answers "which tasks/instances were writing logs when it broke", "did a new deployment
+      create fresh streams at 11:52", and gives exact log_stream names for cloudwatch_logs_events.
+      With log_stream_prefix the order is by name instead (AWS cannot combine prefix and time order).
+    kind: entities
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: Logs_20140328.DescribeLogStreams}
+      body:
+        logGroupIdentifier: "{{ filters.log_group }}"
+        logStreamNamePrefix: "{{ filters.log_stream_prefix }}"
+        orderBy: "{{ 'LogStreamName' if filters.log_stream_prefix else 'LastEventTime' }}"
+        descending: "{{ false if filters.log_stream_prefix else true }}"
+        limit: 50
+    filters:
+      - {column: log_group, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Log group name or ARN", examples: ["/aws/lambda/checkout-api"]}
+      - {column: log_stream_prefix, description: "Stream name prefix (switches ordering to name order)", examples: ["2026/10/01/"]}
+    pagination: {type: cursor, cursor_path: "$.nextToken", cursor_param: "body.nextToken", max_pages: 4}
+    response:
+      rows_path: "$.logStreams[*]"
+    columns:
+      - {name: log_stream, path: logStreamName}
+      - {name: ts, type: TIMESTAMP, path: lastEventTimestamp, transform: epoch_ms, description: "Time of the most recent event (eventually consistent: usually < 1 h behind)"}
+      - {name: first_event_at, type: TIMESTAMP, path: firstEventTimestamp, transform: epoch_ms}
+      - {name: created_at, type: TIMESTAMP, path: creationTime, transform: epoch_ms, description: "Stream creation (a burst of new streams = new tasks / cold starts / deploy)"}
+      - {name: last_ingestion_at, type: TIMESTAMP, path: lastIngestionTime, transform: epoch_ms}
+      - {name: arn, path: arn}
+      - {name: log_group, filter_only: true}
+      - {name: log_stream_prefix, filter_only: true}
+    max_rows: 1000
+    sort_hint: "newest last event first (orderBy LastEventTime, descending) unless log_stream_prefix is set"
+    pitfalls:
+      - "lastEventTimestamp is updated eventually (typically < 1 hour after ingestion): a stream may still be active even if ts looks stale; confirm with cloudwatch_logs_events."
+      - "storedBytes is deprecated and always 0; it is not exposed."
+      - "Busy log groups have thousands of streams; only the 200 most recently active are fetched (4 pages)."
+    examples:
+      - sql: >-
+          SELECT log_stream, created_at, ts AS last_event FROM cloudwatch_logs_log_streams
+          WHERE log_group = '/ecs/payments-api' AND created_at >= TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY created_at
+        description: Tasks that started around the incident (new streams = new tasks or a deployment).
+      - sql: >-
+          SELECT log_stream, ts AS last_event FROM cloudwatch_logs_log_streams
+          WHERE log_group = '/aws/lambda/checkout-api' ORDER BY ts DESC LIMIT 10
+        description: Most recently active Lambda execution environments.
+    fixtures:
+      - file: describe_log_streams.json
+        filters: {log_group: my-log-group}
+        expect_rows: 2
+        expect_columns: {log_stream: my-log-stream-1, ts: "2014-02-28T06:10:00Z", created_at: "2014-02-28T00:00:00Z", log_group: my-log-group}
+        note: >-
+          Verbatim sample response of "To list the log streams for a log group" from
+          https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_DescribeLogStreams.html
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_logs_fields
+    title: Fields present in a log group (GetLogGroupFields)
+    description: >-
+      The field names found in ONE log group's events (required) and the percentage of events that
+      contain each, sampled from a 16-minute window centred on the middle of the ts window (default:
+      the analysis window). Run it before writing a Logs Insights filter on a structured field: an
+      unknown or mis-cased field silently matches nothing.
+    kind: entities
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: Logs_20140328.GetLogGroupFields}
+      body:
+        logGroupIdentifier: "{{ filters.log_group }}"
+        time: "{{ ((time.start | epoch_s) + (time.end | epoch_s)) // 2 }}"
+    filters:
+      - {column: log_group, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Log group name or ARN", examples: ["MyLogGroup"]}
+    time: {column: ts, default_lookback: 15m, max_window: 30d, reapply: false}
+    response:
+      rows_path: "$.logGroupFields[*]"
+    columns:
+      - {name: field, path: name, description: "Field name; @-prefixed names are system fields (@timestamp, @message, @logStream, @requestId...)"}
+      - {name: percent, type: DOUBLE, path: percent, description: "Share of sampled events that contain the field (0-100)"}
+      - {name: log_group, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Sampling window (its midpoint +- 8 minutes is searched)"}
+    sort_hint: "most frequent field first"
+    pitfalls:
+      - "Only 8 minutes either side of the window midpoint are sampled: fields that appear only in rare events (errors!) can be missing; widen nothing, instead set ts around a known error time."
+      - "Nested JSON keys are reported with dots (error.code); use the same spelling in Logs Insights."
+    examples:
+      - sql: >-
+          SELECT field, percent FROM cloudwatch_logs_fields
+          WHERE log_group = '/ecs/payments-api' AND ts BETWEEN TIMESTAMP '2026-10-01 11:50:00' AND TIMESTAMP '2026-10-01 12:06:00'
+          ORDER BY percent DESC
+        description: Which structured fields the payments logs carry around the incident (exact names and casing).
+    fixtures:
+      - file: get_log_group_fields.json
+        filters: {log_group: MyLogGroup}
+        expect_rows: 5
+        expect_columns: {field: "@timestamp", percent: 100.0, log_group: MyLogGroup}
+        note: >-
+          Verbatim sample response of "Retrieve fields found in log events in a log group" from
+          https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_GetLogGroupFields.html
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_logs_anomalies
+    title: Log anomalies found by log anomaly detectors (ListAnomalies)
+    description: >-
+      Anomalies that CloudWatch Logs anomaly detectors found in log patterns: one row per anomaly
+      with first/last seen time, priority, the pattern (patternString with <*> tokens), a
+      description such as "Count of ErrorCode: 500 at token: 9 deviated expected by: 95%", sample
+      log lines and the affected log groups. Optional filters: anomaly_detector_arn and
+      suppression_state. No server-side time filter: filter ts / last_seen in SQL. A quick way to
+      see "what started looking different in the logs" without writing a query.
+    kind: events
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: Logs_20140328.ListAnomalies}
+      body:
+        anomalyDetectorArn: "{{ filters.anomaly_detector_arn }}"
+        suppressionState: "{{ filters.suppression_state }}"
+        limit: 50
+    filters:
+      - {column: anomaly_detector_arn, description: "Only anomalies from this detector (ARN)", examples: ["arn:aws:logs:us-west-1:123456789012:anomaly-detector:EXAMPLE-1234-5678-abcd-111111111111"]}
+      - {column: suppression_state, description: "SUPPRESSED | UNSUPPRESSED"}
+    pagination: {type: cursor, cursor_path: "$.nextToken", cursor_param: "body.nextToken", max_pages: 5}
+    response:
+      rows_path: "$.anomalies[*]"
+    columns:
+      - {name: anomaly_id, path: anomalyId}
+      - {name: ts, type: TIMESTAMP, path: firstSeen, transform: epoch_ms, description: "First time the anomaly was seen (UTC)"}
+      - {name: last_seen, type: TIMESTAMP, path: lastSeen, transform: epoch_ms}
+      - {name: title, path: description, description: "What deviated and by how much"}
+      - {name: severity, path: priority, description: "HIGH | MEDIUM | LOW"}
+      - {name: state, path: state, description: "Active | Suppressed | Baseline"}
+      - {name: active, type: BOOLEAN, path: active, description: "Currently active"}
+      - {name: pattern, path: patternString, description: "Log pattern with <*> for dynamic tokens"}
+      - {name: log_groups, path: "logGroupArnList[*]", transform: join, transform_arg: ",", description: "Affected log group ARNs"}
+      - {name: message, path: "logSamples[0].message", description: "First sample log line"}
+      - {name: log_samples, type: JSON, path: logSamples, description: "[{timestamp (epoch ms), message}]"}
+      - {name: histogram, type: JSON, path: histogram, description: "{epoch_ms: count} occurrences over time"}
+      - {name: suppressed, type: BOOLEAN, path: suppressed}
+      - {name: detector_arn, path: anomalyDetectorArn}
+      - {name: pattern_id, path: patternId}
+      - {name: anomaly_detector_arn, filter_only: true}
+      - {name: suppression_state, filter_only: true}
+    max_rows: 2000
+    pitfalls:
+      - "Only log groups with an anomaly detector produce anomalies; 0 rows usually means no detector, not healthy logs."
+      - "Anomalies are not filtered by time server-side: always add a ts / last_seen predicate for the incident window."
+      - "priority and description are model-generated heuristics; confirm with cloudwatch_logs_insights counts."
+    examples:
+      - sql: >-
+          SELECT ts, last_seen, severity, title, pattern, message, log_groups FROM cloudwatch_logs_anomalies
+          WHERE last_seen >= TIMESTAMP '2026-10-01 11:00:00' AND ts <= TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Log anomalies that overlapped the incident hour, earliest first.
+    fixtures:
+      - file: list_anomalies.json
+        expect_rows: 2
+        expect_columns:
+          anomaly_id: EXAMPLE-529d-4e1e-bea9-123EXAMPLE
+          ts: "2023-10-28T10:18:00Z"
+          last_seen: "2023-10-28T10:23:00Z"
+          severity: LOW
+          state: Active
+          title: "Count of ErrorCode: 200 at token: 9 deviated expected by: 20.00%"
+          log_groups: "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/my-log-group-name"
+        note: >-
+          Sample response of "To retrieve a list of anomalies found by logs anomaly detectors" from
+          https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_ListAnomalies.html.
+          The doc sample is truncated after the second anomaly and contains an invalid "\E" escape in
+          one sample message; the arrays are closed, "\E" is written as "\t" (the tab the redaction
+          replaced) and each patternTokens list is cut to its first three tokens. Shape unchanged.
+
+roles:
+  logs:
+    table: cloudwatch_logs_insights
+    query_language: cloudwatch_logs_insights
+    filters:
+      query: >-
+        SOURCE logGroups(namePrefix: ['/aws/lambda/{{ service }}', '/ecs/{{ service }}', '/aws/ecs/{{ service }}', '{{ service }}'])
+        | fields @timestamp, @message, @logStream, @log{{ ' | filter @message like /(?i)(error|exception|fatal|panic|timed out|timeout)/' if error_only else '' }}
+        | sort @timestamp desc | limit 500
+    columns: {ts: ts, message: message, host: log_stream, service: log_group_ref}
+    notes: "The default selects log groups by service-name prefixes; when the log group is known set log_group instead (cheaper, exact)."
+  log_counts:
+    table: cloudwatch_logs_insights
+    query_language: cloudwatch_logs_insights
+    filters:
+      query: >-
+        SOURCE logGroups(namePrefix: ['/aws/lambda/{{ service }}', '/ecs/{{ service }}', '/aws/ecs/{{ service }}', '{{ service }}'])
+        {{ '| filter @message like /(?i)(error|exception|fatal|panic|timed out|timeout)/ ' if error_only else '' }}| stats count(*) as value by bin(1m) as ts
+    columns: {ts: ts, value: value}
+    notes: "Empty minutes are absent (no zero rows)."

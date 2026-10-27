@@ -1,0 +1,52 @@
+{
+  "links": {"_acl": "/services/saved/searches/_acl"},
+  "origin": "https://fool01:8092/services/saved/searches",
+  "updated": "2021-04-29T10:01:20-07:00",
+  "generator": {"build": "84cbec3d51a6", "version": "8.2.2105"},
+  "entry": [
+    {
+      "name": "scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715420_1",
+      "id": "https://fool01:8092/servicesNS/nobody/search/search/jobs/scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715420_1",
+      "updated": "2021-04-29T09:57:44-07:00",
+      "published": "2021-04-29T09:57:17-07:00",
+      "links": {"alternate": "/servicesNS/nobody/search/search/jobs/scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715420_1"},
+      "author": "admin",
+      "acl": {"app": "search", "can_change_perms": true, "can_list": true, "can_share_app": true, "can_share_global": true, "can_share_user": false, "can_write": true, "modifiable": true, "owner": "admin", "perms": {"read": ["admin"], "write": ["admin"]}, "removable": false, "sharing": "global"},
+      "content": {
+        "durableTrackTime": "1619715420.000000000",
+        "durableTrackType": "_time",
+        "isDone": true,
+        "isFinalized": false,
+        "isRealTimeSearch": false,
+        "isSaved": false,
+        "isScheduled": true,
+        "isZombie": false,
+        "start": 1619715437,
+        "ttl": 118
+      }
+    },
+    {
+      "name": "scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715600_3",
+      "id": "https://fool01:8092/servicesNS/nobody/search/search/jobs/scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715600_3",
+      "updated": "2021-04-29T10:00:14-07:00",
+      "published": "2021-04-29T10:00:00-07:00",
+      "links": {"alternate": "/servicesNS/nobody/search/search/jobs/scheduler__admin__search__RMD50dbc462560ef18a2_at_1619715600_3"},
+      "author": "admin",
+      "acl": {"app": "search", "can_change_perms": true, "can_list": true, "can_share_app": true, "can_share_global": true, "can_share_user": false, "can_write": true, "modifiable": true, "owner": "admin", "perms": {"read": ["admin"], "write": ["admin"]}, "removable": false, "sharing": "global"},
+      "content": {
+        "durableTrackTime": "1619715600.000000000",
+        "durableTrackType": "_time",
+        "isDone": true,
+        "isFinalized": false,
+        "isRealTimeSearch": false,
+        "isSaved": false,
+        "isScheduled": true,
+        "isZombie": false,
+        "start": 1619715600,
+        "ttl": 281
+      }
+    }
+  ],
+  "paging": {"total": 2, "perPage": 30, "offset": 0},
+  "messages": []
+}

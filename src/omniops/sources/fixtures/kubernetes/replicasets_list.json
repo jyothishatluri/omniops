@@ -1,0 +1,131 @@
+{
+ "kind": "ReplicaSetList",
+ "apiVersion": "apps/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "recommendation-5d8f7c9b6",
+    "namespace": "shop",
+    "uid": "rf7c9b6-0000-4000-8000-000000000000",
+    "creationTimestamp": "2026-10-01T11:41:00Z",
+    "labels": {
+     "app.kubernetes.io/name": "recommendation",
+     "pod-template-hash": "5d8f7c9b6"
+    },
+    "annotations": {
+     "deployment.kubernetes.io/desired-replicas": "1",
+     "deployment.kubernetes.io/max-replicas": "2",
+     "deployment.kubernetes.io/revision": "3"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "name": "recommendation",
+      "uid": "d3a0b1c2-0000-4000-8000-000000000003",
+      "controller": true,
+      "blockOwnerDeletion": true
+     }
+    ]
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "app.kubernetes.io/name": "recommendation",
+      "pod-template-hash": "5d8f7c9b6"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app.kubernetes.io/name": "recommendation"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "recommendation",
+        "image": "ghcr.io/open-telemetry/demo:2.0.2-recommendation"
+       }
+      ]
+     }
+    }
+   },
+   "status": {
+    "replicas": 1,
+    "fullyLabeledReplicas": 1,
+    "observedGeneration": 1,
+    "conditions": [
+     {
+      "type": "ReplicaFailure",
+      "status": "True",
+      "lastTransitionTime": "2026-10-01T11:41:02Z",
+      "reason": "FailedCreate",
+      "message": "pods \"recommendation-5d8f7c9b6-8kq2w\" is forbidden: failed quota: platform-limits: must specify requests.cpu for: recommendation"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "recommendation-77f9d8c6b5",
+    "namespace": "shop",
+    "uid": "rd8c6b5-0000-4000-8000-000000000000",
+    "creationTimestamp": "2026-10-01T08:00:00Z",
+    "labels": {
+     "app.kubernetes.io/name": "recommendation",
+     "pod-template-hash": "77f9d8c6b5"
+    },
+    "annotations": {
+     "deployment.kubernetes.io/desired-replicas": "1",
+     "deployment.kubernetes.io/max-replicas": "2",
+     "deployment.kubernetes.io/revision": "2"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "name": "recommendation",
+      "uid": "d3a0b1c2-0000-4000-8000-000000000003",
+      "controller": true,
+      "blockOwnerDeletion": true
+     }
+    ]
+   },
+   "spec": {
+    "replicas": 0,
+    "selector": {
+     "matchLabels": {
+      "app.kubernetes.io/name": "recommendation",
+      "pod-template-hash": "77f9d8c6b5"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app.kubernetes.io/name": "recommendation"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "recommendation",
+        "image": "ghcr.io/open-telemetry/demo:2.0.2-recommendation"
+       }
+      ]
+     }
+    }
+   },
+   "status": {
+    "replicas": 0,
+    "fullyLabeledReplicas": 0,
+    "observedGeneration": 1
+   }
+  }
+ ]
+}

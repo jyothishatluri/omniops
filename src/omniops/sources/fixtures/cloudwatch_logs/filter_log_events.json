@@ -1,0 +1,26 @@
+{
+ "events": [
+  {
+   "ingestionTime": 1396035394997,
+   "timestamp": 1396035378989,
+   "message": "ERROR Event 3",
+   "logStreamName": "my-log-stream-3",
+   "eventId": "31132629274945519779805322857203735586824454643391594505"
+  },
+  {
+   "ingestionTime": 1396035394997,
+   "timestamp": 1396035378988,
+   "message": "ERROR Event 2",
+   "logStreamName": "my-log-stream-2",
+   "eventId": "31132629274945519779805322857203735586814454643391594505"
+  },
+  {
+   "ingestionTime": 1396035394997,
+   "timestamp": 1396035378988,
+   "message": "ERROR Event 1",
+   "logStreamName": "my-log-stream-1",
+   "eventId": "31132629274945519779805322857203735586714454643391594505"
+  }
+ ],
+ "nextToken": "eJxExampleTokenwjR"
+}

@@ -1,0 +1,11 @@
+{
+  "timeSeries": [
+    {
+      "metric": {"type": "compute.googleapis.com/instance/cpu/utilization"},
+      "points": [
+        {"interval": {"startTime": "2024-03-01T00:20:00.000Z", "endTime": "2024-03-01T00:20:00.000Z"}, "value": {"doubleValue": 0.045992419596619184}},
+        {"interval": {"startTime": "2024-03-01T00:10:00.000Z", "endTime": "2024-03-01T00:10:00.000Z"}, "value": {"doubleValue": 0.04628773578358556}}
+      ]
+    }
+  ]
+}

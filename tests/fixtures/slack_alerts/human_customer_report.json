@@ -1,0 +1,47 @@
+{
+  "platform": "human",
+  "description": "A support engineer reports customer-visible checkout failures in the alert channel (a human message: rich_text blocks, no bot id). The triage model classifies it as a genuine incident report.",
+  "provenance": "Slack Events API message event for a user post (user, client_msg_id, rich_text blocks). The triage reply is scripted by the test stub (CustomerReportTriage schema).",
+  "llm": {
+    "CustomerReportTriage": {
+      "is_incident_report": true,
+      "confidence": 0.9,
+      "title": "Customers report checkout 502 errors",
+      "service": "checkout",
+      "env": "production",
+      "symptom": "checkout fails with 502 errors",
+      "started_minutes_ago": 20,
+      "reason": "Describes a current, customer-visible failure of checkout."
+    }
+  },
+  "event": {
+    "type": "message",
+    "user": "U05SUPPORT",
+    "client_msg_id": "6f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
+    "text": "Hey team, multiple customers are telling us checkout is failing with 502 errors for the last 20 minutes on the production web shop. Can someone look?",
+    "blocks": [
+      {"type": "rich_text", "block_id": "r1", "elements": [
+        {"type": "rich_text_section", "elements": [
+          {"type": "text", "text": "Hey team, multiple customers are telling us checkout is failing with 502 errors for the last 20 minutes on the production web shop. Can someone look?"}
+        ]}
+      ]}
+    ],
+    "team": "T01ACME",
+    "ts": "1792504957.000300",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.000300",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "human",
+    "customer_report": true,
+    "parsed_by": "llm",
+    "status": "firing",
+    "title": "Customers report checkout 502 errors",
+    "service": "checkout",
+    "env": "production",
+    "summary": "checkout fails with 502 errors",
+    "reported_onset": "2026-10-20T13:42:37Z",
+    "anchor": {"source": "customer_report", "window_start": "2026-10-20T13:02:37Z", "window_end": "2026-10-20T14:07:37Z"}
+  }
+}

@@ -1,0 +1,41 @@
+{
+ "data": {
+  "actor": {
+   "account": {
+    "nrql": {
+     "currentResults": null,
+     "metadata": {
+      "eventTypes": [
+       "Transaction"
+      ],
+      "facets": null,
+      "messages": [],
+      "timeWindow": {
+       "begin": 1709442593550,
+       "compareWith": null,
+       "end": 1709446193550,
+       "since": "1 day AGO",
+       "until": "NOW"
+      }
+     },
+     "nrql": "SELECT count(*) FROM Transaction SINCE 1 day ago",
+     "otherResult": null,
+     "previousResults": null,
+     "queryProgress": {
+      "completed": true,
+      "queryId": null,
+      "resultExpiration": null,
+      "retryAfter": null,
+      "retryDeadline": null
+     },
+     "results": [
+      {
+       "count": 1542
+      }
+     ],
+     "totalResult": null
+    }
+   }
+  }
+ }
+}

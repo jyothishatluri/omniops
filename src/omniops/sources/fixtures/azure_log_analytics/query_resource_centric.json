@@ -1,0 +1,23 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "OperationName",
+          "type": "string"
+        },
+        {
+          "name": "count_",
+          "type": "long"
+        }
+      ],
+      "rows": [
+        [
+          "operation1",
+          "10"
+        ]
+      ]
+    }
+  ]
+}

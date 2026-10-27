@@ -1,0 +1,6 @@
+production:
+  adapter: postgresql
+  pool: 25
+
+  timeout: 5000
+  host: db.internal

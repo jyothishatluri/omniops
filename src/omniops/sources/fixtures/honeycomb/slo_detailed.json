@@ -1,0 +1,20 @@
+{
+ "id": "bZ1aRHAUsjG",
+ "name": "My SLO",
+ "description": "My SLO description",
+ "sli": {
+  "alias": "my-sli"
+ },
+ "time_period_days": 30,
+ "target_per_million": 989900,
+ "compliance": 95.39,
+ "budget_remaining": 7.73,
+ "status": "normal",
+ "burn_rate": 5.39,
+ "reset_at": "2022-10-15T13:53:11Z",
+ "created_at": "2022-09-15T05:39:42Z",
+ "updated_at": "2022-12-20T08:10:05Z",
+ "dataset_slugs": [
+  "mydataset1"
+ ]
+}

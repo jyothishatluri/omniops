@@ -1,0 +1,1709 @@
+# Azure Monitor Logs (Log Analytics workspaces, incl. workspace-based Application Insights), reached directly over
+# the Logs query REST API (no SDK, no MCP):
+#
+#   POST https://api.loganalytics.azure.com/v1/workspaces/{workspaceId}/query      body {query (KQL), timespan, workspaces}
+#   POST https://api.loganalytics.azure.com/v1/workspaces/{workspaceId}/search     Basic / Auxiliary table plans (timespan in the query string)
+#   POST https://api.loganalytics.azure.com/v1/{resourceId}/query                  resource-centric query (any ARM resource)
+#   GET  https://api.loganalytics.azure.com/v1/workspaces/{workspaceId}/metadata   workspace schema
+#
+# Auth: Microsoft Entra client credentials, scope https://api.loganalytics.io/.default (api.loganalytics.io is the
+# documented token audience; api.loganalytics.azure.com is the current endpoint host).
+# Response: {"tables": [{"name": "PrimaryResult", "columns": [{"name", "type"}], "rows": [[...], ...]}]}; a non-fatal
+# failure is HTTP 200 with "error": {"code": "PartialError", ...} next to (truncated) tables.
+#
+# Docs: https://learn.microsoft.com/en-us/azure/azure-monitor/logs/api/overview
+#       https://learn.microsoft.com/en-us/azure/azure-monitor/logs/api/request-format
+#       https://learn.microsoft.com/en-us/azure/azure-monitor/logs/api/response-format
+# REST:  https://learn.microsoft.com/en-us/rest/api/logsquery/query/execute?view=rest-logsquery-v1 (+ execute-with-resource-id, metadata/get)
+#       https://learn.microsoft.com/en-us/azure/azure-monitor/logs/basic-logs-query (/search for Basic/Auxiliary tables)
+# Spec: https://github.com/Azure/azure-rest-api-specs/blob/main/specification/monitor/data-plane/OperationalInsights/stable/v1/OperationalInsights.json
+# Research notes: docs/sources/azure_log_analytics.md
+source: azure_log_analytics
+display_name: Azure Monitor Logs (Log Analytics + Application Insights)
+vendor: Microsoft Azure
+description: >-
+  KQL over a Log Analytics workspace: free-form queries (workspace, cross-workspace, resource-centric, Basic/Auxiliary
+  plans), workspace-based Application Insights requests / dependencies / exceptions / traces with RED statistics,
+  dependency map, availability tests and end-to-end trace lookup, AKS container logs (ContainerLogV2), pod state
+  (KubePodInventory) and Kubernetes events, agent heartbeats, per-table ingestion volume and the workspace schema.
+docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/logs/api/overview
+categories: [logs, traces, apm, errors, kubernetes, hosts]
+base_url: "{{ (env.AZURE_LOG_ANALYTICS_ENDPOINT or 'https://api.loganalytics.azure.com').rstrip('/') }}"
+env:
+  - {name: AZURE_TENANT_ID, description: "Microsoft Entra tenant (directory) ID of the app registration"}
+  - {name: AZURE_CLIENT_ID, description: "App registration (client) ID; needs Log Analytics Reader (or Reader) on the workspace"}
+  - {name: AZURE_CLIENT_SECRET, description: "App registration client secret", secret: true}
+  - {name: AZURE_LOG_ANALYTICS_WORKSPACE_ID, description: "Workspace ID (GUID from the workspace Overview/Properties page, NOT the ARM resource id). Every table defaults to it; pass workspace_id to override."}
+  - {name: AZURE_AUTHORITY_HOST, description: "Entra authority host (sovereign clouds: https://login.chinacloudapi.cn, https://login.microsoftonline.us)", default: "https://login.microsoftonline.com"}
+  - {name: AZURE_LOG_ANALYTICS_ENDPOINT, description: "Logs query API host (China: https://api.loganalytics.azure.cn, US Gov: https://api.loganalytics.us)", default: "https://api.loganalytics.azure.com"}
+  - {name: AZURE_LOG_ANALYTICS_SCOPE, description: "Token scope (China: https://api.loganalytics.azure.cn/.default, US Gov: https://api.loganalytics.us/.default)", default: "https://api.loganalytics.io/.default"}
+  - {name: AZURE_LOG_ANALYTICS_WAIT_S, description: "Server-side query timeout sent as 'Prefer: wait=<s>' (API default 180 s, max 600 s)", default: "120"}
+required_env: [AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_LOG_ANALYTICS_WORKSPACE_ID]
+auth:
+  type: azure_ad
+  token_url: "{{ env.AZURE_AUTHORITY_HOST.rstrip('/') }}/{{ env.AZURE_TENANT_ID }}/oauth2/v2.0/token"
+  client_id: "{{ env.AZURE_CLIENT_ID }}"
+  client_secret: "{{ env.AZURE_CLIENT_SECRET }}"
+  scope: "{{ env.AZURE_LOG_ANALYTICS_SCOPE }}"
+headers:
+  Prefer: "wait={{ env.AZURE_LOG_ANALYTICS_WAIT_S }}"
+rate_limit:
+  concurrency: 5
+  requests_per_minute: 360
+  # 504 = the query ran past 'Prefer: wait'; repeating it only burns the per-user concurrency slots.
+  retry_statuses: [429, 502, 503]
+  max_retries: 2
+  notes: >-
+    Per Entra user / client IP: 200 queries per 30 s across all workspaces, 5 concurrent queries against Analytics
+    tables (2 for Basic/Auxiliary); extra queries wait in a FIFO queue (max 200, 3 min) and then fail with 429.
+    Max 500,000 rows and ~100 MB (64 MB compressed) per response; max running time 10 min (default 3 min via
+    Prefer: wait). Cross-resource queries: max 100 workspaces/App Insights resources.
+retention:
+  logs: "workspace/table setting: 30-730 days interactive (Analytics plan), up to 12 years long-term"
+  traces: "same as the workspace (AppRequests/AppDependencies/... are workspace tables; default 90 days for App Insights tables)"
+errors:
+  - path: "$.error.code"
+    equals: PartialError
+    message: "$.error"
+    hint: >-
+      Log Analytics returned HTTP 200 with a PartialError: the rows are INCOMPLETE (typical causes: result above
+      500,000 rows / 64 MB, a cross-workspace leg failed, a function or table missing in one workspace). Aggregate
+      with summarize, project fewer columns, shorten the window or drop the failing workspace; never treat the
+      returned rows as the full answer
+ui_base_url: https://portal.azure.com
+query_languages:
+  kql: >-
+    Kusto Query Language: Table | where Col == 'x' and Other has 'term' | summarize count() by bin(TimeGenerated, 5m),
+    Col | order by count_ desc | take 20. String equality == is case-sensitive, =~ / in~ are case-insensitive; has
+    matches whole terms (fast), contains matches substrings (slow). Time: TimeGenerated (always UTC), ago(1h),
+    datetime(2026-10-01T11:00:00Z), bin(). The API window (timespan) is applied on top of any time filter in the
+    query, so you do not need where TimeGenerated > ago(...). Workspace-based Application Insights tables are
+    AppRequests, AppDependencies, AppExceptions, AppTraces, AppEvents, AppMetrics, AppPageViews,
+    AppAvailabilityResults, AppPerformanceCounters, AppBrowserTimings with PascalCase columns (TimeGenerated,
+    AppRoleName = cloud role / service, AppRoleInstance, OperationId = trace id, Id = span id, ParentId, DurationMs,
+    ResultCode (string), Success (bool), ItemCount = sampling weight -> count with sum(ItemCount), not count()).
+    The classic names (requests, dependencies, exceptions, traces with timestamp, duration, cloud_RoleName,
+    operation_Id) only exist when querying through the Application Insights resource (resource-centric query).
+    AKS: ContainerLogV2 (PodNamespace, PodName, ContainerName, LogLevel, LogMessage dynamic), KubeEvents,
+    KubePodInventory, KubeNodeInventory, InsightsMetrics. VMs: Heartbeat, Perf, Syslog, Event. Activity log:
+    AzureActivity. Resource logs: AzureDiagnostics (Category, ResourceProvider) or resource-specific tables.
+pitfalls:
+  - "workspace_id / AZURE_LOG_ANALYTICS_WORKSPACE_ID is the workspace GUID (customerId), not its ARM resource id and not the workspace name; a wrong GUID is HTTP 404 PathNotFoundError or 403."
+  - "An unknown table or column is a loud HTTP 400 (SemanticError), but a wrong VALUE (AppRoleName, PodNamespace, _ResourceId casing) silently returns 0 rows: list distinct values first (azure_log_analytics_app_services, azure_log_analytics_table_usage)."
+  - "Application Insights telemetry is usually SAMPLED: every row carries ItemCount (item_count). Always count with sum(ItemCount) (the *_stats/*_groups tables do); count(*) over raw rows undercounts."
+  - "Raw-row tables return at most the newest 5000 rows (KQL take, ordered by TimeGenerated desc). Never aggregate raw rows in SQL for totals or rates - use the aggregate tables (app_request_stats, app_dependency_map, app_exception_groups, log_counts) which summarize server-side."
+  - "Ingestion latency is typically 30 s - 3 min (longer for some resource logs): the last minutes of a window can look like a drop to zero. Check azure_log_analytics_table_usage / Heartbeat before calling a gap an outage."
+  - "Workspace-based Application Insights: telemetry from many App Insights resources can share one workspace; filter app_resource_id (_ResourceId of the component, lower-case ARM id) or service (AppRoleName) to isolate one app."
+  - "Basic and Auxiliary table plans (often ContainerLogV2 when configured for cost) are queried through the /search endpoint: use azure_log_analytics_query with plan = 'basic' (timespan goes in the query string; full KQL incl. joins and workspace() works), max 30 days back for Basic (Auxiliary: whole retention), no resource-centric scope, 2 concurrent queries per user, billed per GB scanned."
+  - "A 200 response with error.code = PartialError means truncated or partially failed results; it is raised as an error by every table here."
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_query
+    title: KQL query on a Log Analytics workspace
+    description: >-
+      Run any KQL query against the workspace (POST /v1/workspaces/{id}/query, or /search for Basic/Auxiliary
+      tables with plan = 'basic'). One row per result row of the primary table; every output column becomes a
+      SQL column (names lower-cased, nested dynamic values flattened with _), and the whole row is also available
+      as JSON in `result` with the original column names (result->>'AppRoleName'). The ts predicate becomes the
+      API timespan (ISO 8601 start/end); ts itself is read from an output column named TimeGenerated, timestamp,
+      ts, StartTime or bin_TimeGenerated when present. Summarize in KQL; do not pull raw rows to aggregate in SQL.
+      Use this for any table the dedicated azure_log_analytics_* tables do not cover (AzureDiagnostics, Syslog,
+      Perf, AzureActivity, KubePodInventory, custom _CL tables, ...).
+    kind: logs
+    request:
+      method: POST
+      path: >-
+        /v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/{{ 'search' if (filters.plan or '') | lower in ['basic', 'auxiliary'] else 'query' }}
+      query:
+        timespan: "{{ ((time.start | rfc3339) ~ '/' ~ (time.end | rfc3339)) if (filters.plan or '') | lower in ['basic', 'auxiliary'] else None }}"
+      body:
+        query: "{{ filters.query }}"
+        timespan: "{{ None if (filters.plan or '') | lower in ['basic', 'auxiliary'] else ((time.start | rfc3339) ~ '/' ~ (time.end | rfc3339)) }}"
+        workspaces: "{{ (filters.workspaces | as_list) if filters.workspaces else None }}"
+      timeout_s: 200
+    filters:
+      - column: query
+        required: true
+        description: "KQL query. See query_languages.kql. The window comes from the ts predicate, no ago() needed."
+        examples:
+          - "AppRequests | where Success == false | summarize failures = sum(ItemCount) by bin(TimeGenerated, 5m), AppRoleName"
+          - "AzureDiagnostics | where Category == 'ApplicationGatewayAccessLog' and httpStatus_d >= 500 | summarize count() by bin(TimeGenerated, 1m), host_s"
+      - {column: workspace_id, description: "Workspace GUID override (default AZURE_LOG_ANALYTICS_WORKSPACE_ID)", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+      - {column: workspaces, ops: ["=", "in"], fan_out: false, description: "Additional workspaces for a cross-workspace query (GUIDs, names or ARM ids; max 100 resources)", examples: ["d436f322-a9f4-4aad-9a7d-271fbf66001c"]}
+      - {column: plan, description: "'analytics' (default, /query) or 'basic' for Basic/Auxiliary table plans (/search endpoint, timespan in the query string, max 30 days for Basic)", examples: ["analytics"]}
+    time: {column: ts, default_lookback: 1h, max_window: 90d, reapply: false, control_lookback: 6h}
+    response:
+      rows_path: "$.tables[0]"
+      expand:
+        - {columnar: {columns: "columns", data: "rows", orientation: row}, as: r}
+      dynamic: "@r"
+      dynamic_max_columns: 60
+    columns:
+      - name: ts
+        type: TIMESTAMP
+        transform: auto_time
+        expr: "r['TimeGenerated'] or r['timestamp'] or r['ts'] or r['StartTime'] or r['bin_TimeGenerated']"
+        description: "From output column TimeGenerated / timestamp / ts / StartTime / bin_TimeGenerated when present, else null"
+      - {name: result, type: JSON, path: "@r", description: "The full result row keyed by the KQL column names: result->>'AppRoleName'"}
+      - {name: query, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+      - {name: workspaces, filter_only: true}
+      - {name: plan, filter_only: true}
+    max_rows: 10000
+    sort_hint: "rows come back in the KQL order (add | order by ... in the query)"
+    pitfalls:
+      - "The ts predicate is only the API timespan (reapply: false): summarize rows without a TimeGenerated column keep ts = null, and bin() buckets that start just before the window are kept."
+      - "Dynamic columns (Properties, customDimensions, LogMessage) come back as JSON text; use result->'Properties' or parse in KQL (tostring(Properties.key)) before summarizing."
+      - "Results above 500,000 rows / 64 MB come back as a PartialError (raised): summarize or take n in KQL."
+      - "Cross-workspace: the workspaces list adds workspaces; inside the query you can also write union workspace('other').Table. Each extra workspace must be readable by the app registration."
+      - "Basic/Auxiliary plans (plan = 'basic' -> POST /search?timespan=...): no resource-centric scope, max 30 days back with Basic tables (Auxiliary: up to the table retention), slower, 2 concurrent queries per user, billed per GB scanned. externaldata and resource() are not supported there."
+    examples:
+      - sql: >-
+          SELECT ts, result->>'AppRoleName' AS service, CAST(result->>'failures' AS BIGINT) AS failures
+          FROM azure_log_analytics_query
+          WHERE query = 'AppRequests | where Success == false | summarize failures = sum(ItemCount) by bin(TimeGenerated, 5m), AppRoleName'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Failed requests per 5 minutes and cloud role (sampling-correct sum(ItemCount)).
+      - sql: >-
+          SELECT ts, result->>'host_s' AS gateway_host, CAST(result->>'count_' AS BIGINT) AS errors_5xx
+          FROM azure_log_analytics_query
+          WHERE query = 'AzureDiagnostics | where Category == ''ApplicationGatewayAccessLog'' and httpStatus_d >= 500 | summarize count() by bin(TimeGenerated, 1m), host_s'
+          ORDER BY ts
+        description: Application Gateway 5xx per minute from resource logs (AzureDiagnostics).
+      - sql: >-
+          SELECT result->>'DataType' AS table_name, CAST(result->>'mb' AS DOUBLE) AS mb FROM azure_log_analytics_query
+          WHERE query = 'Usage | summarize mb = sum(Quantity) by DataType | order by mb desc | take 20'
+            AND ts >= TIMESTAMP '2026-09-30 12:00:00'
+        description: Which tables receive data (and how much) over the last day - discover what exists before writing KQL.
+      - sql: >-
+          SELECT result->>'Computer' AS host, result->>'SyslogMessage' AS message FROM azure_log_analytics_query
+          WHERE query = 'Syslog | where SeverityLevel in (''err'', ''crit'', ''alert'', ''emerg'') | project TimeGenerated, Computer, ProcessName, SyslogMessage | take 200'
+            AND plan = 'analytics'
+        description: Error-level syslog lines from VMs.
+    fixtures:
+      - file: query_usage.json
+        filters: {query: "Usage | take 10"}
+        note: "Verbatim 200 response of the official example 'A simple POST query on a workspace' (Query_Execute, la-post-example.json in the Log Analytics data-plane spec, also shown on the request-format page). Numbers and booleans are strings in this example."
+        expect_rows: 2
+        expect_columns: {ts: "2017-08-24T06:59:59Z", computer: ContosoSQLSrv1, datatype: Perf, quantity: "0.076408", result: {not_null: true}}
+      - file: query_cross_workspace.json
+        filters: {query: "union * | where TimeGenerated > ago(1h) | summarize count() by Type, TenantId", workspaces: draft-test}
+        note: "Verbatim 200 response of the official example 'A cross workspace POST query' (la-post-cross-workspace-example.json): summarize output without a time column, so ts is null."
+        expect_rows: 6
+        expect_columns: {ts: null, type: Usage, count: "1"}
+      - file: query_response_format.json
+        filters: {query: "AzureActivity | summarize count() by Category"}
+        note: "Verbatim 200 response shown on the official 'Azure Monitor Log Analytics API response format' page (AzureActivity | summarize count() by Category): numbers arrive as JSON numbers here, count_ is flattened to the column count."
+        expect_rows: 4
+        expect_columns: {ts: null, category: Administrative, count: 20839, result: {not_null: true}}
+      - file: query_partial_error.json
+        filters: {query: "AppTraces | take 1000000"}
+        note: "Built strictly from the documented response format: a non-fatal failure is HTTP 200 with tables plus an error object whose code is PartialError and whose details explain it (response-format page). Must raise, not return truncated rows."
+        expect_error: "PartialError"
+    tests:
+      - sql: "SELECT * FROM azure_log_analytics_query WHERE query = 'Usage | summarize mb = sum(Quantity) by DataType | take 5'"
+        min_rows: 0
+    docs_url: https://learn.microsoft.com/en-us/rest/api/logsquery/query/execute?view=rest-logsquery-v1
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_resource_query
+    title: Resource-centric KQL query (any Azure resource)
+    description: >-
+      Run KQL scoped to one Azure resource instead of a workspace (POST /v1/{resourceId}/query): the service finds
+      the workspaces holding that resource's logs (resource logs, VM/AKS insights, workspace-based Application
+      Insights). resource_id (full ARM id) and query are required. Through an Application Insights component the
+      classic table names (requests, dependencies, exceptions, traces, with timestamp / duration / cloud_RoleName /
+      operation_Id) work as in the portal's Logs blade. Same result shape as azure_log_analytics_query.
+    kind: logs
+    request:
+      method: POST
+      path: "/v1/{{ filters.resource_id.strip('/') }}/query"
+      body:
+        query: "{{ filters.query }}"
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+      timeout_s: 200
+    filters:
+      - column: resource_id
+        required: true
+        description: "Full ARM resource id, e.g. /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Insights/components/<app> or .../Microsoft.ContainerService/managedClusters/<aks>"
+        examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Storage/storageAccounts/shopprodstore"]
+      - column: query
+        required: true
+        description: "KQL query over the resource's tables"
+        examples: ["StorageBlobLogs | summarize count() by OperationName | top 10 by count_ desc"]
+    time: {column: ts, default_lookback: 1h, max_window: 90d, reapply: false, control_lookback: 6h}
+    response:
+      rows_path: "$.tables[0]"
+      expand:
+        - {columnar: {columns: "columns", data: "rows", orientation: row}, as: r}
+      dynamic: "@r"
+      dynamic_max_columns: 60
+    columns:
+      - name: ts
+        type: TIMESTAMP
+        transform: auto_time
+        expr: "r['TimeGenerated'] or r['timestamp'] or r['ts'] or r['StartTime'] or r['bin_TimeGenerated']"
+        description: "From output column TimeGenerated / timestamp / ts / StartTime / bin_TimeGenerated when present"
+      - {name: result, type: JSON, path: "@r", description: "The full result row keyed by KQL column names"}
+      - {name: resource_id, filter_only: true}
+      - {name: query, filter_only: true}
+    max_rows: 10000
+    pitfalls:
+      - "Resource-centric queries only see data the caller may read for that resource (resource-context RBAC) and only from workspaces the resource sends to; Basic/Auxiliary tables are not supported in resource scope."
+      - "The resource id must be exact (resource group and provider names are case-insensitive, but a missing segment is HTTP 404)."
+    examples:
+      - sql: >-
+          SELECT result->>'OperationName' AS operation, CAST(result->>'count_' AS BIGINT) AS calls
+          FROM azure_log_analytics_resource_query
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Storage/storageAccounts/shopprodstore'
+            AND query = 'StorageBlobLogs | where StatusCode >= 500 | summarize count() by OperationName | top 10 by count_ desc'
+        description: Failing storage operations for one storage account.
+      - sql: >-
+          SELECT ts, result->>'cloud_RoleName' AS service, CAST(result->>'failed' AS BIGINT) AS failed
+          FROM azure_log_analytics_resource_query
+          WHERE resource_id = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-shop-prod/providers/Microsoft.Insights/components/shop-appi'
+            AND query = 'requests | where success == false | summarize failed = sum(itemCount) by bin(timestamp, 5m), cloud_RoleName'
+        description: Classic Application Insights schema through the component (resource scope).
+    fixtures:
+      - file: query_resource_centric.json
+        filters: {resource_id: "subscriptions/fffa080af-c2d8-40ad-9cce-e1a450bawb57/resourceGroups/test-resourcegroup/providers/Microsoft.Storage/storageAccounts/storageaccountname", query: "StorageBlobLogs | summarize count() by OperationName | top 10 by count_ desc"}
+        note: "Verbatim 200 response of the official example 'Simple resource-centric POST query' (Query_ExecuteWithResourceId, la-post-resource-centric-example.json)."
+        expect_rows: 1
+        expect_columns: {ts: null, operationname: operation1, count: "10"}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/logsquery/query/execute-with-resource-id?view=rest-logsquery-v1
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_requests
+    title: Application Insights requests (AppRequests)
+    description: >-
+      Incoming requests recorded by workspace-based Application Insights (AppRequests): one row per sampled request
+      with service (AppRoleName), host (AppRoleInstance), resource (request name, e.g. 'GET /api/orders'), result
+      code, success, duration_ms, trace_id (OperationId) and span_id (Id). Filters push down into KQL: service,
+      host, resource (=, IN, LIKE), status_code (numeric compare), success, duration_ms (>, >=, <, <=), trace_id,
+      app_resource_id and a raw kql_filter predicate. Returns at most the newest 5000 rows - use
+      azure_log_analytics_app_request_stats for rates, error ratios and percentiles.
+    kind: spans
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          {%- macro nf(expr, v, op, conv='int') -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if v is sequence and v is not string %} | where {{ expr }} in ({{ v | map(conv) | join(', ') }})
+          {%- else %} | where {{ expr }} {{ {'=': '==', '!=': '!=', '>': '>', '>=': '>=', '<': '<', '<=': '<='}.get(op or '=', '==') }} {{ v | int if conv == 'int' else v | float }}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          AppRequests
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('AppRoleName', filters.service, filters.service__op) }}
+          {{- sf('AppRoleInstance', filters.host, filters.host__op) }}
+          {{- sf('Name', filters.resource, filters.resource__op) }}
+          {{- sf('OperationId', filters.trace_id, filters.trace_id__op) }}
+          {{- nf('toint(ResultCode)', filters.status_code, filters.status_code__op) }}
+          {{- nf('DurationMs', filters.duration_ms, filters.duration_ms__op, 'float') }}
+          {%- if filters.success in [true, false] %} | where Success == {{ 'true' if filters.success else 'false' }}{% endif %}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | project TimeGenerated, AppRoleName, AppRoleInstance, Name, OperationName, Url, ResultCode, Success, DurationMs, OperationId, Id, ParentId, ItemCount, AppVersion, SyntheticSource, Properties, _ResourceId
+          | order by TimeGenerated desc
+          | take {{ [limit or 5000, 10000] | min }}
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Cloud role name (AppRoleName, OTel service.name); matched case-insensitively", examples: ["checkout-api"]}
+      - {column: host, ops: ["=", "in", "like"], fan_out: false, description: "Role instance (AppRoleInstance: host / pod / App Service instance)", examples: ["checkout-api-7d9c6b5f4-x2k8p"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "OperationId (W3C trace id, 32 hex chars)", examples: ["0af7651916cd43dd8448eb211c80319c"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component (lower-case ARM id) when several apps share the workspace", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate appended as | where <kql_filter> (PascalCase AppRequests columns)", examples: ["Url has '/api/orders'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+      - {column: resource, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Request name (Name), e.g. 'GET /api/orders/{id}'; LIKE patterns become contains filters", examples: ["GET /api/orders"]}
+      - {column: status_code, type: BIGINT, ops: ["=", "in", "!=", ">", ">=", "<", "<="], fan_out: false, description: "Numeric HTTP result code (toint(ResultCode))", examples: ["500"]}
+      - {column: success, type: BOOLEAN, description: "false = failed requests", examples: ["false"]}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<="], description: "Server-side duration in milliseconds (DurationMs)", examples: ["1000"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, control_lookback: 6h}
+    response: &la_columnar
+      rows_path: "$.tables[0]"
+      expand:
+        - {columnar: {columns: "columns", data: "rows", orientation: row}, as: r}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time, description: "When request processing started (UTC)"}
+      - {name: service, path: "@r.AppRoleName", description: "Cloud role name (service)"}
+      - {name: host, path: "@r.AppRoleInstance", description: "Role instance (host / pod / instance)"}
+      - {name: resource, path: "@r.Name", description: "Request name (route template + verb)"}
+      - {name: operation_name, path: "@r.OperationName", description: "Name of the overall operation (usually = resource)"}
+      - {name: request_url, path: "@r.Url", transform: redact, description: "Request URL (credentials in query strings masked)"}
+      - {name: result_code, path: "@r.ResultCode", description: "Raw ResultCode string"}
+      - {name: status_code, type: BIGINT, path: "@r.ResultCode", transform: int, description: "ResultCode as a number (null when not numeric)"}
+      - {name: success, type: BOOLEAN, path: "@r.Success"}
+      - {name: duration_ms, type: DOUBLE, path: "@r.DurationMs"}
+      - {name: trace_id, path: "@r.OperationId", description: "Operation (trace) id - join with dependencies/exceptions/traces"}
+      - {name: span_id, path: "@r.Id", description: "Request (span) id"}
+      - {name: parent_id, path: "@r.ParentId"}
+      - {name: item_count, type: BIGINT, path: "@r.ItemCount", description: "Sampling weight: how many requests this row represents"}
+      - {name: version, path: "@r.AppVersion"}
+      - {name: synthetic_source, path: "@r.SyntheticSource", description: "Non-empty for availability tests / bots"}
+      - {name: properties, type: JSON, path: "@r.Properties", transform: from_json, description: "customDimensions"}
+      - {name: app_resource_id, path: "@r._ResourceId"}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 10000
+    sort_hint: "newest first (order by TimeGenerated desc | take 5000)"
+    pitfalls:
+      - "Sampled: weight counts by item_count (sum(item_count)), and prefer azure_log_analytics_app_request_stats for any rate or ratio."
+      - "status_code is null for non-numeric result codes (e.g. 'Canceled'); result_code keeps the raw string. Failed = success = false, which also covers 4xx when the SDK marks them failed."
+      - "service values are the cloud role name the SDK reports (OTEL service.name / WEBSITE_SITE_NAME); an Azure resource name or Kubernetes deployment name may differ - list azure_log_analytics_app_services first."
+    examples:
+      - sql: >-
+          SELECT resource, result_code, count(*) AS sampled_rows, sum(item_count) AS requests, quantile_cont(duration_ms, 0.95) AS p95_ms
+          FROM azure_log_analytics_app_requests
+          WHERE service = 'checkout-api' AND success = false
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1, 2 ORDER BY requests DESC LIMIT 20
+        description: Which endpoints and result codes failed for a service in the incident hour.
+      - sql: >-
+          SELECT ts, resource, duration_ms, status_code, trace_id FROM azure_log_analytics_app_requests
+          WHERE service = 'checkout-api' AND duration_ms >= 3000 ORDER BY duration_ms DESC LIMIT 20
+        description: The slowest requests, with trace ids to open in azure_log_analytics_trace.
+    fixtures:
+      - file: app_requests.json
+        filters: {service: checkout-api}
+        note: "Built strictly from the documented query response format (tables[0].columns/rows) and the AppRequests table reference (column names and types), projected as the manifest's KQL does; the docs publish no AppRequests response example."
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:42:07.123Z", service: checkout-api, resource: "POST /api/orders", status_code: 500, success: false, duration_ms: 1834.5, trace_id: 0af7651916cd43dd8448eb211c80319c, item_count: 1, properties: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/apprequests
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_request_stats
+    title: Application Insights request rate, failures and latency per interval (RED)
+    description: >-
+      Server-side summarize over AppRequests: one row per (time bucket, service[, dimension]) with requests and
+      failures (sampling-correct sum(ItemCount)), failure_rate, average and p50/p95/p99 duration in ms. Bucket =
+      the auto step (~300 points) unless step_s is given. group_by adds one more dimension: 'operation' (request
+      name), 'result_code', 'instance' or 'version'. Same service / resource / app_resource_id / kql_filter
+      filters as azure_log_analytics_app_requests. This is the table for 'when did errors / latency start'.
+    kind: timeseries
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          {%- set dim = {'operation': 'Name', 'result_code': 'ResultCode', 'instance': 'AppRoleInstance', 'version': 'AppVersion'}.get((filters.group_by or '') | lower) -%}
+          AppRequests
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('AppRoleName', filters.service, filters.service__op) }}
+          {{- sf('Name', filters.resource, filters.resource__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | summarize Requests = sum(ItemCount), Failures = sumif(ItemCount, Success == false), AvgDurationMs = avg(DurationMs), P50 = percentile(DurationMs, 50), P95 = percentile(DurationMs, 95), P99 = percentile(DurationMs, 99) by TimeGenerated = bin(TimeGenerated, {{ (filters.step_s or time.step_s) | int }}s), AppRoleName{{ (', Dimension = tostring(' ~ dim ~ ')') if dim else '' }}
+          | order by TimeGenerated asc
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Cloud role name (AppRoleName)", examples: ["checkout-api"]}
+      - {column: resource, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Request name filter (Name)", examples: ["POST /api/orders"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: group_by, description: "Extra dimension: operation | result_code | instance | version (default none)", examples: ["operation"]}
+      - {column: step_s, type: BIGINT, description: "Bucket size in seconds (default auto, ~300 buckets)", examples: ["60"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on AppRequests", examples: ["Url !has 'health'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, reapply: false, min_step: 60s, control_lookback: 6h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time, description: "Bucket start (UTC)"}
+      - {name: service, path: "@r.AppRoleName"}
+      - {name: dimension, path: "@r.Dimension", description: "Value of the group_by dimension (null without group_by)"}
+      - {name: requests, type: DOUBLE, path: "@r.Requests", description: "Requests in the bucket (sum of ItemCount)"}
+      - {name: failures, type: DOUBLE, path: "@r.Failures", description: "Failed requests (Success == false), sampling-corrected"}
+      - {name: failure_rate, type: DOUBLE, expr: "((r['Failures'] | float) / (r['Requests'] | float)) if (r['Requests'] | float) > 0 else none", description: "failures / requests (0..1)"}
+      - {name: avg_duration_ms, type: DOUBLE, path: "@r.AvgDurationMs"}
+      - {name: p50_ms, type: DOUBLE, path: "@r.P50"}
+      - {name: p95_ms, type: DOUBLE, path: "@r.P95"}
+      - {name: p99_ms, type: DOUBLE, path: "@r.P99"}
+      - {name: value, type: DOUBLE, path: "@r.Requests", description: "Alias of requests (for generic timeseries roles)"}
+      - {name: group_by, filter_only: true}
+      - {name: step_s, type: BIGINT, filter_only: true}
+      - {name: resource, filter_only: true}
+      - {name: app_resource_id, filter_only: true}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 20000
+    zero_fill: false
+    sort_hint: "ascending by bucket"
+    pitfalls:
+      - "Buckets with no requests are absent (not zero): a missing bucket for a busy service means no traffic reached it, which is itself a symptom."
+      - "Percentiles are computed over sampled rows (not weighted by ItemCount); fine for latency shape, not for exact SLO math."
+      - "group_by = 'operation' over many endpoints multiplies rows; filter service first."
+    examples:
+      - sql: >-
+          SELECT ts, requests, failures, failure_rate, p95_ms FROM azure_log_analytics_app_request_stats
+          WHERE service = 'checkout-api' AND step_s = 60
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Per-minute RED series for one service - find the onset of errors and latency.
+      - sql: >-
+          SELECT dimension AS endpoint, sum(failures) AS failures, sum(requests) AS requests, max(p95_ms) AS worst_p95_ms
+          FROM azure_log_analytics_app_request_stats
+          WHERE service = 'checkout-api' AND group_by = 'operation'
+          GROUP BY 1 ORDER BY failures DESC LIMIT 10
+        description: Which endpoints carry the failures.
+      - sql: >-
+          SELECT service, sum(failures) / nullif(sum(requests), 0) AS failure_rate, sum(requests) AS requests
+          FROM azure_log_analytics_app_request_stats GROUP BY 1 ORDER BY failure_rate DESC NULLS LAST LIMIT 15
+        description: Failure rate per service across the workspace.
+    fixtures:
+      - file: app_request_stats.json
+        filters: {service: checkout-api, step_s: 60}
+        note: "Built strictly from the documented query response format and the AppRequests schema, with the column names this table's summarize produces (TimeGenerated, AppRoleName, Requests, Failures, AvgDurationMs, P50, P95, P99); no published example exists for this query."
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:40:00Z", service: checkout-api, dimension: null, requests: 1180.0, failures: 3.0, p95_ms: 211.4}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/apprequests
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_dependencies
+    title: Application Insights outgoing dependency calls (AppDependencies)
+    description: >-
+      Outgoing calls recorded by Application Insights (AppDependencies): HTTP, SQL, Azure Service Bus / Storage /
+      Cosmos DB, Redis... One row per sampled call with service (calling AppRoleName), target (host / server /
+      queue), dependency_type, resource (dependency name), data (full URL or SQL command, credentials masked),
+      result_code, success, duration_ms and trace ids. Filters: service, target, dependency_type, resource,
+      success, duration_ms, status_code, trace_id, kql_filter. Newest 5000 rows; use
+      azure_log_analytics_app_dependency_map for per-target totals.
+    kind: spans
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          {%- macro nf(expr, v, op, conv='int') -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if v is sequence and v is not string %} | where {{ expr }} in ({{ v | map(conv) | join(', ') }})
+          {%- else %} | where {{ expr }} {{ {'=': '==', '!=': '!=', '>': '>', '>=': '>=', '<': '<', '<=': '<='}.get(op or '=', '==') }} {{ v | int if conv == 'int' else v | float }}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          AppDependencies
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('AppRoleName', filters.service, filters.service__op) }}
+          {{- sf('AppRoleInstance', filters.host, filters.host__op) }}
+          {{- sf('Target', filters.target, filters.target__op) }}
+          {{- sf('DependencyType', filters.dependency_type, filters.dependency_type__op) }}
+          {{- sf('Name', filters.resource, filters.resource__op) }}
+          {{- sf('OperationId', filters.trace_id, filters.trace_id__op) }}
+          {{- nf('toint(ResultCode)', filters.status_code, filters.status_code__op) }}
+          {{- nf('DurationMs', filters.duration_ms, filters.duration_ms__op, 'float') }}
+          {%- if filters.success in [true, false] %} | where Success == {{ 'true' if filters.success else 'false' }}{% endif %}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | project TimeGenerated, AppRoleName, AppRoleInstance, Name, Target, DependencyType, Data, ResultCode, Success, DurationMs, OperationId, Id, ParentId, ItemCount, Properties, _ResourceId
+          | order by TimeGenerated desc
+          | take {{ [limit or 5000, 10000] | min }}
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Calling cloud role name (AppRoleName)", examples: ["checkout-api"]}
+      - {column: host, ops: ["=", "in", "like"], fan_out: false, description: "Calling role instance", examples: ["checkout-api-7d9c6b5f4-x2k8p"]}
+      - {column: target, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Dependency target (host name, SQL server | database, queue...)", examples: ["payments.internal.contoso.com"]}
+      - {column: dependency_type, ops: ["=", "in", "!=", "like"], fan_out: false, description: "HTTP, SQL, Azure Service Bus, Azure blob, Azure table, Azure DocumentDB, Redis, InProc, ...", examples: ["HTTP"]}
+      - {column: resource, ops: ["=", "in", "like"], fan_out: false, description: "Dependency name (Name), e.g. 'GET /v1/charges' or a SQL table", examples: ["POST /v1/charges"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "OperationId", examples: ["0af7651916cd43dd8448eb211c80319c"]}
+      - {column: status_code, type: BIGINT, ops: ["=", "in", "!=", ">", ">=", "<", "<="], fan_out: false, description: "Numeric result code", examples: ["503"]}
+      - {column: success, type: BOOLEAN, description: "false = failed calls", examples: ["false"]}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<="], description: "Call duration in ms", examples: ["2000"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on AppDependencies", examples: ["Data has 'timeout'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, control_lookback: 6h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time}
+      - {name: service, path: "@r.AppRoleName", description: "Calling service"}
+      - {name: host, path: "@r.AppRoleInstance"}
+      - {name: resource, path: "@r.Name", description: "Dependency name"}
+      - {name: target, path: "@r.Target", description: "Called host / server / queue"}
+      - {name: dependency_type, path: "@r.DependencyType"}
+      - {name: data, path: "@r.Data", transform: redact, description: "Full URL or command text (credentials masked)"}
+      - {name: result_code, path: "@r.ResultCode"}
+      - {name: status_code, type: BIGINT, path: "@r.ResultCode", transform: int}
+      - {name: success, type: BOOLEAN, path: "@r.Success"}
+      - {name: duration_ms, type: DOUBLE, path: "@r.DurationMs"}
+      - {name: trace_id, path: "@r.OperationId"}
+      - {name: span_id, path: "@r.Id"}
+      - {name: parent_id, path: "@r.ParentId"}
+      - {name: item_count, type: BIGINT, path: "@r.ItemCount"}
+      - {name: properties, type: JSON, path: "@r.Properties", transform: from_json}
+      - {name: app_resource_id, path: "@r._ResourceId"}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 10000
+    sort_hint: "newest first"
+    pitfalls:
+      - "A failing downstream that is not instrumented shows up only here (as the caller's failed/slow dependency), never in AppRequests - check this table when requests fail but no exception explains it."
+      - "Target formats differ per type: HTTP = host[:port], SQL = 'server | database', Service Bus = 'namespace | queue'. Use LIKE '%payments%' rather than exact matches."
+    examples:
+      - sql: >-
+          SELECT target, dependency_type, sum(item_count) AS calls, sum(CASE WHEN NOT success THEN item_count ELSE 0 END) AS failed, quantile_cont(duration_ms, 0.95) AS p95_ms
+          FROM azure_log_analytics_app_dependencies
+          WHERE service = 'checkout-api' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1, 2 ORDER BY failed DESC LIMIT 15
+        description: Which downstream dependencies of a service failed or slowed down (sample of the newest calls).
+      - sql: >-
+          SELECT ts, target, resource, result_code, duration_ms, trace_id FROM azure_log_analytics_app_dependencies
+          WHERE service = 'checkout-api' AND success = false ORDER BY ts DESC LIMIT 50
+        description: Recent failed outgoing calls with trace ids.
+    fixtures:
+      - file: app_dependencies.json
+        filters: {service: checkout-api, success: false}
+        note: "Built strictly from the documented query response format and the AppDependencies table reference (columns/types), projected as the manifest's KQL does; no published response example exists."
+        expect_rows: 2
+        expect_columns: {service: checkout-api, target: payments.internal.contoso.com, dependency_type: HTTP, status_code: 503, success: false, duration_ms: 30012.0, span_id: "b7ad6b7169203331"}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/appdependencies
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_dependency_map
+    title: Application Insights dependency map (calls / failures / latency per caller -> target)
+    description: >-
+      Server-side summarize over AppDependencies: one row per (calling service, dependency_type, target) with
+      calls and failures (sum of ItemCount), failure_rate, average and p95 duration over the window - the service
+      map as Application Insights sees it. Filters: service, target, dependency_type, app_resource_id, kql_filter.
+    kind: entities
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          AppDependencies
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('AppRoleName', filters.service, filters.service__op) }}
+          {{- sf('Target', filters.target, filters.target__op) }}
+          {{- sf('DependencyType', filters.dependency_type, filters.dependency_type__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | summarize Calls = sum(ItemCount), Failures = sumif(ItemCount, Success == false), AvgDurationMs = avg(DurationMs), P95 = percentile(DurationMs, 95), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by AppRoleName, DependencyType, Target
+          | order by Failures desc, Calls desc
+          | take 500
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Calling cloud role name", examples: ["checkout-api"]}
+      - {column: target, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Called target", examples: ["payments.internal.contoso.com"]}
+      - {column: dependency_type, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Dependency type (HTTP, SQL, ...)", examples: ["SQL"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on AppDependencies", examples: ["DependencyType != 'InProc'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, reapply: false, control_lookback: 6h}
+    response: *la_columnar
+    columns:
+      - {name: service, path: "@r.AppRoleName", description: "Calling service (edge source)"}
+      - {name: dependency_type, path: "@r.DependencyType"}
+      - {name: target, path: "@r.Target", description: "Called target (edge destination)"}
+      - {name: calls, type: DOUBLE, path: "@r.Calls"}
+      - {name: failures, type: DOUBLE, path: "@r.Failures"}
+      - {name: failure_rate, type: DOUBLE, expr: "((r['Failures'] | float) / (r['Calls'] | float)) if (r['Calls'] | float) > 0 else none"}
+      - {name: avg_duration_ms, type: DOUBLE, path: "@r.AvgDurationMs"}
+      - {name: p95_ms, type: DOUBLE, path: "@r.P95"}
+      - {name: first_seen, type: TIMESTAMP, path: "@r.FirstSeen", transform: auto_time}
+      - {name: ts, type: TIMESTAMP, path: "@r.LastSeen", transform: auto_time, description: "Last call in the window"}
+      - {name: app_resource_id, filter_only: true}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 2000
+    sort_hint: "most failures first, then most calls"
+    pitfalls:
+      - "Only instrumented outgoing calls appear; edges into services that do not run an Application Insights SDK show up as targets only."
+      - "Compare with the preceding window (a second query with an earlier ts range) before blaming a dependency that is always slow."
+    examples:
+      - sql: >-
+          SELECT service, target, dependency_type, calls, failures, failure_rate, p95_ms FROM azure_log_analytics_app_dependency_map
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY failures DESC LIMIT 20
+        description: Failing edges of the dependency graph during the incident.
+      - sql: >-
+          WITH now AS (SELECT target, failure_rate, p95_ms FROM azure_log_analytics_app_dependency_map WHERE service = 'checkout-api' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'),
+               base AS (SELECT target, failure_rate, p95_ms FROM azure_log_analytics_app_dependency_map WHERE service = 'checkout-api' AND ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 10:00:00')
+          SELECT now.target, now.failure_rate, base.failure_rate AS baseline_failure_rate, now.p95_ms, base.p95_ms AS baseline_p95_ms
+          FROM now LEFT JOIN base USING (target) ORDER BY now.failure_rate DESC
+        description: Incident window vs a baseline window for each downstream of one service.
+    fixtures:
+      - file: app_dependency_map.json
+        filters: {service: checkout-api}
+        note: "Built strictly from the documented query response format and the AppDependencies schema, with the column names this table's summarize produces; no published example exists."
+        expect_rows: 2
+        expect_columns: {service: checkout-api, target: payments.internal.contoso.com, dependency_type: HTTP, calls: 1520.0, failures: 214.0, ts: "2026-10-01T11:59:51.004Z"}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/appdependencies
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_exceptions
+    title: Application Insights exceptions (AppExceptions)
+    description: >-
+      Exceptions recorded by Application Insights (AppExceptions): one row per sampled exception with service,
+      host, exception_type, message (outer message, falling back to Message / innermost), outer/innermost type and
+      method, problem_id (the grouping key the portal uses), severity, handled_at and trace_id. Filters: service,
+      host, exception_type, problem_id, message (LIKE), trace_id, kql_filter; include_details = true adds the
+      parsed stack (details). Newest 5000 rows; azure_log_analytics_app_exception_groups gives counts per problem.
+    kind: logs
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          AppExceptions
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('AppRoleName', filters.service, filters.service__op) }}
+          {{- sf('AppRoleInstance', filters.host, filters.host__op) }}
+          {{- sf('ExceptionType', filters.exception_type, filters.exception_type__op) }}
+          {{- sf('ProblemId', filters.problem_id, filters.problem_id__op) }}
+          {{- sf('OperationId', filters.trace_id, filters.trace_id__op) }}
+          {{- sf('coalesce(OuterMessage, Message, InnermostMessage)', filters.message, filters.message__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | project TimeGenerated, AppRoleName, AppRoleInstance, ExceptionType, Message, OuterMessage, OuterType, OuterMethod, InnermostType, InnermostMessage, InnermostMethod, ProblemId, SeverityLevel, HandledAt, OperationName, OperationId, ParentId, ItemCount, AppVersion, _ResourceId{{ ', Details' if filters.include_details else '' }}
+          | order by TimeGenerated desc
+          | take {{ [limit or 5000, 10000] | min }}
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Cloud role name", examples: ["checkout-api"]}
+      - {column: host, ops: ["=", "in", "like"], fan_out: false, description: "Role instance", examples: ["checkout-api-7d9c6b5f4-x2k8p"]}
+      - {column: exception_type, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Exception type, e.g. System.TimeoutException", examples: ["System.Net.Http.HttpRequestException"]}
+      - {column: problem_id, ops: ["=", "in"], fan_out: false, description: "ProblemId (type + failing method) as grouped in the portal Failures blade", examples: ["System.Net.Http.HttpRequestException at Contoso.Checkout.PaymentClient.ChargeAsync"]}
+      - {column: message, ops: ["like", "="], fan_out: false, description: "Outer exception message; LIKE '%text%' becomes a contains filter", examples: ["%timed out%"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "OperationId", examples: ["0af7651916cd43dd8448eb211c80319c"]}
+      - {column: include_details, type: BOOLEAN, description: "true adds the Details column (parsed stack frames; large)", examples: ["true"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on AppExceptions", examples: ["SeverityLevel >= 3"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, control_lookback: 6h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time}
+      - {name: service, path: "@r.AppRoleName"}
+      - {name: host, path: "@r.AppRoleInstance"}
+      - {name: exception_type, path: "@r.ExceptionType"}
+      - {name: message, expr: "r['OuterMessage'] or r['Message'] or r['InnermostMessage']", transform: redact, description: "Outer message (fallback Message, innermost message); secrets masked"}
+      - {name: outer_type, path: "@r.OuterType"}
+      - {name: outer_method, path: "@r.OuterMethod"}
+      - {name: innermost_type, path: "@r.InnermostType"}
+      - {name: innermost_message, path: "@r.InnermostMessage", transform: redact}
+      - {name: innermost_method, path: "@r.InnermostMethod"}
+      - {name: problem_id, path: "@r.ProblemId"}
+      - {name: severity_level, type: BIGINT, path: "@r.SeverityLevel", description: "0 Verbose, 1 Information, 2 Warning, 3 Error, 4 Critical"}
+      - {name: level, expr: "{0: 'verbose', 1: 'information', 2: 'warning', 3: 'error', 4: 'critical'}.get(r['SeverityLevel'] | int) if r['SeverityLevel'] is not none else none"}
+      - {name: handled_at, path: "@r.HandledAt", description: "UserCode / Platform / Unhandled"}
+      - {name: operation_name, path: "@r.OperationName", description: "Request (operation) in which it was thrown"}
+      - {name: trace_id, path: "@r.OperationId"}
+      - {name: span_id, path: "@r.ParentId", description: "Id of the request/dependency span that threw"}
+      - {name: item_count, type: BIGINT, path: "@r.ItemCount"}
+      - {name: version, path: "@r.AppVersion"}
+      - {name: details, type: JSON, path: "@r.Details", transform: from_json, description: "Parsed stack (only with include_details = true)"}
+      - {name: app_resource_id, path: "@r._ResourceId"}
+      - {name: include_details, type: BOOLEAN, filter_only: true}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 10000
+    sort_hint: "newest first"
+    pitfalls:
+      - "Many SDKs leave Message empty and fill OuterMessage (or the reverse): message coalesces OuterMessage, Message and InnermostMessage."
+      - "The root cause is usually the innermost exception (innermost_type / innermost_message), the outer one is often a generic wrapper."
+    examples:
+      - sql: >-
+          SELECT exception_type, innermost_type, any_value(innermost_message) AS sample, sum(item_count) AS occurrences, min(ts) AS first_seen
+          FROM azure_log_analytics_app_exceptions
+          WHERE service = 'checkout-api' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1, 2 ORDER BY occurrences DESC LIMIT 10
+        description: Exception types (with root-cause inner type) for a service in the incident hour.
+      - sql: >-
+          SELECT ts, exception_type, message, details FROM azure_log_analytics_app_exceptions
+          WHERE trace_id = '0af7651916cd43dd8448eb211c80319c' AND include_details = true
+        description: Stack traces for one failed operation.
+    fixtures:
+      - file: app_exceptions.json
+        filters: {service: checkout-api}
+        note: "Built strictly from the documented query response format and the AppExceptions table reference (columns/types), projected as the manifest's KQL does; OuterMessage filled and Message empty as the column descriptions allow. No published response example exists."
+        expect_rows: 2
+        expect_columns: {service: checkout-api, exception_type: System.Net.Http.HttpRequestException, message: "Response status code does not indicate success: 503 (Service Unavailable).", severity_level: 3, level: error, innermost_type: System.Net.Sockets.SocketException}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/appexceptions
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_exception_groups
+    title: Application Insights exception groups (counts per problem id)
+    description: >-
+      Server-side summarize over AppExceptions: one row per (ProblemId, ExceptionType, service) with occurrences
+      (sum of ItemCount), first_seen, last_seen (ts), affected instances and a sample outer/innermost message and
+      operation. The error-tracking view ('which errors are new or spiking'). Filters: service, exception_type,
+      app_resource_id, kql_filter.
+    kind: alerts
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          AppExceptions
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('AppRoleName', filters.service, filters.service__op) }}
+          {{- sf('ExceptionType', filters.exception_type, filters.exception_type__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | summarize Occurrences = sum(ItemCount), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), Instances = dcount(AppRoleInstance), SampleMessage = take_any(coalesce(OuterMessage, Message, InnermostMessage)), SampleInnermost = take_any(strcat(InnermostType, ': ', InnermostMessage)), SampleOperation = take_any(OperationName), SampleTraceId = take_any(OperationId) by ProblemId, ExceptionType, AppRoleName
+          | order by Occurrences desc
+          | take 200
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Cloud role name", examples: ["checkout-api"]}
+      - {column: exception_type, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Exception type", examples: ["System.TimeoutException"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on AppExceptions", examples: ["HandledAt == 'Unhandled'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, reapply: false, control_lookback: 6h}
+    response: *la_columnar
+    columns:
+      - {name: problem_id, path: "@r.ProblemId", description: "Grouping key (type + failing method)"}
+      - {name: title, expr: "r['ProblemId'] or r['ExceptionType']", description: "Display title of the group"}
+      - {name: exception_type, path: "@r.ExceptionType"}
+      - {name: service, path: "@r.AppRoleName"}
+      - {name: occurrences, type: DOUBLE, path: "@r.Occurrences", description: "Exceptions in the window (sum of ItemCount)"}
+      - {name: first_seen, type: TIMESTAMP, path: "@r.FirstSeen", transform: auto_time, description: "First occurrence inside the window (not ever)"}
+      - {name: ts, type: TIMESTAMP, path: "@r.LastSeen", transform: auto_time, description: "Last occurrence in the window"}
+      - {name: instances, type: BIGINT, path: "@r.Instances", description: "Distinct AppRoleInstance values"}
+      - {name: message, path: "@r.SampleMessage", transform: redact}
+      - {name: innermost, path: "@r.SampleInnermost", transform: redact, description: "Sample innermost 'Type: message' (usually the root cause)"}
+      - {name: operation_name, path: "@r.SampleOperation"}
+      - {name: trace_id, path: "@r.SampleTraceId", description: "One trace id carrying this exception"}
+      - {name: app_resource_id, filter_only: true}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 1000
+    sort_hint: "most occurrences first"
+    pitfalls:
+      - "first_seen is the first occurrence INSIDE the queried window; to know whether a problem is new, run the same table over a baseline window and anti-join on problem_id."
+    examples:
+      - sql: >-
+          SELECT problem_id, service, occurrences, first_seen, ts AS last_seen, innermost FROM azure_log_analytics_app_exception_groups
+          WHERE service = 'checkout-api' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY occurrences DESC LIMIT 10
+        description: Top exception groups during the incident.
+      - sql: >-
+          WITH now AS (SELECT problem_id, occurrences FROM azure_log_analytics_app_exception_groups WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'),
+               base AS (SELECT problem_id, occurrences FROM azure_log_analytics_app_exception_groups WHERE ts BETWEEN TIMESTAMP '2026-09-30 11:00:00' AND TIMESTAMP '2026-10-01 11:00:00')
+          SELECT now.problem_id, now.occurrences FROM now LEFT JOIN base USING (problem_id) WHERE base.problem_id IS NULL ORDER BY now.occurrences DESC
+        description: Exception groups that are new compared with the previous 24 hours.
+    fixtures:
+      - file: app_exception_groups.json
+        filters: {service: checkout-api}
+        note: "Built strictly from the documented query response format and the AppExceptions schema, with the column names this table's summarize produces; no published example exists."
+        expect_rows: 2
+        expect_columns: {problem_id: "System.Net.Http.HttpRequestException at Contoso.Checkout.PaymentClient+<ChargeAsync>d__4.MoveNext", service: checkout-api, occurrences: 212.0, instances: 3, ts: "2026-10-01T11:59:40.218Z"}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/appexceptions
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_traces
+    title: Application Insights trace logs (AppTraces)
+    description: >-
+      Log lines sent through Application Insights / OpenTelemetry logging (AppTraces): one row per sampled log
+      with service, host, message, severity (level), trace_id and custom properties. Filters: service, host,
+      severity_level (=, IN, >=, >), message (LIKE '%text%' becomes contains), trace_id, kql_filter. Newest 5000
+      rows; azure_log_analytics_log_counts gives volumes per level over time.
+    kind: logs
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          {%- macro nf(expr, v, op, conv='int') -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if v is sequence and v is not string %} | where {{ expr }} in ({{ v | map(conv) | join(', ') }})
+          {%- else %} | where {{ expr }} {{ {'=': '==', '!=': '!=', '>': '>', '>=': '>=', '<': '<', '<=': '<='}.get(op or '=', '==') }} {{ v | int if conv == 'int' else v | float }}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          AppTraces
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('AppRoleName', filters.service, filters.service__op) }}
+          {{- sf('AppRoleInstance', filters.host, filters.host__op) }}
+          {{- sf('OperationId', filters.trace_id, filters.trace_id__op) }}
+          {{- sf('Message', filters.message, filters.message__op) }}
+          {{- nf('SeverityLevel', filters.severity_level, filters.severity_level__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | project TimeGenerated, AppRoleName, AppRoleInstance, Message, SeverityLevel, OperationName, OperationId, ParentId, ItemCount, AppVersion, Properties, _ResourceId
+          | order by TimeGenerated desc
+          | take {{ [limit or 5000, 10000] | min }}
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Cloud role name", examples: ["checkout-api"]}
+      - {column: host, ops: ["=", "in", "like"], fan_out: false, description: "Role instance", examples: ["checkout-api-7d9c6b5f4-x2k8p"]}
+      - {column: severity_level, type: BIGINT, ops: ["=", "in", "!=", ">", ">=", "<", "<="], fan_out: false, description: "0 Verbose, 1 Information, 2 Warning, 3 Error, 4 Critical (severity_level >= 3 = errors)", examples: ["3"]}
+      - {column: message, ops: ["like", "="], fan_out: false, description: "Message text; LIKE '%text%' becomes a case-insensitive contains filter", examples: ["%timeout%"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "OperationId", examples: ["0af7651916cd43dd8448eb211c80319c"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on AppTraces", examples: ["Properties.CategoryName == 'Contoso.Checkout.PaymentClient'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, control_lookback: 6h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time}
+      - {name: service, path: "@r.AppRoleName"}
+      - {name: host, path: "@r.AppRoleInstance"}
+      - {name: message, path: "@r.Message", transform: redact}
+      - {name: severity_level, type: BIGINT, path: "@r.SeverityLevel"}
+      - {name: level, expr: "{0: 'verbose', 1: 'information', 2: 'warning', 3: 'error', 4: 'critical'}.get(r['SeverityLevel'] | int) if r['SeverityLevel'] is not none else none", description: "verbose | information | warning | error | critical"}
+      - {name: operation_name, path: "@r.OperationName"}
+      - {name: trace_id, path: "@r.OperationId"}
+      - {name: span_id, path: "@r.ParentId", description: "Span in which the log was written"}
+      - {name: item_count, type: BIGINT, path: "@r.ItemCount"}
+      - {name: version, path: "@r.AppVersion"}
+      - {name: properties, type: JSON, path: "@r.Properties", transform: from_json, description: "customDimensions (CategoryName, OriginalFormat, ...)"}
+      - {name: app_resource_id, path: "@r._ResourceId"}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 10000
+    sort_hint: "newest first"
+    pitfalls:
+      - "AppTraces may be on the Basic plan to save cost: then this table fails with a plan error and you must use azure_log_analytics_query with plan = 'basic'."
+      - "message LIKE is pushed down as case-insensitive contains (superset) and re-applied exactly in SQL; prefer distinctive words."
+      - "Logs from non-Application-Insights pipelines (AKS stdout) are in ContainerLogV2 (azure_log_analytics_container_logs), not here."
+    examples:
+      - sql: >-
+          SELECT ts, host, message, trace_id FROM azure_log_analytics_app_traces
+          WHERE service = 'checkout-api' AND severity_level >= 3
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 100
+        description: Error and critical log lines of a service during the incident.
+      - sql: >-
+          SELECT properties->>'CategoryName' AS logger, count(*) AS lines FROM azure_log_analytics_app_traces
+          WHERE service = 'checkout-api' AND message LIKE '%timeout%' GROUP BY 1 ORDER BY lines DESC
+        description: Which loggers emit timeout messages.
+    fixtures:
+      - file: app_traces.json
+        filters: {service: checkout-api, severity_level: 3, severity_level__op: ">="}
+        note: "Built strictly from the documented query response format and the AppTraces table reference (columns/types), projected as the manifest's KQL does; Properties is returned as JSON text (dynamic). No published response example exists."
+        expect_rows: 2
+        expect_columns: {service: checkout-api, severity_level: 3, level: error, trace_id: 0af7651916cd43dd8448eb211c80319c, properties: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/apptraces
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_log_counts
+    title: Application log volume per interval and severity (AppTraces)
+    description: >-
+      Server-side count of AppTraces log lines per (time bucket, service, severity level), sampling-corrected
+      (sum of ItemCount). Bucket = auto step unless step_s is given. Filters: service, severity_level, message
+      (LIKE), app_resource_id, kql_filter. Use it to see when error logging started and how it compares with the
+      baseline; for AKS stdout logs use azure_log_analytics_query on ContainerLogV2.
+    kind: timeseries
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          {%- macro nf(expr, v, op, conv='int') -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if v is sequence and v is not string %} | where {{ expr }} in ({{ v | map(conv) | join(', ') }})
+          {%- else %} | where {{ expr }} {{ {'=': '==', '!=': '!=', '>': '>', '>=': '>=', '<': '<', '<=': '<='}.get(op or '=', '==') }} {{ v | int if conv == 'int' else v | float }}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          AppTraces
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('AppRoleName', filters.service, filters.service__op) }}
+          {{- sf('Message', filters.message, filters.message__op) }}
+          {{- nf('SeverityLevel', filters.severity_level, filters.severity_level__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | summarize Count = sum(ItemCount) by TimeGenerated = bin(TimeGenerated, {{ (filters.step_s or time.step_s) | int }}s), AppRoleName, SeverityLevel
+          | order by TimeGenerated asc
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Cloud role name", examples: ["checkout-api"]}
+      - {column: severity_level, type: BIGINT, ops: ["=", "in", "!=", ">", ">=", "<", "<="], fan_out: false, description: "0 Verbose .. 4 Critical", examples: ["3"]}
+      - {column: message, ops: ["like", "="], fan_out: false, description: "Only lines whose message contains the LIKE fragments", examples: ["%timeout%"]}
+      - {column: step_s, type: BIGINT, description: "Bucket size in seconds (default auto)", examples: ["60"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on AppTraces", examples: ["Message !has 'healthz'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, reapply: false, min_step: 60s, control_lookback: 6h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time, description: "Bucket start"}
+      - {name: service, path: "@r.AppRoleName"}
+      - {name: severity_level, type: BIGINT, path: "@r.SeverityLevel"}
+      - {name: level, expr: "{0: 'verbose', 1: 'information', 2: 'warning', 3: 'error', 4: 'critical'}.get(r['SeverityLevel'] | int) if r['SeverityLevel'] is not none else none"}
+      - {name: count, type: DOUBLE, path: "@r.Count", description: "Log lines in the bucket (sum of ItemCount)"}
+      - {name: message, filter_only: true}
+      - {name: step_s, type: BIGINT, filter_only: true}
+      - {name: app_resource_id, filter_only: true}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 20000
+    sort_hint: "ascending by bucket"
+    pitfalls:
+      - "Empty buckets are absent, not zero."
+    examples:
+      - sql: >-
+          SELECT ts, sum(count) AS error_lines FROM azure_log_analytics_log_counts
+          WHERE service = 'checkout-api' AND severity_level >= 3 AND step_s = 60
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY ts ORDER BY ts
+        description: Error log lines per minute across the incident and the hour before.
+    fixtures:
+      - file: log_counts.json
+        filters: {service: checkout-api}
+        note: "Built strictly from the documented query response format and the AppTraces schema, with the column names this table's summarize produces; no published example exists."
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:40:00Z", service: checkout-api, severity_level: 1, level: information, count: 412.0}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/apptraces
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_trace
+    title: End-to-end transaction (all telemetry of one operation id)
+    description: >-
+      Everything Application Insights recorded for one distributed operation: AppRequests, AppDependencies,
+      AppExceptions and AppTraces rows sharing OperationId (= W3C trace id), in time order. kind tells which table
+      a row came from (request | dependency | exception | trace). trace_id is required. The window defaults to 24 h
+      before the anchor; give a ts range around the trace if it is older.
+    kind: traces
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- set ids = filters.trace_id | as_list | map('squote') | join(', ') -%}
+          union isfuzzy=true
+          (AppRequests | where OperationId in ({{ ids }}) | extend Kind = 'request', Detail = strcat(Name, ' -> ', ResultCode)),
+          (AppDependencies | where OperationId in ({{ ids }}) | extend Kind = 'dependency', Detail = strcat(DependencyType, ' ', Target, ' ', Name, ' -> ', ResultCode)),
+          (AppExceptions | where OperationId in ({{ ids }}) | extend Kind = 'exception', Name = ExceptionType, Detail = coalesce(OuterMessage, Message, InnermostMessage)),
+          (AppTraces | where OperationId in ({{ ids }}) | extend Kind = 'trace', Detail = Message)
+          | project TimeGenerated, Kind, AppRoleName, AppRoleInstance, Name, Detail, DurationMs = column_ifexists('DurationMs', real(null)), Success = column_ifexists('Success', bool(null)), ResultCode = column_ifexists('ResultCode', ''), Target = column_ifexists('Target', ''), DependencyType = column_ifexists('DependencyType', ''), SeverityLevel = column_ifexists('SeverityLevel', int(null)), OperationId, Id = column_ifexists('Id', ''), ParentId, OperationName
+          | order by TimeGenerated asc
+          | take 2000
+      timeout_s: 200
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], fan_out: false, description: "OperationId (W3C trace id)", examples: ["0af7651916cd43dd8448eb211c80319c"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 24h, max_window: 31d, control_lookback: 3d}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time}
+      - {name: kind, path: "@r.Kind", description: "request | dependency | exception | trace"}
+      - {name: service, path: "@r.AppRoleName"}
+      - {name: host, path: "@r.AppRoleInstance"}
+      - {name: resource, path: "@r.Name", description: "Request / dependency name, or exception type"}
+      - {name: message, path: "@r.Detail", transform: redact, description: "Request -> result code, dependency call, exception message or log line"}
+      - {name: duration_ms, type: DOUBLE, path: "@r.DurationMs"}
+      - {name: success, type: BOOLEAN, path: "@r.Success"}
+      - {name: result_code, path: "@r.ResultCode"}
+      - {name: target, path: "@r.Target"}
+      - {name: dependency_type, path: "@r.DependencyType"}
+      - {name: severity_level, type: BIGINT, path: "@r.SeverityLevel"}
+      - {name: trace_id, path: "@r.OperationId"}
+      - {name: span_id, path: "@r.Id", description: "Span id (requests and dependencies only)"}
+      - {name: parent_id, path: "@r.ParentId"}
+      - {name: operation_name, path: "@r.OperationName"}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 2000
+    sort_hint: "oldest first (the call tree in time order)"
+    pitfalls:
+      - "Sampling is per operation, so a sampled-out trace is missing entirely (0 rows) even though the request happened."
+      - "Services sending to other workspaces or other App Insights resources are not in this workspace: their spans are missing from the tree."
+    examples:
+      - sql: >-
+          SELECT ts, kind, service, resource, message, duration_ms, success, span_id, parent_id
+          FROM azure_log_analytics_trace WHERE trace_id = '0af7651916cd43dd8448eb211c80319c' ORDER BY ts
+        description: Walk one failed transaction across services.
+    fixtures:
+      - file: trace.json
+        filters: {trace_id: 0af7651916cd43dd8448eb211c80319c}
+        note: "Built strictly from the documented query response format and the AppRequests / AppDependencies / AppExceptions / AppTraces schemas (union projected as the manifest's KQL does); no published example exists."
+        expect_rows: 4
+        expect_columns: {kind: request, service: checkout-api, resource: "POST /api/orders", duration_ms: 1834.5, success: false, span_id: "a4c2b3d1e5f60718"}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/app/transaction-search-and-diagnostics
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_services
+    title: Application Insights services (cloud roles) with traffic and health
+    description: >-
+      Inventory of cloud roles (services) that sent requests in the window: requests, failures, failure_rate,
+      p95 latency, instance count and versions seen (server-side summarize over AppRequests). Use it to find the
+      exact service name to filter other tables with, and to spot which service degraded.
+    kind: entities
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          AppRequests
+          {%- if filters.service %} | where AppRoleName in~ ({{ filters.service | as_list | map('squote') | join(', ') }}){% endif %}
+          | summarize Requests = sum(ItemCount), Failures = sumif(ItemCount, Success == false), P95 = percentile(DurationMs, 95), Instances = dcount(AppRoleInstance), Versions = make_set(AppVersion, 10), Apps = make_set(_ResourceId, 5), LastSeen = max(TimeGenerated) by AppRoleName
+          | order by Requests desc
+          | take 500
+      timeout_s: 200
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Restrict to these cloud role names", examples: ["checkout-api"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, reapply: false, control_lookback: 24h}
+    response: *la_columnar
+    columns:
+      - {name: service, path: "@r.AppRoleName"}
+      - {name: requests, type: DOUBLE, path: "@r.Requests"}
+      - {name: failures, type: DOUBLE, path: "@r.Failures"}
+      - {name: failure_rate, type: DOUBLE, expr: "((r['Failures'] | float) / (r['Requests'] | float)) if (r['Requests'] | float) > 0 else none"}
+      - {name: p95_ms, type: DOUBLE, path: "@r.P95"}
+      - {name: instances, type: BIGINT, path: "@r.Instances"}
+      - {name: versions, type: JSON, path: "@r.Versions", transform: from_json, description: "AppVersion values seen (max 10)"}
+      - {name: app_resource_ids, type: JSON, path: "@r.Apps", transform: from_json, description: "Application Insights components (_ResourceId) reporting this role"}
+      - {name: ts, type: TIMESTAMP, path: "@r.LastSeen", transform: auto_time, description: "Last request seen in the window"}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 1000
+    pitfalls:
+      - "Only services that received requests appear; background workers that only emit dependencies/traces are missing (query AppDependencies / AppTraces with azure_log_analytics_query)."
+      - "Two versions in versions during the window usually means a rollout happened inside it."
+    examples:
+      - sql: "SELECT service, requests, failure_rate, p95_ms, instances, versions FROM azure_log_analytics_app_services ORDER BY failure_rate DESC NULLS LAST"
+        description: Services ranked by failure rate in the analysis window.
+    fixtures:
+      - file: app_services.json
+        note: "Built strictly from the documented query response format and the AppRequests schema, with the column names this table's summarize produces (make_set values arrive as JSON text, as dynamic columns do); no published example exists."
+        expect_rows: 2
+        expect_columns: {service: checkout-api, requests: 70800.0, instances: 3, versions: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/apprequests
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_container_logs
+    title: AKS container logs (ContainerLogV2)
+    description: >-
+      Container stdout/stderr collected by Container insights into ContainerLogV2: one row per log record with
+      namespace, pod, container, host (node), level (LogLevel), stream (stdout/stderr) and message. Filters:
+      cluster_resource_id (AKS _ResourceId), namespace, pod, container, host, level, message (LIKE), kql_filter.
+      Newest 5000 rows. Works for any Container insights cluster (AKS, Arc-enabled Kubernetes).
+    kind: logs
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          ContainerLogV2
+          {{- sf('_ResourceId', filters.cluster_resource_id, filters.cluster_resource_id__op) }}
+          {{- sf('PodNamespace', filters.namespace, filters.namespace__op) }}
+          {{- sf('PodName', filters.pod, filters.pod__op) }}
+          {{- sf('ContainerName', filters.container, filters.container__op) }}
+          {{- sf('Computer', filters.host, filters.host__op) }}
+          {{- sf('LogLevel', filters.level, filters.level__op) }}
+          {{- sf('tostring(LogMessage)', filters.message, filters.message__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | project TimeGenerated, Computer, PodNamespace, PodName, ContainerName, ContainerId, LogLevel, LogSource, Message = tostring(LogMessage), _ResourceId
+          | order by TimeGenerated desc
+          | take {{ [limit or 5000, 10000] | min }}
+      timeout_s: 200
+    filters:
+      - {column: namespace, ops: ["=", "in", "!="], fan_out: false, description: "Kubernetes namespace (PodNamespace)", examples: ["checkout"]}
+      - {column: pod, ops: ["=", "in", "like"], fan_out: false, description: "Pod name; LIKE 'checkout-api-%' for a deployment's pods", examples: ["checkout-api-7d9c6b5f4-x2k8p"]}
+      - {column: container, ops: ["=", "in"], fan_out: false, description: "Container name", examples: ["checkout-api"]}
+      - {column: host, ops: ["=", "in", "like"], fan_out: false, description: "Node name (Computer)", examples: ["aks-nodepool1-12345678-vmss000002"]}
+      - {column: level, ops: ["=", "in", "!="], fan_out: false, description: "CRITICAL, ERROR, WARNING, INFO, DEBUG, TRACE, UNKNOWN", examples: ["ERROR"]}
+      - {column: message, ops: ["like", "="], fan_out: false, description: "Message text; LIKE '%text%' becomes a contains filter", examples: ["%connection refused%"]}
+      - {column: cluster_resource_id, ops: ["=", "in"], fan_out: false, description: "AKS cluster ARM id (_ResourceId, lower-case)", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.containerservice/managedclusters/aks-shop-prod"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on ContainerLogV2", examples: ["LogSource == 'stderr'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, control_lookback: 6h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time}
+      - {name: namespace, path: "@r.PodNamespace"}
+      - {name: pod, path: "@r.PodName"}
+      - {name: container, path: "@r.ContainerName"}
+      - {name: host, path: "@r.Computer", description: "Node name"}
+      - {name: container_id, path: "@r.ContainerId"}
+      - {name: level, path: "@r.LogLevel", description: "CRITICAL | ERROR | WARNING | INFO | DEBUG | TRACE | UNKNOWN"}
+      - {name: stream, path: "@r.LogSource", description: "stdout | stderr"}
+      - {name: message, path: "@r.Message", transform: redact, description: "Log message (JSON logs come back as JSON text)"}
+      - {name: cluster_resource_id, path: "@r._ResourceId"}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 10000
+    sort_hint: "newest first"
+    pitfalls:
+      - "Clusters still on the legacy ContainerLog schema have no ContainerLogV2 rows (0 rows, not an error): query ContainerLog (LogEntry, ContainerID) with azure_log_analytics_query."
+      - "ContainerLogV2 is often switched to the Basic plan for cost; then use azure_log_analytics_query with plan = 'basic'."
+      - "LogLevel is inferred from the line (UNKNOWN when no level keyword); do not rely on it alone - also filter message LIKE '%error%' or stream = 'stderr'."
+      - "Logs of a crashed container are under its previous ContainerId: filter pod and look at the rows just before the restart."
+    examples:
+      - sql: >-
+          SELECT ts, pod, container, level, message FROM azure_log_analytics_container_logs
+          WHERE namespace = 'checkout' AND pod LIKE 'checkout-api-%' AND level IN ('ERROR', 'CRITICAL')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Error lines from a deployment's pods.
+      - sql: >-
+          SELECT pod, count(*) AS lines FROM azure_log_analytics_container_logs
+          WHERE namespace = 'checkout' AND message LIKE '%OOMKilled%' GROUP BY 1 ORDER BY lines DESC
+        description: Pods logging OOM kills.
+    fixtures:
+      - file: container_logs.json
+        filters: {namespace: checkout}
+        note: "Built strictly from the documented query response format and the ContainerLogV2 table reference (columns/types), projected as the manifest's KQL does; no published response example exists."
+        expect_rows: 2
+        expect_columns: {namespace: checkout, pod: checkout-api-7d9c6b5f4-x2k8p, container: checkout-api, level: ERROR, stream: stderr, host: aks-nodepool1-12345678-vmss000002}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/containerlogv2
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_kube_events
+    title: Kubernetes events collected by Container insights (KubeEvents)
+    description: >-
+      Kubernetes events (scheduling failures, OOMKilled, BackOff, Unhealthy probes, FailedMount, evictions...)
+      collected by Container insights into KubeEvents: one row per collected event record with namespace, object
+      (involved object name and kind), reason, message, type (Normal / Warning), count, first/last seen, node and
+      cluster. Unlike the live Kubernetes API (events expire after ~1 h) this keeps the workspace retention.
+      Filters: cluster, namespace, type, reason, object_name, object_kind.
+    kind: events
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          KubeEvents
+          {{- sf('ClusterName', filters.cluster, filters.cluster__op) }}
+          {{- sf('Namespace', filters.namespace, filters.namespace__op) }}
+          {{- sf('KubeEventType', filters.type, filters.type__op) }}
+          {{- sf('Reason', filters.reason, filters.reason__op) }}
+          {{- sf('Name', filters.object_name, filters.object_name__op) }}
+          {{- sf('ObjectKind', filters.object_kind, filters.object_kind__op) }}
+          | project TimeGenerated, ClusterName, Namespace, Name, ObjectKind, Reason, Message, KubeEventType, Count, FirstSeen, LastSeen, Computer, SourceComponent
+          | order by TimeGenerated desc
+          | take {{ [limit or 5000, 10000] | min }}
+      timeout_s: 200
+    filters:
+      - {column: namespace, ops: ["=", "in", "!="], fan_out: false, description: "Involved object's namespace", examples: ["checkout"]}
+      - {column: type, ops: ["=", "in"], fan_out: false, description: "Normal | Warning", examples: ["Warning"]}
+      - {column: reason, ops: ["=", "in", "!="], fan_out: false, description: "Event reason: BackOff, OOMKilling, Unhealthy, FailedScheduling, FailedMount, Evicted, Killing, ...", examples: ["BackOff"]}
+      - {column: object_name, ops: ["=", "in", "like"], fan_out: false, description: "Involved object name (pod, node, deployment...)", examples: ["checkout-api-7d9c6b5f4-x2k8p"]}
+      - {column: object_kind, ops: ["=", "in"], fan_out: false, description: "Pod, Node, Deployment, ReplicaSet, HorizontalPodAutoscaler, ...", examples: ["Pod"]}
+      - {column: cluster, ops: ["=", "in"], fan_out: false, description: "Cluster name (ClusterName)", examples: ["aks-shop-prod"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, control_lookback: 24h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time, description: "When the record was collected"}
+      - {name: cluster, path: "@r.ClusterName"}
+      - {name: namespace, path: "@r.Namespace"}
+      - {name: object_name, path: "@r.Name", description: "Involved object name"}
+      - {name: object_kind, path: "@r.ObjectKind"}
+      - {name: reason, path: "@r.Reason"}
+      - {name: message, path: "@r.Message"}
+      - {name: type, path: "@r.KubeEventType", description: "Normal | Warning"}
+      - {name: count, type: DOUBLE, path: "@r.Count", description: "Cumulative occurrence count of the event"}
+      - {name: first_seen, type: TIMESTAMP, path: "@r.FirstSeen", transform: auto_time}
+      - {name: last_seen, type: TIMESTAMP, path: "@r.LastSeen", transform: auto_time}
+      - {name: host, path: "@r.Computer", description: "Node the event applies to (or the collecting node)"}
+      - {name: source_component, path: "@r.SourceComponent", description: "kubelet, default-scheduler, ..."}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 10000
+    sort_hint: "newest first"
+    pitfalls:
+      - "Container insights collects only Warning events by default (Normal events need the ConfigMap setting), so type = 'Normal' can be legitimately empty."
+      - "The same event can be collected several times with a growing count; deduplicate on (namespace, object_name, reason, message) and take max(count)."
+    examples:
+      - sql: >-
+          SELECT namespace, object_name, reason, max(count) AS occurrences, max(last_seen) AS last_seen, any_value(message) AS message
+          FROM azure_log_analytics_kube_events
+          WHERE type = 'Warning' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1, 2, 3 ORDER BY occurrences DESC LIMIT 30
+        description: Deduplicated warning events during the incident.
+      - sql: "SELECT ts, object_name, message FROM azure_log_analytics_kube_events WHERE namespace = 'checkout' AND reason IN ('BackOff', 'OOMKilling', 'Unhealthy') ORDER BY ts DESC"
+        description: Crash loops, OOM kills and failing probes in one namespace.
+    fixtures:
+      - file: kube_events.json
+        filters: {type: Warning}
+        note: "Built strictly from the documented query response format and the KubeEvents table reference (columns/types), projected as the manifest's KQL does; no published response example exists."
+        expect_rows: 2
+        expect_columns: {namespace: checkout, object_name: checkout-api-7d9c6b5f4-x2k8p, object_kind: Pod, reason: BackOff, type: Warning, count: 14.0}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/kubeevents
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_kube_pod_inventory
+    title: Kubernetes pod / container state collected by Container insights (KubePodInventory)
+    description: >-
+      Latest KubePodInventory record per (cluster, namespace, pod, container) in the window, plus how many times
+      the container restarted INSIDE the window (restarts_in_window = max - min of ContainerRestartCount): pod phase
+      (status), container state and its reason (CrashLoopBackOff, ImagePullBackOff, OOMKilled ...), last status,
+      cumulative restarts, node (host), controller (ReplicaSet / StatefulSet ... name) and Kubernetes service.
+      Filters: cluster, namespace, pod (=, IN, LIKE), status, host, controller, kql_filter. Unlike the live
+      Kubernetes API this works for past windows (workspace retention). Rows are ordered by restarts_in_window.
+    kind: entities
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          KubePodInventory
+          {{- sf('ClusterName', filters.cluster, filters.cluster__op) }}
+          {{- sf('Namespace', filters.namespace, filters.namespace__op) }}
+          {{- sf('Name', filters.pod, filters.pod__op) }}
+          {{- sf('PodStatus', filters.status, filters.status__op) }}
+          {{- sf('Computer', filters.host, filters.host__op) }}
+          {{- sf('ControllerName', filters.controller, filters.controller__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | summarize RestartsInWindow = max(ContainerRestartCount) - min(ContainerRestartCount), arg_max(TimeGenerated, PodStatus, ContainerStatus, ContainerStatusReason, ContainerLastStatus, ContainerRestartCount, PodRestartCount, Computer, ControllerKind, ControllerName, ServiceName, PodIp, PodUid, PodCreationTimeStamp, ContainerStartTime, _ResourceId) by ClusterName, Namespace, Name, ContainerName
+          | order by RestartsInWindow desc, Namespace asc, Name asc
+          | take 5000
+      timeout_s: 200
+    filters:
+      - {column: namespace, ops: ["=", "in", "!="], fan_out: false, description: "Kubernetes namespace", examples: ["checkout"]}
+      - {column: pod, ops: ["=", "in", "like"], fan_out: false, description: "Pod name; LIKE 'checkout-api-%' for a deployment's pods", examples: ["checkout-api-7d9c6b5f4-x2k8p"]}
+      - {column: status, ops: ["=", "in", "!="], fan_out: false, description: "Pod phase: Running | Pending | Succeeded | Failed | Unknown", examples: ["Running"]}
+      - {column: host, ops: ["=", "in", "like"], fan_out: false, description: "Node name (Computer); empty for unscheduled pods", examples: ["aks-nodepool1-12345678-vmss000002"]}
+      - {column: controller, ops: ["=", "in", "like"], fan_out: false, description: "Controller name (ReplicaSet / StatefulSet / DaemonSet / Job name)", examples: ["checkout-api-7d9c6b5f4"]}
+      - {column: cluster, ops: ["=", "in"], fan_out: false, description: "Cluster name (ClusterName)", examples: ["aks-shop-prod"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on KubePodInventory", examples: ["ContainerRestartCount > 0"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, reapply: false, control_lookback: 24h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time, description: "Last inventory record in the window (collected about every minute)"}
+      - {name: cluster, path: "@r.ClusterName"}
+      - {name: namespace, path: "@r.Namespace"}
+      - {name: pod, path: "@r.Name"}
+      - {name: container, expr: "((r['ContainerName'] or '').split('/') | last) or none", description: "Container name (ContainerName is 'poduid/container')"}
+      - {name: status, path: "@r.PodStatus", description: "Pod phase (Running, Pending, Failed, ...)"}
+      - {name: container_status, path: "@r.ContainerStatus", description: "running | waiting | terminated"}
+      - {name: container_status_reason, path: "@r.ContainerStatusReason", description: "CrashLoopBackOff, ImagePullBackOff, OOMKilled, Error, Completed, ..."}
+      - {name: container_last_status, path: "@r.ContainerLastStatus", description: "Last terminated state of the container as reported by Container insights"}
+      - {name: restarts_in_window, type: BIGINT, path: "@r.RestartsInWindow", description: "Container restarts during the queried window"}
+      - {name: restarts, type: BIGINT, path: "@r.ContainerRestartCount", description: "Cumulative container restart count"}
+      - {name: pod_restarts, type: BIGINT, path: "@r.PodRestartCount", description: "Sum of restarts of all containers in the pod"}
+      - {name: host, path: "@r.Computer", description: "Node"}
+      - {name: controller_kind, path: "@r.ControllerKind"}
+      - {name: controller, path: "@r.ControllerName"}
+      - {name: service, path: "@r.ServiceName", description: "Kubernetes Service the pod belongs to (if any)"}
+      - {name: pod_ip, path: "@r.PodIp"}
+      - {name: pod_uid, path: "@r.PodUid"}
+      - {name: pod_created, type: TIMESTAMP, path: "@r.PodCreationTimeStamp", transform: auto_time}
+      - {name: container_started, type: TIMESTAMP, path: "@r.ContainerStartTime", transform: auto_time}
+      - {name: cluster_resource_id, path: "@r._ResourceId"}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 5000
+    sort_hint: "most restarts in the window first"
+    pitfalls:
+      - "restarts is cumulative since the container was created; use restarts_in_window to see crash loops during the incident."
+      - "Deleted pods keep their last record: a pod whose ts is well before the window end no longer exists (rolled out or evicted)."
+      - "Only clusters with Container insights sending to this workspace appear; Prometheus-only (managed Prometheus) setups have no KubePodInventory."
+    examples:
+      - sql: >-
+          SELECT namespace, pod, container, status, container_status_reason, restarts_in_window, host FROM azure_log_analytics_kube_pod_inventory
+          WHERE namespace = 'checkout' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND (restarts_in_window > 0 OR status <> 'Running')
+          ORDER BY restarts_in_window DESC
+        description: Pods that crash-looped or were not running during the incident.
+      - sql: >-
+          SELECT host, count(*) AS containers, sum(restarts_in_window) AS restarts FROM azure_log_analytics_kube_pod_inventory
+          GROUP BY host ORDER BY restarts DESC LIMIT 10
+        description: Which nodes host the restarting containers (node-level problem?).
+    fixtures:
+      - file: kube_pod_inventory.json
+        filters: {namespace: checkout}
+        note: "Built strictly from the documented query response format (tables[0].columns/rows) and the KubePodInventory table reference (column names and types), with the columns this table's summarize/arg_max produces; no published response example exists."
+        expect_rows: 2
+        expect_columns: {namespace: checkout, pod: checkout-api-7d9c6b5f4-x2k8p, container: checkout-api, status: Running, container_status: waiting, container_status_reason: CrashLoopBackOff, restarts_in_window: 6, restarts: 14, host: aks-nodepool1-12345678-vmss000002, controller: checkout-api-7d9c6b5f4, ts: "2026-10-01T11:59:12Z"}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/kubepodinventory
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_app_availability
+    title: Application Insights availability tests (AppAvailabilityResults) per interval
+    description: >-
+      Server-side summarize over AppAvailabilityResults (standard / URL ping / custom TrackAvailability tests):
+      one row per (time bucket, test, test location) with tests run, failures, availability (0..1), average
+      duration and one sample failure message. Answers 'was the endpoint down from the outside, from where, and
+      since when?'. Bucket = auto step unless step_s is given. Filters: test_name (=, IN, LIKE), location,
+      app_resource_id, kql_filter.
+    kind: timeseries
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          {%- macro sf(col, v, op) -%}
+          {%- if v is defined and v is not none and v != '' -%}
+          {%- if op == 'like' -%}
+          {%- for f in (v | string).replace('_', '%').split('%') if f %} | where {{ col }} contains {{ f | squote }}{% endfor -%}
+          {%- elif op == '!=' %} | where {{ col }} !in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- else %} | where {{ col }} in~ ({{ v | as_list | map('squote') | join(', ') }})
+          {%- endif -%}
+          {%- endif -%}
+          {%- endmacro -%}
+          AppAvailabilityResults
+          {{- sf('_ResourceId', filters.app_resource_id, filters.app_resource_id__op) }}
+          {{- sf('Name', filters.test_name, filters.test_name__op) }}
+          {{- sf('Location', filters.location, filters.location__op) }}
+          {%- if filters.kql_filter %} | where {{ filters.kql_filter }}{% endif %}
+          | summarize Tests = sum(ItemCount), Failures = sumif(ItemCount, Success == false), AvgDurationMs = avg(DurationMs), FailureMessage = take_anyif(Message, Success == false) by TimeGenerated = bin(TimeGenerated, {{ (filters.step_s or time.step_s) | int }}s), Name, Location
+          | order by TimeGenerated asc
+      timeout_s: 200
+    filters:
+      - {column: test_name, ops: ["=", "in", "!=", "like"], fan_out: false, description: "Availability test name (Name)", examples: ["checkout-home-page"]}
+      - {column: location, ops: ["=", "in", "!="], fan_out: false, description: "Test location display name, e.g. 'West Europe', 'East US'", examples: ["West Europe"]}
+      - {column: step_s, type: BIGINT, description: "Bucket size in seconds (default auto; tests run every 5-15 minutes, so use >= 300)", examples: ["300"]}
+      - {column: app_resource_id, ops: ["=", "in"], fan_out: false, description: "_ResourceId of the Application Insights component", examples: ["/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"]}
+      - {column: kql_filter, description: "Extra raw KQL predicate on AppAvailabilityResults", examples: ["Message has 'timeout'"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 3h, max_window: 31d, reapply: false, min_step: 300s, control_lookback: 24h}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time, description: "Bucket start"}
+      - {name: test_name, path: "@r.Name"}
+      - {name: location, path: "@r.Location", description: "Where the test ran from"}
+      - {name: tests, type: DOUBLE, path: "@r.Tests"}
+      - {name: failures, type: DOUBLE, path: "@r.Failures"}
+      - {name: availability, type: DOUBLE, expr: "(1 - (r['Failures'] | float) / (r['Tests'] | float)) if (r['Tests'] | float) > 0 else none", description: "Share of successful tests (0..1)"}
+      - {name: value, type: DOUBLE, expr: "(1 - (r['Failures'] | float) / (r['Tests'] | float)) if (r['Tests'] | float) > 0 else none", description: "Alias of availability"}
+      - {name: avg_duration_ms, type: DOUBLE, path: "@r.AvgDurationMs"}
+      - {name: message, path: "@r.FailureMessage", transform: redact, description: "One failure message from the bucket (empty when all passed)"}
+      - {name: step_s, type: BIGINT, filter_only: true}
+      - {name: app_resource_id, filter_only: true}
+      - {name: kql_filter, filter_only: true}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 20000
+    sort_hint: "ascending by bucket"
+    pitfalls:
+      - "Tests run every 5-15 minutes per location: buckets shorter than the test frequency are empty (absent), not 'up'."
+      - "A failure from a single location is often a network blip; an outage shows failures from most locations in the same bucket."
+      - "Classic URL ping tests are being retired in favour of standard tests; both land in AppAvailabilityResults."
+    examples:
+      - sql: >-
+          SELECT ts, location, availability, message FROM azure_log_analytics_app_availability
+          WHERE test_name = 'checkout-home-page' AND step_s = 300
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts, location
+        description: Availability of one test per location every 5 minutes around the incident.
+      - sql: >-
+          SELECT ts, count(*) AS locations, sum(CASE WHEN failures > 0 THEN 1 ELSE 0 END) AS failing_locations
+          FROM azure_log_analytics_app_availability WHERE test_name = 'checkout-home-page' GROUP BY ts ORDER BY ts
+        description: How many locations saw the endpoint fail in each bucket (global outage vs single location).
+    fixtures:
+      - file: app_availability.json
+        filters: {test_name: checkout-home-page}
+        note: "Built strictly from the documented query response format and the AppAvailabilityResults table reference (Name, Location, Success, DurationMs, Message, ItemCount), with the column names this table's summarize produces; no published response example exists."
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:40:00Z", test_name: checkout-home-page, location: West Europe, tests: 1.0, failures: 0.0, availability: 1.0, avg_duration_ms: 412.7}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/appavailabilityresults
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_heartbeat
+    title: Agent heartbeats (VM / Arc / AKS node liveness)
+    description: >-
+      Latest Heartbeat per computer in the window (Azure Monitor agent / Log Analytics agent report once per
+      minute): host, last heartbeat (ts), heartbeats received, OS, agent version and category, IP, Azure resource id
+      and resource group. A computer whose ts stops well before the window end went silent (VM down, agent stopped,
+      network cut). Filters: host, resource_group.
+    kind: entities
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          Heartbeat
+          {%- if filters.host %} | where Computer in~ ({{ filters.host | as_list | map('squote') | join(', ') }}){% endif %}
+          {%- if filters.resource_group %} | where ResourceGroup in~ ({{ filters.resource_group | as_list | map('squote') | join(', ') }}){% endif %}
+          | summarize Heartbeats = count(), arg_max(TimeGenerated, Category, OSType, OSName, Version, ComputerIP, Resource, ResourceGroup, ResourceType, _ResourceId, SubscriptionId) by Computer
+          | order by TimeGenerated asc
+          | take 5000
+      timeout_s: 200
+    filters:
+      - {column: host, ops: ["=", "in"], fan_out: false, variants: hostname, description: "Computer name", examples: ["web-vm-01"]}
+      - {column: resource_group, ops: ["=", "in"], fan_out: false, description: "Resource group of the machine", examples: ["rg-shop-prod"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, reapply: false, control_lookback: 24h}
+    response: *la_columnar
+    columns:
+      - {name: host, path: "@r.Computer"}
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time, description: "Last heartbeat in the window"}
+      - {name: heartbeats, type: BIGINT, path: "@r.Heartbeats", description: "Heartbeats in the window (about 1 per minute when healthy)"}
+      - {name: category, path: "@r.Category", description: "Azure Monitor Agent, Direct Agent, SCOM Agent, ..."}
+      - {name: os_type, path: "@r.OSType"}
+      - {name: os_name, path: "@r.OSName"}
+      - {name: version, path: "@r.Version", description: "Agent version"}
+      - {name: ip, path: "@r.ComputerIP"}
+      - {name: resource, path: "@r.Resource", description: "Azure resource name"}
+      - {name: resource_group, path: "@r.ResourceGroup"}
+      - {name: resource_type, path: "@r.ResourceType"}
+      - {name: resource_id, path: "@r._ResourceId"}
+      - {name: subscription_id, path: "@r.SubscriptionId"}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 5000
+    sort_hint: "oldest last heartbeat first (silent machines on top)"
+    pitfalls:
+      - "Machines that sent no heartbeat at all in the window are absent; compare against a wider window or azure_monitor_resources to find machines that went silent before it."
+      - "Heartbeat Computer names are the OS host names (short or FQDN depending on OS), not always the Azure VM name; resource holds the Azure name."
+    examples:
+      - sql: >-
+          SELECT host, ts AS last_heartbeat, heartbeats, resource_group FROM azure_log_analytics_heartbeat
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND ts < TIMESTAMP '2026-10-01 11:55:00'
+          ORDER BY last_heartbeat
+        description: Machines whose heartbeat stopped before the end of the incident window.
+    fixtures:
+      - file: heartbeat.json
+        note: "Built strictly from the documented query response format and the Heartbeat table reference (columns/types), with the column order arg_max/summarize produces; no published response example exists."
+        expect_rows: 2
+        expect_columns: {host: web-vm-02, heartbeats: 41, os_type: Linux, resource_group: rg-shop-prod, ts: "2026-10-01T11:41:02.553Z"}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/heartbeat
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_table_usage
+    title: Ingested volume per table and hour (Usage)
+    description: >-
+      The workspace's Usage table: one row per (hour, table/DataType, solution) with the ingested megabytes and
+      whether it is billable. Use it to discover which tables exist and receive data, and to tell 'no errors' from
+      'no data' (an ingestion drop shows as missing or shrinking hours). Filter table_name to one or more tables.
+    kind: timeseries
+    request:
+      method: POST
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/query"
+      body:
+        timespan: "{{ (time.start | rfc3339) ~ '/' ~ (time.end | rfc3339) }}"
+        query: |-
+          Usage
+          {%- if filters.table_name %} | where DataType in~ ({{ filters.table_name | as_list | map('squote') | join(', ') }}){% endif %}
+          | project TimeGenerated, DataType, Solution, Quantity, QuantityUnit, IsBillable, Plan, StartTime, EndTime
+          | order by TimeGenerated desc
+          | take 10000
+      timeout_s: 200
+    filters:
+      - {column: table_name, ops: ["=", "in"], fan_out: false, description: "Table name (DataType), e.g. AppRequests, ContainerLogV2, AzureDiagnostics", examples: ["AppRequests"]}
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    time: {column: ts, default_lookback: 24h, max_window: 31d, control_lookback: 3d}
+    response: *la_columnar
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@r.TimeGenerated", transform: auto_time, description: "Hour the usage record covers"}
+      - {name: table_name, path: "@r.DataType"}
+      - {name: solution, path: "@r.Solution"}
+      - {name: quantity_mb, type: DOUBLE, path: "@r.Quantity", description: "Ingested megabytes"}
+      - {name: unit, path: "@r.QuantityUnit"}
+      - {name: is_billable, type: BOOLEAN, path: "@r.IsBillable"}
+      - {name: plan, path: "@r.Plan", description: "Analytics | Basic | Auxiliary"}
+      - {name: start_time, type: TIMESTAMP, path: "@r.StartTime", transform: auto_time}
+      - {name: end_time, type: TIMESTAMP, path: "@r.EndTime", transform: auto_time}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 10000
+    sort_hint: "newest hour first"
+    pitfalls:
+      - "Usage is aggregated per hour and lags ingestion; the current hour is incomplete."
+    examples:
+      - sql: >-
+          SELECT table_name, sum(quantity_mb) AS mb, max(ts) AS last_hour FROM azure_log_analytics_table_usage
+          GROUP BY 1 ORDER BY mb DESC
+        description: Which tables exist and receive data (last 24 h).
+      - sql: >-
+          SELECT ts, quantity_mb FROM azure_log_analytics_table_usage
+          WHERE table_name = 'AppRequests' AND ts >= TIMESTAMP '2026-09-30 12:00:00' ORDER BY ts
+        description: Did AppRequests ingestion drop during the incident (telemetry gap vs real outage)?
+    fixtures:
+      - file: query_usage.json
+        filters: {table_name: Usage}
+        note: "Verbatim 200 response of the official example 'A simple POST query on a workspace' (Usage | take 10, la-post-example.json): the same Usage columns this table projects (Plan is absent in that older example, so plan is null)."
+        expect_rows: 2
+        expect_columns: {ts: "2017-08-24T06:59:59Z", table_name: Perf, solution: LogManagement, quantity_mb: 0.076408, is_billable: true, plan: null}
+    docs_url: https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/usage
+
+  # ------------------------------------------------------------------------------------------
+  - name: azure_log_analytics_schema
+    title: Workspace schema (tables and their columns)
+    description: >-
+      The workspace metadata (GET /v1/workspaces/{id}/metadata): one row per table with its description, timespan
+      column, related solutions and the column list (name, type, isPreferredFacet) as JSON. Use it before writing
+      KQL against an unfamiliar table, especially custom _CL tables and resource-specific diagnostic tables.
+    kind: entities
+    request:
+      method: GET
+      path: "/v1/workspaces/{{ filters.workspace_id or env.AZURE_LOG_ANALYTICS_WORKSPACE_ID }}/metadata"
+      timeout_s: 120
+    filters:
+      - {column: workspace_id, description: "Workspace GUID override", examples: ["63613592-b6f7-4c3d-a390-22ba13102111"]}
+    response:
+      rows_path: "$.tables[*]"
+    columns:
+      - {name: table_name, path: name}
+      - {name: id, path: id}
+      - {name: description, path: description}
+      - {name: timespan_column, path: timespanColumn}
+      - {name: columns, type: JSON, path: columns, description: "[{name, type, description, isPreferredFacet}]"}
+      - {name: column_names, expr: "(_.columns or []) | map(attribute='name') | join(', ')", description: "Comma-separated column names"}
+      - {name: solutions, type: JSON, path: "related.solutions"}
+      - {name: workspace_id, filter_only: true}
+    max_rows: 5000
+    pitfalls:
+      - "The metadata payload is large for workspaces with many solutions; filter in SQL (WHERE table_name LIKE 'App%')."
+      - "A table listed here may still have no recent data; check azure_log_analytics_table_usage."
+    examples:
+      - sql: "SELECT table_name, column_names FROM azure_log_analytics_schema WHERE table_name LIKE '%_CL' OR table_name LIKE 'App%'"
+        description: Custom log tables and Application Insights tables with their columns.
+    fixtures:
+      - file: metadata.json
+        note: "Verbatim 200 response of the official example 'Metadata GET request' (Metadata - Get, v1 REST reference; metadata-get.json in the Log Analytics data-plane spec)."
+        expect_min_rows: 1
+        expect_columns: {table_name: ADAssessmentRecommendation, columns: {not_null: true}}
+    docs_url: https://learn.microsoft.com/en-us/rest/api/logsquery/metadata/get?view=rest-logsquery-v1
+
+roles:
+  logs:
+    - table: azure_log_analytics_app_traces
+      filters:
+        service: "{{ service }}"
+        severity_level: "{{ [3, 4] if error_only else '' }}"
+      columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id}
+      notes: "Application Insights / OpenTelemetry logs; severity_level >= 3 for errors."
+    - table: azure_log_analytics_container_logs
+      filters:
+        namespace: "{{ namespace }}"
+        pod: "{{ pod }}"
+        level: "{{ ['ERROR', 'CRITICAL'] if error_only else '' }}"
+      columns: {ts: ts, message: message, level: level, host: host, namespace: namespace, pod: pod, container: container}
+      notes: "AKS stdout/stderr (ContainerLogV2)."
+  log_counts:
+    table: azure_log_analytics_log_counts
+    filters: {service: "{{ service }}"}
+    columns: {ts: ts, value: count, count: count, level: level, service: service}
+  traces:
+    - table: azure_log_analytics_app_requests
+      filters:
+        service: "{{ service }}"
+        success: "{{ false if error_only else '' }}"
+      columns: {ts: ts, service: service, resource: resource, duration_ms: duration_ms, status_code: status_code, trace_id: trace_id, span_id: span_id, host: host}
+    - table: azure_log_analytics_app_dependencies
+      filters:
+        service: "{{ service }}"
+        success: "{{ false if error_only else '' }}"
+      columns: {ts: ts, service: service, resource: resource, duration_ms: duration_ms, status_code: status_code, trace_id: trace_id, span_id: span_id, target: target}
+  trace_detail:
+    table: azure_log_analytics_trace
+    columns: {ts: ts, trace_id: trace_id, span_id: span_id, parent_id: parent_id, service: service, duration_ms: duration_ms, resource: resource, message: message}
+  service_map:
+    table: azure_log_analytics_app_dependency_map
+    columns: {source: service, service: service, target: target, type: dependency_type, requests: calls, errors: failures, ts: ts}
+  services:
+    table: azure_log_analytics_app_services
+    columns: {service: service, ts: ts, version: versions}
+  errors:
+    table: azure_log_analytics_app_exception_groups
+    filters: {service: "{{ service }}"}
+    columns: {ts: ts, service: service, title: title, count: occurrences, message: message, id: problem_id}
+  k8s_logs:
+    table: azure_log_analytics_container_logs
+    filters: {namespace: "{{ namespace }}", pod: "{{ pod }}", container: "{{ container }}"}
+    columns: {ts: ts, message: message, level: level, namespace: namespace, pod: pod, container: container}
+    notes: "Container insights ContainerLogV2; there is no 'previous container' switch - look at the rows just before the restart."
+  k8s_state:
+    table: azure_log_analytics_kube_pod_inventory
+    filters: {namespace: "{{ namespace }}"}
+    columns: {pod: pod, namespace: namespace, phase: status, restarts: restarts_in_window, waiting: container_status_reason, reason: container_status_reason, terminated: container_last_status, node: host, container: container, service: service, ts: ts}
+    notes: "Container insights KubePodInventory: latest state per container in the window; restarts = restarts inside the window (restarts column is cumulative)."
+  k8s_events:
+    table: azure_log_analytics_kube_events
+    filters: {type: Warning, namespace: "{{ namespace }}"}
+    columns: {ts: ts, namespace: namespace, type: type, reason: reason, message: message, object: object_name, kind: object_kind, count: count}
+  hosts:
+    table: azure_log_analytics_heartbeat
+    filters: {host: "{{ host }}"}
+    columns: {host: host, ts: ts, health: heartbeats}
+    notes: "Agent liveness: a host whose last heartbeat is well before the window end went silent."

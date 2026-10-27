@@ -1,0 +1,32 @@
+{
+  "status": "success",
+  "data": {
+    "resultType": "streams",
+    "result": [
+      {
+        "stream": {
+          "job": "payment-service",
+          "service": "payment-service",
+          "level": "error",
+          "service_name": "payment-service",
+          "timestamp": "2026-10-01T11:42:31.123Z",
+          "level_extracted": "error",
+          "service_extracted": "payment-service",
+          "method": "POST",
+          "path": "/api/payments",
+          "status": "503",
+          "duration_ms": "1840.5",
+          "trace_id": "0af7651916cd43dd8448eb211c80319c",
+          "message": "database connection timeout"
+        },
+        "values": [
+          [
+            "1790854951123000000",
+            "{\"timestamp\": \"2026-10-01T11:42:31.123Z\", \"level\": \"error\", \"service\": \"payment-service\", \"method\": \"POST\", \"path\": \"/api/payments\", \"status\": 503, \"duration_ms\": 1840.5, \"trace_id\": \"0af7651916cd43dd8448eb211c80319c\", \"message\": \"database connection timeout\"}"
+          ]
+        ]
+      }
+    ],
+    "stats": {}
+  }
+}

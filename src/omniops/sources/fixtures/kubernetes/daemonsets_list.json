@@ -1,0 +1,68 @@
+{
+ "kind": "DaemonSetList",
+ "apiVersion": "apps/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "kube-proxy",
+    "namespace": "kube-system",
+    "uid": "6b2c3d4e-0000-4000-8000-000000000006",
+    "generation": 1,
+    "creationTimestamp": "2026-09-30T20:00:00Z",
+    "labels": {
+     "k8s-app": "kube-proxy"
+    }
+   },
+   "spec": {
+    "selector": {
+     "matchLabels": {
+      "k8s-app": "kube-proxy"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "k8s-app": "kube-proxy"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "kube-proxy",
+        "image": "registry.k8s.io/kube-proxy:v1.35.0"
+       }
+      ],
+      "nodeSelector": {
+       "kubernetes.io/os": "linux"
+      },
+      "tolerations": [
+       {
+        "operator": "Exists"
+       }
+      ]
+     }
+    },
+    "updateStrategy": {
+     "type": "RollingUpdate",
+     "rollingUpdate": {
+      "maxUnavailable": 1,
+      "maxSurge": 0
+     }
+    }
+   },
+   "status": {
+    "currentNumberScheduled": 3,
+    "numberMisscheduled": 0,
+    "desiredNumberScheduled": 3,
+    "numberReady": 3,
+    "observedGeneration": 1,
+    "updatedNumberScheduled": 3,
+    "numberAvailable": 3
+   }
+  }
+ ]
+}

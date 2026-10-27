@@ -1,0 +1,24 @@
+{
+ "data": [
+  {
+   "log": "Alert acknowledged via web",
+   "type": "system",
+   "owner": "neo@opsgenie.com",
+   "createdAt": "2017-04-12T12:27:52.838Z",
+   "offset": "1492000072838_1492000072838234593"
+  },
+  {
+   "log": "Viewed on [web]",
+   "type": "alertRecipient",
+   "owner": "trinity@opsgenie.com",
+   "createdAt": "2017-04-12T12:27:46.379Z",
+   "offset": "1492000066378_1492000066379000127"
+  }
+ ],
+ "requestId": "174abe1b-e2a8-48d6-a747-05f012760988",
+ "took": 0.456,
+ "paging": {
+  "next": "https://api.opsgenie.com/v2/alerts/ee624ed0-3ee0-45be-9c9d-e7667eaf21e5/logs?identifierType=id&offset=1492000072838_1492000072838234593&direction=next&limit=2&order=desc",
+  "first": "https://api.opsgenie.com/v2/alerts/ee624ed0-3ee0-45be-9c9d-e7667eaf21e5/logs?identifierType=id&limit=2&order=desc"
+ }
+}

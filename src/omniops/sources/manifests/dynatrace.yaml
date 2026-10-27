@@ -1,0 +1,1308 @@
+# Dynatrace Environment API v2 ("classic" API, Api-Token auth).
+# Research notes, doc URLs and pitfalls: docs/sources/dynatrace.md
+# Grail / DQL (platform API, platform token) lives in a separate source: dynatrace_grail.yaml
+#
+# Global pagination note (engine gap, see docs/sources/dynatrace.md): Dynatrace rejects follow-up
+# pages that repeat any query parameter next to nextPageKey ("must not be used in combination with
+# nextPageKey"), and the engine's cursor pagination keeps the first request's parameters. Every
+# nextPageKey table therefore asks for ONE maximum-size page and exposes `has_more` so truncation is
+# visible. Log search uses nextSliceKey, which the API documents as "all other parameters are
+# ignored", so it paginates normally.
+source: dynatrace
+display_name: Dynatrace (Environment API v2)
+vendor: Dynatrace LLC
+description: >-
+  Dynatrace Environment API v2: metric queries (metric selector), metric descriptors, monitored
+  entities and Smartscape relationships, Davis problems (root cause, evidence, impact, comments),
+  events (deployments, config changes, restarts), classic log search/aggregation, SLOs, audit log
+  and releases.
+docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api
+categories: [metrics, logs, alerts, incidents, events, changes, topology, slo]
+base_url: "{{ env.DT_ENV_URL }}"
+env:
+  - name: DT_ENV_URL
+    description: >-
+      Environment API base URL WITHOUT /api/v2. SaaS: https://{env-id}.live.dynatrace.com
+      (NOT the *.apps.dynatrace.com platform URL); Managed: https://{domain}/e/{env-id};
+      Environment ActiveGate: https://{activegate}:9999/e/{env-id}
+  - name: DT_API_TOKEN
+    description: >-
+      Classic access token (dt0c01.*) sent as "Authorization: Api-Token <token>". Read scopes used:
+      metrics.read, entities.read, problems.read, events.read, logs.read, slo.read, auditLogs.read,
+      releases.read
+    secret: true
+required_env: [DT_ENV_URL, DT_API_TOKEN]
+auth:
+  type: headers
+  headers:
+    Authorization: "Api-Token {{ env.DT_API_TOKEN }}"
+headers:
+  Accept: application/json
+rate_limit:
+  concurrency: 4
+  notes: >-
+    No fixed per-minute quota for reads: every environment has a bounded request thread pool +
+    queue (10 s queue timeout); when both are full the API returns HTTP 429. Expensive calls
+    (relationship fields, wide entity selectors, many-metric selectors) hit it first.
+retention:
+  metrics: 5y (Metrics Classic; resolution coarsens with age)
+  logs: 35d (Log Monitoring Classic)
+  problems_events: 1-3y (Davis problems and events)
+  traces: 10d
+errors:
+  - path: "$.error.message"
+    non_empty: true
+    message: "$.error"
+    hint: "Dynatrace ErrorEnvelope in a 2xx body: read constraintViolations, fix the selector or parameter"
+ui_base_url: "{{ env.DT_ENV_URL }}"
+pitfalls:
+  - "Timestamps in this API are UTC epoch MILLISECONDS (from/to, startTime, timestamps[]). The engine sends epoch ms; never pass seconds."
+  - "Selectors are case-sensitive except entityName.* (case-insensitive) and problem/SLO text(). Status-like values come back UPPERCASE (OPEN, CLOSED, ERROR): compare in SQL with upper-case literals."
+  - "An unknown metric dimension key, entity type or tag does NOT fail: it returns empty data (metrics add a `warnings` entry). Discover first: dynatrace_metric_descriptors (dimension keys), dynatrace_entity_types (types, properties, relationships), dynatrace_entities (names/ids)."
+  - "Single-page tables: Dynatrace forbids repeating parameters next to nextPageKey, so each nextPageKey table fetches one max-size page. If `has_more` is true, narrow the selector or time window instead of trusting totals."
+  - "Entity ids (SERVICE-..., HOST-..., PROCESS_GROUP_INSTANCE-...) are the join keys between tables; names are not unique."
+  - "Selector values are double-quoted with ~ as the escape character (~\" and ~~); the tables escape filter values for you. Raw *_selector filters are passed through verbatim, so escape them yourself."
+  - "builtin:service.response.time is in MICROseconds; divide by 1000 for ms."
+  - "This is the Classic API. Environments on 'latest Dynatrace' (Grail + Smartscape) should prefer the dynatrace_grail source (DQL); Metrics API v2 is not supported there."
+query_languages:
+  dynatrace_metric_selector: >-
+    Metric selector: metric key followed by ':'-chained transformations, max 10 metrics per query.
+    builtin:service.response.time:filter(eq("dt.entity.service","SERVICE-5D53A2A6A1F2C3B4")):splitBy("dt.entity.service"):avg:names
+    Common: :splitBy("dim",...) (group; :splitBy() = total), :filter(eq("dim","v")|in("dim",entitySelector("type(SERVICE),tag(\"env:prod\")"))|prefix("dim","v")|and(..)|or(..)|not(..)),
+    aggregation :avg :min :max :sum :count :median :percentile(95) :value, :fold(avg) (one value
+    per series), :sort(value(avg,descending)):limit(10) (top-N), :rate(1m), :default(0), :names (adds
+    "<dim>.name" to dimensions). Group several keys: builtin:host.cpu.(usage,idle). Keys with symbols
+    are double-quoted with ~ escapes. Key metrics: builtin:service.response.time (µs),
+    builtin:service.errors.total.rate (%), builtin:service.errors.fivexx.count,
+    builtin:service.requestCount.total, builtin:host.cpu.usage (%), builtin:host.mem.usage (%),
+    builtin:host.disk.usedPct, builtin:tech.generic.cpu.usage, builtin:kubernetes.container.restarts,
+    builtin:kubernetes.container.oom_kills.
+  dynatrace_entity_selector: >-
+    Entity selector: exactly one of type("SERVICE") | entityId("SERVICE-1","SERVICE-2") (same type),
+    plus comma-separated (AND) criteria: entityName("contains") entityName.startsWith("x")
+    entityName.equals("x") entityName.in("a","b") (names case-insensitive), tag("[context]key:value")
+    mzName("zone") mzId(123) healthState("UNHEALTHY") <property>("v") <property>.exists()
+    fromRelationships.calls(type(SERVICE),entityName("db")) toRelationships.runsOn(...) not(...).
+    Quote values containing ( ) or ,. Max 2,000 chars. Types: SERVICE, HOST, PROCESS_GROUP,
+    PROCESS_GROUP_INSTANCE, APPLICATION, KUBERNETES_CLUSTER, CLOUD_APPLICATION (k8s workload),
+    CLOUD_APPLICATION_NAMESPACE, SYNTHETIC_TEST, HTTP_CHECK, DISK.
+  dynatrace_log_search: >-
+    Classic log search language (Log Monitoring Classic): attribute="value" pairs joined with AND /
+    OR and parentheses; bare words search content (spaces = AND); "a phrase" searches content;
+    attr!="v"; trailing wildcard only (host.name="web-*"); attribute names case-sensitive, values
+    case-insensitive; max 20 relations. Examples: status="ERROR" AND log.source="/var/log/app.log";
+    content="timeout" AND host.name="ip-10-0-1-17*"; k8s.namespace.name="shop" AND status="WARN".
+  dynatrace_problem_selector: >-
+    Problem selector (comma = AND, values inside one criterion = OR, all values quoted):
+    status("open"|"closed") severityLevel("ERROR","AVAILABILITY","PERFORMANCE","RESOURCE_CONTENTION","CUSTOM_ALERT","MONITORING_UNAVAILABLE","INFO")
+    impactLevel("SERVICES","APPLICATION","INFRASTRUCTURE","ENVIRONMENT") rootCauseEntity("id")
+    affectedEntities("id") impactedEntities("id") affectedEntityTypes("SERVICE") problemId("id")
+    displayId("P-123") managementZones("name") entityTags("key:value") underMaintenance(false)
+    text("<=30 chars"). Escape ~ and " with ~.
+  dynatrace_event_selector: >-
+    Event selector: eventType("CUSTOM_DEPLOYMENT") (ONE type per query) status("OPEN"|"CLOSED")
+    entityId("id-1","id-2") eventId("id") correlationId("id") managementZoneId("123")
+    underMaintenance(true) suppressAlert(true) suppressProblem(true) frequentEvent(true)
+    property.<key>("v") (filterable properties only). Comma = AND.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_metrics
+    title: Metric data points (metric selector)
+    description: >-
+      Query metric data points with a Dynatrace metric selector. One row per (metric, series,
+      timestamp). Filter on metric_selector (required) and ts; optionally scope with service,
+      host, entity_id or a raw entity_selector. Resolution defaults to ~300 points over the window
+      (minimum 1m); set resolution = 'Inf' for one value per series. Use for latency/error-rate/
+      throughput/CPU curves around an incident.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/v2/metrics/query
+      query:
+        metricSelector: "{{ filters.metric_selector }}"
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        resolution: "{{ filters.resolution or ((([time.step_s, 60] | max) // 60) ~ 'm') }}"
+        entitySelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- macro ql(v) -%}{% for x in v | as_list %}{{ ',' if not loop.first }}{{ q(x) }}{% endfor %}{%- endmacro -%}{% if filters.entity_selector %}{{ filters.entity_selector }}{% elif filters.entity_id %}entityId({{ ql(filters.entity_id) }}){% elif filters.service %}type("SERVICE"),entityName.equals({{ q(filters.service) }}){% elif filters.host %}type("HOST"),entityName.equals({{ q(filters.host) }}){% endif %}
+        mzSelector: "{{ filters.mz_selector }}"
+    filters:
+      - column: metric_selector
+        required: true
+        description: "Metric selector (metric key + transformations), max 10 metric keys"
+        examples: ['builtin:service.response.time:splitBy("dt.entity.service"):avg:names']
+      - column: resolution
+        description: "Resolution: '5m', '1h', 'Inf' (one value per series) or a point count like '120'. Default: ~300 points, >= 1m"
+        examples: ['5m']
+      - column: entity_selector
+        description: "Raw entity selector scoping the primary entity, e.g. type(SERVICE),tag(\"env:prod\")"
+        examples: ['type("SERVICE"),tag("env:prod")']
+      - column: entity_id
+        ops: ["=", "in"]
+        fan_out: false
+        description: "Primary entity id(s), all of one type (SERVICE-..., HOST-...)"
+        examples: ['SERVICE-5D53A2A6A1F2C3B4']
+      - column: service
+        description: "Service display name (entityName.equals, case-insensitive); only for builtin:service.* style metrics"
+        examples: ['checkout-service']
+      - column: host
+        variants: hostname
+        description: "Host display name (entityName.equals); only for host-level metrics"
+        examples: ['ip-10-0-1-17.eu-west-1.compute.internal']
+      - column: mz_selector
+        description: "Management-zone scope, e.g. mzName(\"shop-prod\")"
+    time: {column: ts, default_lookback: 1h, max_window: 30d, retention: 1825d}
+    response:
+      rows_path: "$.result[*]"
+      expand:
+        - {explode: "data", as: s, keep_empty: true}
+        - {zip: {t: "@s.timestamps", v: "@s.values"}, as: p, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.t", transform: epoch_ms, description: "Slot END timestamp (UTC); NULL on a placeholder row for a metric that returned no series"}
+      - {name: value, type: DOUBLE, path: "@p.v", description: "Data point value (null = no data in slot); unit as in dynatrace_metric_descriptors"}
+      - {name: metric, path: metricId, description: "Metric key as resolved, including transformations"}
+      - {name: dimensions, type: JSON, path: "@s.dimensionMap", description: "Series dimensions, e.g. dimensions->>'dt.entity.service'; with :names also dimensions->>'dt.entity.service.name'"}
+      - {name: entity_id, path: "@s.dimensions[0]", description: "Value of dimension index 0 (the primary entity id for builtin metrics)"}
+      - {name: series_warnings, type: JSON, path: warnings, description: "Per-metric warnings, e.g. unknown dimension key (explains empty data)"}
+      - {name: warnings, type: JSON, path: "$.warnings", description: "Query-level warnings"}
+      - {name: resolution_used, path: "$.resolution", description: "Resolution actually used by Dynatrace"}
+      - {name: resolution, filter_only: true, description: "Requested resolution"}
+      - {name: metric_selector, filter_only: true}
+      - {name: entity_selector, filter_only: true}
+      - {name: service, filter_only: true, description: "Service name filter (filled from the filter)"}
+      - {name: host, filter_only: true, description: "Host name filter (filled from the filter)"}
+      - {name: mz_selector, filter_only: true}
+    sort_hint: "Rows are grouped per metric and series, timestamps ascending within a series."
+    pitfalls:
+      - "A metric whose selector matches nothing yields ONE placeholder row with NULL ts/value and the reason in series_warnings/warnings; a ts predicate in SQL removes that row, so check warnings when you get 0 rows."
+      - "Timestamps are slot END times; values are per-slot aggregates (default aggregation unless you append :avg/:max/:percentile(..))."
+      - "Count metrics (requestCount, errors.*.count) are per slot: SUM them over the window, do not AVG; rates (errors.total.rate) are percentages."
+      - "Without :splitBy() the metric is split by all its default dimensions; use :splitBy() for one total series or :splitBy(\"dt.entity.service\") per service."
+      - "Max 10 metrics per selector, 100,000 series and 10,080 points per series per query; prefer :fold or :sort(...):limit(N) for top-N questions."
+      - "service/host filters translate to entitySelector type(SERVICE|HOST),entityName.equals(...): they only work when the metric's primary entity is that type."
+    examples:
+      - sql: >-
+          SELECT dimensions->>'dt.entity.service.name' AS service, max(value) / 1000 AS peak_ms, arg_max(ts, value) AS peak_at
+          FROM dynatrace_metrics
+          WHERE metric_selector = 'builtin:service.response.time:splitBy("dt.entity.service"):percentile(95):names:sort(value(max,descending)):limit(10)'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak_ms DESC
+        description: Top-10 services by p95 latency in the incident hour, with when each peaked.
+      - sql: >-
+          SELECT ts, value AS failure_rate_pct FROM dynatrace_metrics
+          WHERE metric_selector = 'builtin:service.errors.total.rate:splitBy():avg' AND service = 'checkout-service'
+          ORDER BY ts
+        description: Failure-rate curve of one service by name over the analysis window.
+      - sql: >-
+          SELECT entity_id, value FROM dynatrace_metrics
+          WHERE metric_selector = 'builtin:host.cpu.usage:splitBy("dt.entity.host"):max:fold(max)' AND resolution = 'Inf'
+          ORDER BY value DESC LIMIT 5
+        description: Hosts with the highest CPU peak in the window (one value per host).
+    tests:
+      - {sql: "SELECT count(*) AS n FROM dynatrace_metrics WHERE metric_selector = 'builtin:host.cpu.usage:splitBy():avg'", min_rows: 1}
+    fixtures:
+      - file: metrics_query_cpu.json
+        note: "Verbatim example response of GET /api/v2/metrics/query (builtin:host.cpu.(usage,idle), 2 hosts) from the official docs page."
+        filters: {metric_selector: "builtin:host.cpu.(usage,idle)"}
+        expect_rows: 12
+        expect_columns: {ts: "2020-05-14T11:35:00Z", value: 81.0, metric: "builtin:host.cpu.idle", entity_id: "HOST-0990886B7D39FE29"}
+      - file: metrics_query_fold.json
+        note: "Verbatim :fold example response from the official docs page (one data point per series)."
+        filters: {metric_selector: "builtin:host.cpu.(usage,idle):fold"}
+        expect_rows: 4
+        expect_columns: {ts: "2020-05-14T11:22:00Z", value: 79.0, resolution_used: "1m"}
+      - file: metrics_query_reference.json
+        note: "Verbatim 'Response body JSON model' from the official docs page: second metric has empty data + a warning (exercises the placeholder row)."
+        filters: {metric_selector: "builtin:host.disk.avail,builtin:host.cpu.idle"}
+        expect_rows: 7
+        expect_columns: {metric: "builtin:host.disk.avail", value: 11.1, entity_id: "HOST-F1266E1D0AAC2C3C"}
+      - file: error_envelope.json
+        note: "Verbatim ErrorEnvelope JSON model from the official docs (shared by every Environment API v2 endpoint); proves the source-level 2xx error rule fires instead of returning 0 rows."
+        filters: {metric_selector: "builtin:host.cpu.usage"}
+        expect_error: constraintViolations
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/metric-v2/get-data-points
+    ui_link: "{{ source.base_url }}/ui/data-explorer"
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_metric_descriptors
+    title: Metric descriptors (catalog)
+    description: >-
+      Metric catalog: one row per metric with unit, dimension keys, entity types, default
+      aggregation and last-written time. Filter on metric (exact key, comma list, or LIKE prefix
+      'builtin:service.%') or text (free-text search over key/name/description). Use BEFORE
+      dynatrace_metrics to get dimension keys and units right.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/metrics
+      query:
+        metricSelector: "{{ filters.metric | as_list | join(',') | replace('%', '*') if filters.metric else None }}"
+        text: "{{ filters.text }}"
+        writtenSince: "{{ filters.written_since }}"
+        metadataSelector: "{{ filters.metadata_selector }}"
+        fields: "+aggregationTypes,+defaultAggregation,+dimensionDefinitions,+entityType,+lastWritten,+created,+metricValueType,+rootCauseRelevant,+impactRelevant,+tags,+transformations,+latency,+resolutionInfSupported"
+        pageSize: 500
+    filters:
+      - column: metric
+        ops: ["=", "in", "like"]
+        fan_out: false
+        description: "Metric key(s); LIKE 'builtin:service.%' becomes the selector wildcard builtin:service.*"
+        examples: ['builtin:service.%']
+      - column: text
+        description: "Free-text search over key, display name and description"
+        examples: ['response time']
+      - column: written_since
+        description: "Only metrics with data since this time (epoch ms or now-2h)"
+        examples: ['now-2h']
+      - column: metadata_selector
+        description: "e.g. unit(\"MicroSecond\"),dimensionKey(\"dt.entity.service\")"
+    response:
+      rows_path: "$.metrics[*]"
+    columns:
+      - {name: metric, path: metricId}
+      - {name: display_name, path: displayName}
+      - {name: description, path: description}
+      - {name: unit, path: unit, description: "Unit, e.g. MicroSecond, Percent, Count, Byte"}
+      - {name: entity_types, type: JSON, path: entityType, description: "Primary entity types usable in entitySelector type(...)"}
+      - {name: dimension_keys, expr: "(_.dimensionDefinitions | map(attribute='key') | join(',')) if _.dimensionDefinitions else none", description: "Comma-separated dimension keys for :splitBy/:filter"}
+      - {name: dimensions, type: JSON, path: dimensionDefinitions}
+      - {name: aggregation_types, type: JSON, path: aggregationTypes}
+      - {name: default_aggregation, path: "defaultAggregation.type"}
+      - {name: transformations, type: JSON, path: transformations}
+      - {name: last_written, type: TIMESTAMP, path: lastWritten, transform: epoch_ms, description: "Last time data was written (NULL for metric expressions)"}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: metric_value_type, path: "metricValueType.type", description: "error | score | unknown"}
+      - {name: root_cause_relevant, type: BOOLEAN, path: rootCauseRelevant}
+      - {name: impact_relevant, type: BOOLEAN, path: impactRelevant}
+      - {name: latency_min, type: BIGINT, path: latency, description: "Expected reporting delay in minutes"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')", description: "True when more metrics exist beyond this single 500-row page: narrow the filter"}
+      - {name: text, filter_only: true}
+      - {name: written_since, filter_only: true}
+      - {name: metadata_selector, filter_only: true}
+    pitfalls:
+      - "Without metric/text this lists the first 500 of thousands of metrics: always filter."
+      - "lastWritten NULL or old means the metric has no recent data in this environment; pick another key."
+    examples:
+      - sql: "SELECT metric, unit, dimension_keys, default_aggregation FROM dynatrace_metric_descriptors WHERE metric LIKE 'builtin:service.errors.%'"
+        description: Which service error metrics exist, their units and splittable dimensions.
+      - sql: "SELECT metric, display_name, unit, last_written FROM dynatrace_metric_descriptors WHERE text = 'kafka' ORDER BY last_written DESC"
+        description: Find custom/extension metrics by keyword and check they are still reported.
+    fixtures:
+      - file: metric_descriptors_reference.json
+        note: "Verbatim MetricDescriptorCollection JSON model from the official docs page."
+        filters: {metric: "builtin:host.cpu.user"}
+        expect_rows: 2
+        expect_columns: {metric: 'builtin:host.cpu.user:splitBy("dt.entity.host"):max:fold', unit: Percent, dimension_keys: dt.entity.host, default_aggregation: value, last_written: "2020-08-14T10:25:17Z", has_more: true}
+      - file: metric_descriptors_example.json
+        note: "Verbatim example response (fields=unit,aggregationTypes, metricSelector=builtin:*) from the official docs page."
+        filters: {metric: "builtin:%"}
+        expect_rows: 4
+        expect_columns: {metric: builtin:host.cpu.idle, unit: Percent}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/metric-v2/get-all-metrics
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_entities
+    title: Monitored entities (services, hosts, process groups, ...)
+    description: >-
+      Monitored entities seen in the time window, one row per entity, with tags, management zones
+      and properties. Filter on type (default SERVICE), name (= exact, LIKE 'x%' prefix, LIKE
+      '%x%' contains), entity_id, tag, or a raw entity_selector. Use to resolve a service/host name
+      to its entity id, check health and tags, or list what exists.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/entities
+      query:
+        entitySelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- macro ql(v) -%}{% for x in v | as_list %}{{ ',' if not loop.first }}{{ q(x) }}{% endfor %}{%- endmacro -%}{%- macro names(n) -%}{% if n is string and n %}{% set segs = n.split('%') | select | list %}{% if '%' not in n %},entityName.equals({{ q(n) }}){% elif n.endswith('%') and not n.startswith('%') and segs | length == 1 %},entityName.startsWith({{ q(segs[0]) }}){% elif segs %},entityName({{ q(segs | first) }}){% endif %}{% elif n %},entityName.in({{ ql(n) }}){% endif %}{%- endmacro -%}{% if filters.entity_selector %}{{ filters.entity_selector }}{% else %}{% if filters.entity_id %}entityId({{ ql(filters.entity_id) }}){% else %}type({{ q(filters.type or 'SERVICE') }}){% endif %}{{ names(filters.name) }}{% if filters.tag %},tag({{ ql(filters.tag) }}){% endif %}{% if filters.health_state %},healthState({{ q(filters.health_state | upper) }}){% endif %}{% if filters.management_zone %},mzName({{ q(filters.management_zone) }}){% endif %}{% endif %}
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        fields: "{{ filters.fields or '+lastSeenTms,+firstSeenTms,+tags,+managementZones,+properties' }}"
+        pageSize: 500
+        sort: name
+    filters:
+      - column: type
+        description: "Entity type: SERVICE (default), HOST, PROCESS_GROUP, PROCESS_GROUP_INSTANCE, APPLICATION, KUBERNETES_CLUSTER, CLOUD_APPLICATION, CLOUD_APPLICATION_NAMESPACE, SYNTHETIC_TEST, ..."
+        examples: [SERVICE]
+      - column: name
+        ops: ["=", "in", "like"]
+        fan_out: false
+        description: "Display name: = (case-insensitive equals), IN, LIKE 'x%' (starts with) or LIKE '%x%' (contains)"
+        examples: ['checkout%']
+      - column: entity_id
+        ops: ["=", "in"]
+        fan_out: false
+        description: "Entity id(s) of one type"
+        examples: ['SERVICE-5D53A2A6A1F2C3B4']
+      - column: tag
+        description: "Tag in [context]key:value, key:value or value form (escape ':' inside values with a backslash)"
+        examples: ['env:prod']
+      - column: health_state
+        description: "HEALTHY | UNHEALTHY (has open problems)"
+        examples: [UNHEALTHY]
+      - column: management_zone
+        description: "Management zone name (exact)"
+      - column: entity_selector
+        description: "Raw entity selector; overrides all other entity filters"
+        examples: ['type("SERVICE"),fromRelationships.runsOnHost(type("HOST"),entityName("ip-10-0-1-17"))']
+      - column: fields
+        description: "Override fields (default +lastSeenTms,+firstSeenTms,+tags,+managementZones,+properties)"
+    time: {column: ts, default_lookback: 72h, max_window: 400d}
+    response:
+      rows_path: "$.entities[*]"
+    columns:
+      - {name: entity_id, path: entityId}
+      - {name: name, path: displayName}
+      - {name: type, expr: "_.type or (_.entityId.split('-')[0] if _.entityId else none)", description: "Entity type (from the id prefix when not returned)"}
+      - {name: first_seen, type: TIMESTAMP, path: firstSeenTms, transform: epoch_ms}
+      - {name: last_seen, type: TIMESTAMP, path: lastSeenTms, transform: epoch_ms}
+      - {name: tags, type: JSON, path: tags, description: "Tag objects {context,key,value,stringRepresentation}"}
+      - {name: tag_list, expr: "(_.tags | map(attribute='stringRepresentation') | join(', ')) if _.tags else none", description: "Tags as text, e.g. 'env:prod, [KUBERNETES]app:checkout'"}
+      - {name: management_zones, expr: "(_.managementZones | map(attribute='name') | join(', ')) if _.managementZones else none"}
+      - {name: properties, type: JSON, path: properties, description: "Type-specific properties, e.g. properties->>'serviceType', properties->>'osType'"}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')", description: "More than 500 matches: narrow the selector"}
+      - {name: health_state, filter_only: true}
+      - {name: tag, filter_only: true}
+      - {name: management_zone, filter_only: true}
+      - {name: entity_selector, filter_only: true}
+      - {name: fields, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Observation window (entities seen between start and end)"}
+    sort_hint: "Sorted by display name."
+    pitfalls:
+      - "Only entities seen in the time window are returned (API default would be 3 days); widen the window for rarely active entities."
+      - "Names are not unique (e.g. one service name per process group); join other tables on entity_id."
+      - "LIKE '%x%' is pushed down as entityName(\"x\") (contains); LIKE 'x%' as entityName.startsWith; other LIKE shapes are filtered locally."
+      - "SERVICE_METHOD entities include only key requests, top baselined requests and requests that caused problems."
+    examples:
+      - sql: "SELECT entity_id, name, last_seen, tag_list FROM dynatrace_entities WHERE type = 'SERVICE' AND name LIKE '%checkout%'"
+        description: Resolve a service name to its entity id(s).
+      - sql: "SELECT entity_id, name, properties->>'osType' AS os, tag_list FROM dynatrace_entities WHERE type = 'HOST' AND health_state = 'UNHEALTHY'"
+        description: Hosts that currently have open problems.
+    tests:
+      - {sql: "SELECT entity_id, name FROM dynatrace_entities WHERE type = 'SERVICE' LIMIT 5", min_rows: 1}
+    fixtures:
+      - file: entities_services.json
+        note: "Verbatim example response (type(SERVICE) in a management zone, fields=lastSeenTms,properties.serviceTechnologyTypes) from the official docs page."
+        filters: {type: SERVICE}
+        expect_rows: 3
+        expect_columns: {entity_id: SERVICE-1125C375A187D27A, name: dotNetBackend_easyTravel_x64, type: SERVICE, last_seen: "2020-05-27T20:00:32Z", has_more: true}
+      - file: entities_reference.json
+        note: "Verbatim EntitiesList JSON model from the official docs page (host with tags, management zone, relationships)."
+        filters: {type: HOST}
+        expect_rows: 1
+        expect_columns: {entity_id: HOST-06F288EE2A930951, name: my host, type: HOST, tag_list: "architecture:x86, [ENVIRONMENT]Infrastructure:Linux", management_zones: main app}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/entity-v2/get-entities-list
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_relationships_out
+    title: Topology edges where the selected entities are the FROM side
+    description: >-
+      Smartscape edges (from_id -[relationship]-> to_id) for entities matching the selector, read
+      from fromRelationships. For SERVICE entities: relationship 'calls' = downstream services it
+      calls, 'runsOn' = process group, 'runsOnHost' = host, 'runsOnProcessGroupInstance'. Filter on
+      type/name/entity_id/entity_selector like dynatrace_entities, and on relationship.
+      UNION with dynatrace_relationships_in for the full neighbourhood.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/entities
+      query:
+        entitySelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- macro ql(v) -%}{% for x in v | as_list %}{{ ',' if not loop.first }}{{ q(x) }}{% endfor %}{%- endmacro -%}{%- macro names(n) -%}{% if n is string and n %}{% set segs = n.split('%') | select | list %}{% if '%' not in n %},entityName.equals({{ q(n) }}){% elif n.endswith('%') and not n.startswith('%') and segs | length == 1 %},entityName.startsWith({{ q(segs[0]) }}){% elif segs %},entityName({{ q(segs | first) }}){% endif %}{% elif n %},entityName.in({{ ql(n) }}){% endif %}{%- endmacro -%}{% if filters.entity_selector %}{{ filters.entity_selector }}{% else %}{% if filters.from_id %}entityId({{ ql(filters.from_id) }}){% else %}type({{ q(filters.from_type or 'SERVICE') }}){% endif %}{{ names(filters.from_name) }}{% if filters.tag %},tag({{ ql(filters.tag) }}){% endif %}{% endif %}
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        fields: "+fromRelationships"
+        pageSize: 500
+    filters:
+      - {column: from_type, description: "Type of the FROM entities (default SERVICE)", examples: [SERVICE]}
+      - {column: from_name, ops: ["=", "in", "like"], fan_out: false, description: "FROM entity display name (= / IN / LIKE)", examples: ['checkout-service']}
+      - {column: from_id, ops: ["=", "in"], fan_out: false, description: "FROM entity id(s)", examples: ['SERVICE-5D53A2A6A1F2C3B4']}
+      - {column: tag, description: "Tag filter on the FROM entities", examples: ['env:prod']}
+      - {column: entity_selector, description: "Raw entity selector for the FROM entities"}
+      - {column: relationship, ops: ["=", "in"], fan_out: false, description: "Relationship name, filtered locally (calls, runsOn, runsOnHost, isProcessOf, isInstanceOf, ...)", examples: [calls]}
+    time: {column: ts, default_lookback: 72h, max_window: 400d}
+    response:
+      rows_path: "$.entities[*]"
+      expand:
+        - {entries: fromRelationships, as: r}
+        - {explode: "@r.value", as: e}
+    columns:
+      - {name: from_id, path: entityId}
+      - {name: from_name, path: displayName}
+      - {name: from_type, expr: "_.type or (_.entityId.split('-')[0] if _.entityId else none)"}
+      - {name: relationship, path: "@r.key"}
+      - {name: to_id, path: "@e.id"}
+      - {name: to_type, path: "@e.type"}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')"}
+      - {name: tag, filter_only: true}
+      - {name: entity_selector, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "to_name is not returned: join dynatrace_entities on entity_id = to_id for names."
+      - "Requesting relationships for many entities is expensive and may be throttled (HTTP 429): scope the selector."
+    examples:
+      - sql: "SELECT from_name, to_id FROM dynatrace_relationships_out WHERE from_name = 'checkout-service' AND relationship = 'calls'"
+        description: Downstream services called by checkout-service.
+      - sql: >-
+          SELECT o.from_name AS caller, e.name AS callee
+          FROM dynatrace_relationships_out o JOIN dynatrace_entities e ON e.entity_id = o.to_id
+          WHERE o.from_type = 'SERVICE' AND o.relationship = 'calls' AND e.type = 'SERVICE'
+        description: Whole service call graph with names (service map).
+    fixtures:
+      - file: entities_single_service.json
+        note: "EntitiesList envelope (schema from the GET entities list docs) wrapping the verbatim 'GET an entity' example entity SERVICE-1125C375A187D27A from the official docs."
+        filters: {from_type: SERVICE}
+        expect_rows: 6
+        expect_columns: {from_id: SERVICE-1125C375A187D27A, relationship: calls, to_id: SERVICE-775060208AAA1058, to_type: SERVICE, has_more: false}
+      - file: entities_reference.json
+        note: "Verbatim EntitiesList JSON model from the official docs page (host isInstanceOf host group)."
+        filters: {from_type: HOST}
+        expect_rows: 1
+        expect_columns: {from_id: HOST-06F288EE2A930951, relationship: isInstanceOf, to_id: HOST_GROUP-0E489369D663A4BF, to_type: HOST_GROUP}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/entity-v2/get-entities-list
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_relationships_in
+    title: Topology edges where the selected entities are the TO side
+    description: >-
+      Smartscape edges (from_id -[relationship]-> to_id) pointing AT the entities matching the
+      selector, read from toRelationships. For a SERVICE, relationship 'calls' lists its callers
+      (upstream services/applications). Filter on to_type/to_name/to_id/entity_selector and on
+      relationship.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/entities
+      query:
+        entitySelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- macro ql(v) -%}{% for x in v | as_list %}{{ ',' if not loop.first }}{{ q(x) }}{% endfor %}{%- endmacro -%}{%- macro names(n) -%}{% if n is string and n %}{% set segs = n.split('%') | select | list %}{% if '%' not in n %},entityName.equals({{ q(n) }}){% elif n.endswith('%') and not n.startswith('%') and segs | length == 1 %},entityName.startsWith({{ q(segs[0]) }}){% elif segs %},entityName({{ q(segs | first) }}){% endif %}{% elif n %},entityName.in({{ ql(n) }}){% endif %}{%- endmacro -%}{% if filters.entity_selector %}{{ filters.entity_selector }}{% else %}{% if filters.to_id %}entityId({{ ql(filters.to_id) }}){% else %}type({{ q(filters.to_type or 'SERVICE') }}){% endif %}{{ names(filters.to_name) }}{% if filters.tag %},tag({{ ql(filters.tag) }}){% endif %}{% endif %}
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        fields: "+toRelationships"
+        pageSize: 500
+    filters:
+      - {column: to_type, description: "Type of the TO entities (default SERVICE)", examples: [SERVICE]}
+      - {column: to_name, ops: ["=", "in", "like"], fan_out: false, description: "TO entity display name", examples: ['payment-service']}
+      - {column: to_id, ops: ["=", "in"], fan_out: false, description: "TO entity id(s)", examples: ['SERVICE-9A1B2C3D4E5F6071']}
+      - {column: tag, description: "Tag filter on the TO entities"}
+      - {column: entity_selector, description: "Raw entity selector for the TO entities"}
+      - {column: relationship, ops: ["=", "in"], fan_out: false, description: "Relationship name, filtered locally", examples: [calls]}
+    time: {column: ts, default_lookback: 72h, max_window: 400d}
+    response:
+      rows_path: "$.entities[*]"
+      expand:
+        - {entries: toRelationships, as: r}
+        - {explode: "@r.value", as: e}
+    columns:
+      - {name: from_id, path: "@e.id"}
+      - {name: from_type, path: "@e.type"}
+      - {name: relationship, path: "@r.key"}
+      - {name: to_id, path: entityId}
+      - {name: to_name, path: displayName}
+      - {name: to_type, expr: "_.type or (_.entityId.split('-')[0] if _.entityId else none)"}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')"}
+      - {name: tag, filter_only: true}
+      - {name: entity_selector, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT from_id, from_type FROM dynatrace_relationships_in WHERE to_name = 'payment-service' AND relationship = 'calls'"
+        description: Who calls payment-service (upstream blast radius).
+    fixtures:
+      - file: entities_single_service.json
+        note: "EntitiesList envelope wrapping the verbatim 'GET an entity' example entity from the official docs (2 callers)."
+        filters: {to_type: SERVICE}
+        expect_rows: 2
+        expect_columns: {from_id: SERVICE-D20E300A0A6814EF, relationship: calls, to_id: SERVICE-1125C375A187D27A, to_name: dotNetBackend_easyTravel_x64}
+      - file: entities_reference.json
+        note: "Verbatim EntitiesList JSON model from the official docs page (disk isDiskOf host)."
+        filters: {to_type: HOST}
+        expect_rows: 1
+        expect_columns: {from_id: DISK-0393340DCA3853B0, relationship: isDiskOf, to_id: HOST-06F288EE2A930951}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/entity-v2/get-entities-list
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_entity_types
+    title: Entity types (schema of the topology)
+    description: >-
+      One row per monitored entity type with its dimension key, properties and possible
+      relationships. Use to learn valid type("...") values, property names for entity selectors
+      and relationship names (calls, runsOn, isProcessOf, ...).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/entityTypes
+      query: {pageSize: 500}
+    response:
+      rows_path: "$.types[*]"
+    columns:
+      - {name: type, path: type}
+      - {name: display_name, path: displayName}
+      - {name: dimension_key, path: dimensionKey, description: "Dimension key used in metrics, e.g. dt.entity.service"}
+      - {name: properties, type: JSON, path: properties}
+      - {name: from_relationships, type: JSON, path: fromRelationships, description: "[{id, toTypes}] where this type is FROM"}
+      - {name: to_relationships, type: JSON, path: toRelationships, description: "[{id, fromTypes}] where this type is TO"}
+      - {name: from_relationship_names, expr: "(_.fromRelationships | map(attribute='id') | join(',')) if _.fromRelationships else none"}
+      - {name: to_relationship_names, expr: "(_.toRelationships | map(attribute='id') | join(',')) if _.toRelationships else none"}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')"}
+    examples:
+      - sql: "SELECT type, dimension_key, from_relationship_names, to_relationship_names FROM dynatrace_entity_types WHERE type IN ('SERVICE', 'HOST', 'PROCESS_GROUP_INSTANCE')"
+        description: Relationship names available for the core types.
+    fixtures:
+      - file: entity_types_example.json
+        note: "Verbatim example response of GET /api/v2/entityTypes from the official docs page (truncated to 3 types by the docs)."
+        expect_rows: 3
+        expect_columns: {type: APPLICATION, from_relationship_names: calls, has_more: false}
+      - file: entity_types_reference.json
+        note: "Verbatim EntityTypeList JSON model from the official docs page."
+        expect_rows: 1
+        expect_columns: {type: HOST, from_relationship_names: "RUNS_ON_RESOURCE,IS_NETWORK_CLIENT_OF_HOST", has_more: true}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/entity-v2/get-all-entity-types
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_problems
+    title: Davis problems
+    description: >-
+      Davis problems whose start OR end falls in the window, one row per problem, newest first:
+      title, status (OPEN/CLOSED), severity, impact level, root-cause entity, affected/impacted
+      entities, tags, Kubernetes context. Filter on status, severity, impact_level, id,
+      display_id, root_cause_entity_id, service, text, or raw problem_selector / entity_selector.
+      Then use dynatrace_problem_evidence / _impacts / _comments with the problem id.
+    kind: incidents
+    request:
+      method: GET
+      path: /api/v2/problems
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        pageSize: 500
+        sort: "-startTime"
+        problemSelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- macro ql(v) -%}{% for x in v | as_list %}{{ ',' if not loop.first }}{{ q(x) }}{% endfor %}{%- endmacro -%}{%- set s -%}{% if filters.problem_selector %},{{ filters.problem_selector }}{% endif %}{% if filters.status %},status({{ q(filters.status | lower) }}){% endif %}{% if filters.severity %},severityLevel({{ ql(filters.severity | as_list | map('upper') | list) }}){% endif %}{% if filters.impact_level %},impactLevel({{ ql(filters.impact_level | as_list | map('upper') | list) }}){% endif %}{% if filters.id %},problemId({{ ql(filters.id) }}){% endif %}{% if filters.display_id %},displayId({{ ql(filters.display_id) }}){% endif %}{% if filters.root_cause_entity_id %},rootCauseEntity({{ ql(filters.root_cause_entity_id) }}){% endif %}{% if filters.affected_entity_id %},affectedEntities({{ ql(filters.affected_entity_id) }}){% endif %}{% if filters.text %},text({{ q(filters.text) }}){% endif %}{% if filters.management_zone %},managementZones({{ q(filters.management_zone) }}){% endif %}{%- endset -%}{{ s[1:] }}
+        entitySelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{% if filters.entity_selector %}{{ filters.entity_selector }}{% elif filters.service %}type("SERVICE"),entityName.equals({{ q(filters.service) }}){% endif %}
+    filters:
+      - {column: status, description: "OPEN | CLOSED", examples: [OPEN]}
+      - {column: severity, ops: ["=", "in"], fan_out: false, description: "AVAILABILITY, ERROR, PERFORMANCE, RESOURCE_CONTENTION, CUSTOM_ALERT, MONITORING_UNAVAILABLE, INFO", examples: [ERROR]}
+      - {column: impact_level, ops: ["=", "in"], fan_out: false, description: "SERVICES, APPLICATION, INFRASTRUCTURE, ENVIRONMENT"}
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "Problem id (problemId, not the P-... display id)"}
+      - {column: display_id, ops: ["=", "in"], fan_out: false, description: "Display id, e.g. P-24101234", examples: ['P-24101234']}
+      - {column: root_cause_entity_id, ops: ["=", "in"], fan_out: false, description: "Root-cause entity id"}
+      - {column: affected_entity_id, ops: ["=", "in"], fan_out: false, description: "Problems affecting these entity ids"}
+      - {column: service, description: "Problems on a service (entitySelector type(SERVICE),entityName.equals)", examples: ['checkout-service']}
+      - {column: text, description: "Relevance text search over titles, event titles, display id and entity ids (max 30 chars)", examples: ['checkout']}
+      - {column: management_zone, description: "Management zone name (contains, case-insensitive)"}
+      - {column: problem_selector, description: "Raw problem selector (AND-ed with the other filters)", examples: ['underMaintenance(false)']}
+      - {column: entity_selector, description: "Raw entity selector scoping the problems"}
+    time: {column: ts, default_lookback: 2h, max_window: 365d, reapply: false}
+    response:
+      rows_path: "$.problems[*]"
+    columns:
+      - {name: id, path: problemId, description: "Problem id (use for evidence/impacts/comments)"}
+      - {name: display_id, path: displayId, description: "P-xxxxx shown in the UI"}
+      - {name: title, path: title}
+      - {name: status, path: status, description: "OPEN | CLOSED"}
+      - {name: severity, path: severityLevel}
+      - {name: impact_level, path: impactLevel}
+      - {name: ts, type: TIMESTAMP, path: startTime, transform: epoch_ms, description: "Problem start; ts predicates set the API window (start OR end inside) and are not re-applied"}
+      - {name: start_ts, type: TIMESTAMP, path: startTime, transform: epoch_ms, description: "Copy of the problem start that IS filtered locally (use it for 'started after X')"}
+      - {name: end_ts, type: TIMESTAMP, expr: "_.endTime if _.endTime and _.endTime > 0 else none", transform: epoch_ms, description: "Problem end (NULL while OPEN; the API sends -1)"}
+      - {name: duration_ms, type: DOUBLE, expr: "(_.endTime - _.startTime) if _.endTime and _.endTime > 0 and _.startTime else none", description: "Duration of closed problems"}
+      - {name: root_cause_entity_id, path: "rootCauseEntity.entityId.id"}
+      - {name: root_cause_entity_name, path: "rootCauseEntity.name"}
+      - {name: root_cause_entity_type, path: "rootCauseEntity.entityId.type"}
+      - name: service
+        expr: >-
+          filters.service if filters.service and filters.service in ((_.affectedEntities or []) + (_.impactedEntities or [])) | map(attribute='name') | list
+          else ((_.affectedEntities or []) | selectattr('entityId.type', 'equalto', 'SERVICE') | map(attribute='name') | first)
+        description: "First affected SERVICE name (or the service filter when it matches)"
+      - {name: affected_entities, expr: "(_.affectedEntities | map(attribute='name') | join(', ')) if _.affectedEntities else none"}
+      - {name: affected_entity_ids, type: JSON, expr: "(_.affectedEntities | map(attribute='entityId.id') | list) if _.affectedEntities else none"}
+      - {name: impacted_entities, expr: "(_.impactedEntities | map(attribute='name') | join(', ')) if _.impactedEntities else none"}
+      - {name: tags, expr: "(_.entityTags | map(attribute='stringRepresentation') | join(', ')) if _.entityTags else none"}
+      - {name: management_zones, expr: "(_.managementZones | map(attribute='name') | join(', ')) if _.managementZones else none"}
+      - {name: k8s_cluster, expr: "_['k8s.cluster.name'] | join(',') if _['k8s.cluster.name'] else none"}
+      - {name: namespace, expr: "_['k8s.namespace.name'] | join(',') if _['k8s.namespace.name'] else none"}
+      - {name: linked_problem_id, path: "linkedProblemInfo.problemId"}
+      - {name: alerting_profiles, expr: "(_.problemFilters | map(attribute='name') | join(', ')) if _.problemFilters else none"}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')", description: "More than 500 problems matched: narrow the window or selector"}
+      - {name: affected_entity_id, filter_only: true}
+      - {name: text, filter_only: true}
+      - {name: management_zone, filter_only: true}
+      - {name: problem_selector, filter_only: true}
+      - {name: entity_selector, filter_only: true}
+    sort_hint: "Newest start first (sort=-startTime)."
+    pitfalls:
+      - "ts predicates only set the API window (from/to): Dynatrace returns every problem whose start OR end falls inside it, and the engine does NOT re-apply ts in SQL (time.reapply false), so a problem that started before the window but closed inside it is kept. To restrict to problems that STARTED in the window, filter the copy column start_ts (applied locally), e.g. start_ts >= TIMESTAMP '...'."
+      - "An OPEN problem that started before the window and is still open may be missing (neither its start nor end is in the window): query status = 'OPEN' with a wider ts window (e.g. 24h) to see everything still open."
+      - "id (problemId) and display_id (P-...) differ; detail/evidence/comment endpoints need id."
+      - "Status, severity and impact values are UPPERCASE."
+      - "Merged/linked problems: check linked_problem_id before counting incidents."
+    examples:
+      - sql: "SELECT display_id, title, severity, ts, root_cause_entity_name, affected_entities FROM dynatrace_problems WHERE status = 'OPEN' ORDER BY ts DESC"
+        description: Currently open problems with Davis root cause.
+      - sql: >-
+          SELECT display_id, title, status, ts, end_ts, duration_ms / 60000 AS minutes
+          FROM dynatrace_problems WHERE service = 'checkout-service'
+          ORDER BY ts DESC
+        description: Problems involving one service in the window (includes closed ones).
+    tests:
+      - {sql: "SELECT id, title FROM dynatrace_problems LIMIT 5", min_rows: 0}
+    fixtures:
+      - file: problems_reference.json
+        note: "Verbatim 'Problems' JSON model from the official docs page (placeholder values)."
+        expect_rows: 1
+        expect_columns: {id: string, status: CLOSED, severity: AVAILABILITY, ts: "1970-01-01T00:00:00Z", has_more: true}
+      - file: problems_schema_realistic.json
+        note: "Built strictly from the documented Problems/Problem/EntityStub/METag schema (docs only show placeholder values): one OPEN service problem, one CLOSED host problem."
+        expect_rows: 2
+        expect_columns: {id: "-2045823616914785224_1727778600000V2", display_id: P-24101234, status: OPEN, end_ts: null, root_cause_entity_name: payment-service, service: checkout-service, namespace: shop, ts: "2024-10-01T10:30:00Z"}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/problems-v2/problems/get-problems-list
+    ui_link: "{{ source.base_url }}/#problems"
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_problem_evidence
+    title: Root-cause evidence of a problem
+    description: >-
+      Davis root-cause evidence for one or more problems (problem id required): one row per
+      evidence item - metric change points (value before/after), events (deployments, restarts,
+      config changes), transactional degradations, availability and maintenance windows - with the
+      entity it was found on and whether it is root-cause relevant.
+    kind: events
+    request:
+      method: GET
+      path: "/api/v2/problems/{{ filters.problem_id | urlencode }}"
+      query:
+        fields: evidenceDetails
+    filters:
+      - {column: problem_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Problem id from dynatrace_problems.id (not the P-... display id)", examples: ['-2045823616914785224_1727778600000V2']}
+    response:
+      rows_path: "$.evidenceDetails.details[*]"
+    columns:
+      - {name: problem_id, path: "$.problemId"}
+      - {name: display_id, path: "$.displayId"}
+      - {name: evidence_type, path: evidenceType, description: "EVENT | METRIC | TRANSACTIONAL | AVAILABILITY_EVIDENCE | MAINTENANCE_WINDOW"}
+      - {name: title, path: displayName}
+      - {name: root_cause_relevant, type: BOOLEAN, path: rootCauseRelevant}
+      - {name: entity_id, path: "entity.entityId.id"}
+      - {name: entity_name, path: "entity.name"}
+      - {name: entity_type, path: "entity.entityId.type"}
+      - {name: grouping_entity_name, path: "groupingEntity.name"}
+      - {name: ts, type: TIMESTAMP, path: startTime, transform: epoch_ms}
+      - {name: end_ts, type: TIMESTAMP, expr: "_.endTime if _.endTime and _.endTime > 0 else none", transform: epoch_ms}
+      - {name: metric, path: metricId, description: "METRIC evidence: metric key"}
+      - {name: value_before, type: DOUBLE, path: valueBeforeChangePoint}
+      - {name: value_after, type: DOUBLE, path: valueAfterChangePoint}
+      - {name: unit, path: unit}
+      - {name: event_id, path: eventId, description: "EVENT evidence: event id (join dynatrace_events.id)"}
+      - {name: event_type, path: eventType, description: "EVENT evidence: e.g. CUSTOM_DEPLOYMENT, PROCESS_RESTART"}
+      - {name: event_properties, type: JSON, expr: "dict(_.data.properties | map('dictsort') | map('map', attribute=1) | map('list') | list) if _.data and _.data.properties else none"}
+      - {name: maintenance_window_id, path: maintenanceWindowConfigId}
+      - {name: details, type: JSON, path: ".", description: "The full evidence object"}
+    pitfalls:
+      - "Evidence is Davis' reasoning, not ground truth: verify METRIC evidence against dynatrace_metrics and EVENT evidence (e.g. deployments) against dynatrace_events."
+      - "unit is the metric unit (MicroSecond for response time)."
+    examples:
+      - sql: >-
+          SELECT evidence_type, title, entity_name, ts, metric, value_before, value_after, unit, event_type
+          FROM dynatrace_problem_evidence WHERE problem_id = '-2045823616914785224_1727778600000V2'
+          ORDER BY root_cause_relevant DESC, ts
+        description: Root-cause evidence chain of one problem, root-cause items first.
+    fixtures:
+      - file: problem_details_models.json
+        note: "Problem object from the official GET problem details docs with evidenceDetails.details = the five verbatim Evidence JSON models (AVAILABILITY_EVIDENCE, EVENT, MAINTENANCE_WINDOW, METRIC, TRANSACTIONAL) from the official Problems API v2 JSON models page."
+        filters: {problem_id: string}
+        expect_rows: 5
+        expect_columns: {evidence_type: AVAILABILITY_EVIDENCE, root_cause_relevant: true, problem_id: string}
+      - file: problem_details_reference.json
+        note: "Verbatim Problem JSON model from the official GET problem details docs page."
+        filters: {problem_id: string}
+        expect_rows: 1
+        expect_columns: {evidence_type: AVAILABILITY_EVIDENCE, title: string}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/problems-v2/problems/get-problem-details
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_problem_impacts
+    title: Impact analysis of a problem
+    description: >-
+      Impact analysis for one or more problems (problem id required): one row per impacted
+      service/application with estimated affected users and potentially affected service calls.
+    kind: generic
+    request:
+      method: GET
+      path: "/api/v2/problems/{{ filters.problem_id | urlencode }}"
+      query:
+        fields: impactAnalysis
+    filters:
+      - {column: problem_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Problem id from dynatrace_problems.id", examples: ['-2045823616914785224_1727778600000V2']}
+    response:
+      rows_path: "$.impactAnalysis.impacts[*]"
+    columns:
+      - {name: problem_id, path: "$.problemId"}
+      - {name: impact_type, path: impactType, description: "SERVICE | APPLICATION | MOBILE | CUSTOM_APPLICATION"}
+      - {name: entity_id, path: "impactedEntity.entityId.id"}
+      - {name: entity_name, path: "impactedEntity.name"}
+      - {name: entity_type, path: "impactedEntity.entityId.type"}
+      - {name: estimated_affected_users, type: BIGINT, path: estimatedAffectedUsers}
+      - {name: affected_service_calls, type: BIGINT, path: numberOfPotentiallyAffectedServiceCalls, description: "SERVICE impacts only"}
+    examples:
+      - sql: "SELECT impact_type, entity_name, estimated_affected_users, affected_service_calls FROM dynatrace_problem_impacts WHERE problem_id = '-2045823616914785224_1727778600000V2' ORDER BY estimated_affected_users DESC"
+        description: User and call impact of a problem.
+    fixtures:
+      - file: problem_details_models.json
+        note: "Problem object with impactAnalysis.impacts = the four verbatim Impact JSON models (APPLICATION, CUSTOM_APPLICATION, MOBILE, SERVICE) from the official Problems API v2 JSON models page."
+        filters: {problem_id: string}
+        expect_rows: 4
+        expect_columns: {impact_type: APPLICATION, estimated_affected_users: 5}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/problems-v2/problems/get-problem-details
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_problem_comments
+    title: Comments on a problem
+    description: >-
+      Human comments on one or more problems (problem id required): who wrote what and when. Often
+      contains the on-call's findings, links to tickets and mitigation notes.
+    kind: text
+    request:
+      method: GET
+      path: "/api/v2/problems/{{ filters.problem_id | urlencode }}/comments"
+      query: {pageSize: 500}
+    filters:
+      - {column: problem_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Problem id from dynatrace_problems.id", examples: ['-2045823616914785224_1727778600000V2']}
+    response:
+      rows_path: "$.comments[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: ts, type: TIMESTAMP, path: createdAtTimestamp, transform: epoch_ms}
+      - {name: author, path: authorName}
+      - {name: message, path: content}
+      - {name: context, path: context}
+      - {name: problem_id, filter_only: true}
+    examples:
+      - sql: "SELECT ts, author, message FROM dynatrace_problem_comments WHERE problem_id = '-2045823616914785224_1727778600000V2' ORDER BY ts"
+        description: Comment timeline of a problem.
+    fixtures:
+      - file: problem_comments_reference.json
+        note: "Verbatim CommentsList JSON model from the official docs page (placeholder values)."
+        filters: {problem_id: string}
+        expect_rows: 1
+        expect_columns: {author: string, ts: "1970-01-01T00:00:00Z", problem_id: string}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/problems-v2/comments/get-all
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_events
+    title: Events (deployments, config changes, restarts, Davis events)
+    description: >-
+      Events in the window, one row per event: CUSTOM_DEPLOYMENT, CUSTOM_CONFIGURATION,
+      CUSTOM_INFO, CUSTOM_ANNOTATION, PROCESS_RESTART, Davis anomaly events (e.g.
+      SERVICE_ERROR_RATE_INCREASED, OSI_HIGH_CPU), Kubernetes and synthetic events. Filter on
+      event_type (one type per request; IN fans out), status, entity_id, service, id or raw
+      event_selector / entity_selector. Deployment fields (version, deployment_name, release_stage,
+      ci_link) are extracted from properties.
+    kind: changes
+    request:
+      method: GET
+      path: /api/v2/events
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        pageSize: 1000
+        eventSelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- macro ql(v) -%}{% for x in v | as_list %}{{ ',' if not loop.first }}{{ q(x) }}{% endfor %}{%- endmacro -%}{%- set s -%}{% if filters.event_selector %},{{ filters.event_selector }}{% endif %}{% if filters.event_type %},eventType({{ q(filters.event_type) }}){% endif %}{% if filters.status %},status({{ q(filters.status | upper) }}){% endif %}{% if filters.entity_id %},entityId({{ ql(filters.entity_id) }}){% endif %}{% if filters.id %},eventId({{ ql(filters.id) }}){% endif %}{% if filters.correlation_id %},correlationId({{ ql(filters.correlation_id) }}){% endif %}{%- endset -%}{{ s[1:] }}
+        entitySelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{% if filters.entity_selector %}{{ filters.entity_selector }}{% elif filters.service %}type("SERVICE"),entityName.equals({{ q(filters.service) }}){% endif %}
+    filters:
+      - {column: event_type, ops: ["=", "in"], max_fan_out: 8, description: "Event type (one per request; IN fans out). See dynatrace_event_types", examples: [CUSTOM_DEPLOYMENT]}
+      - {column: status, description: "OPEN | CLOSED"}
+      - {column: entity_id, ops: ["=", "in"], fan_out: false, description: "Related entity id(s)", examples: ['PROCESS_GROUP_INSTANCE-03F98EA8639FD052']}
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "Event id(s)"}
+      - {column: correlation_id, ops: ["=", "in"], fan_out: false}
+      - {column: service, description: "Events on a SERVICE entity with this name", examples: ['checkout-service']}
+      - {column: event_selector, description: "Raw event selector, e.g. property.dt.event.deployment.release_stage(\"production\")"}
+      - {column: entity_selector, description: "Raw entity selector, e.g. type(\"PROCESS_GROUP\"),tag(\"app:checkout\")"}
+    time: {column: ts, default_lookback: 2h, max_window: 365d}
+    response:
+      rows_path: "$.events[*]"
+    columns:
+      - {name: id, path: eventId}
+      - {name: ts, type: TIMESTAMP, path: startTime, transform: epoch_ms, description: "Event start"}
+      - {name: end_ts, type: TIMESTAMP, path: endTime, transform: epoch_ms, description: "Event end (NULL while active)"}
+      - {name: event_type, path: eventType}
+      - {name: title, path: title}
+      - {name: status, path: status, description: "OPEN | CLOSED"}
+      - {name: entity_id, path: "entityId.entityId.id"}
+      - {name: entity_name, path: "entityId.name"}
+      - {name: entity_type, path: "entityId.entityId.type"}
+      - {name: service, expr: "filters.service if filters.service else (_.entityId.name if _.entityId and _.entityId.entityId and _.entityId.entityId.type == 'SERVICE' else none)", description: "Entity name when the event is on a SERVICE"}
+      - {name: properties, type: JSON, expr: "dict(_.properties | map('dictsort') | map('map', attribute=1) | map('list') | list) if _.properties else none", description: "Event properties as an object: properties->>'dt.event.deployment.version'"}
+      - {name: version, expr: "(_.properties | selectattr('key', 'equalto', 'dt.event.deployment.version') | map(attribute='value') | first) if _.properties else none", description: "dt.event.deployment.version"}
+      - {name: deployment_name, expr: "(_.properties | selectattr('key', 'equalto', 'dt.event.deployment.name') | map(attribute='value') | first) if _.properties else none"}
+      - {name: release_stage, expr: "(_.properties | selectattr('key', 'equalto', 'dt.event.deployment.release_stage') | map(attribute='value') | first) if _.properties else none"}
+      - {name: ci_link, expr: "(_.properties | selectattr('key', 'equalto', 'dt.event.deployment.ci_back_link') | map(attribute='value') | first) if _.properties else none"}
+      - {name: tags, expr: "(_.entityTags | map(attribute='stringRepresentation') | join(', ')) if _.entityTags else none"}
+      - {name: management_zones, expr: "(_.managementZones | map(attribute='name') | join(', ')) if _.managementZones else none"}
+      - {name: correlation_id, path: correlationId}
+      - {name: under_maintenance, type: BOOLEAN, path: underMaintenance}
+      - {name: suppress_alert, type: BOOLEAN, path: suppressAlert}
+      - {name: suppress_problem, type: BOOLEAN, path: suppressProblem}
+      - {name: frequent_event, type: BOOLEAN, path: frequentEvent}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')", description: "More than 1000 events matched: narrow event_type/window"}
+      - {name: event_selector, filter_only: true}
+      - {name: entity_selector, filter_only: true}
+    sort_hint: "API order (newest first); sort in SQL."
+    pitfalls:
+      - "eventSelector accepts ONE eventType per request; event_type IN (...) fans out into one request per type."
+      - "Without event_type the window returns every event type (often thousands of Davis/K8s events): filter."
+      - "Deployment metadata lives in properties (dt.event.deployment.version/name/release_stage/ci_back_link/remediation_action_link, dt.event.deployment.release_product, dt.event.deployment.release_build_version); whatever the CI sent is what you get."
+      - "Deployments are usually attached to PROCESS_GROUP / PROCESS_GROUP_INSTANCE or SERVICE entities; filtering by service only finds events attached to the SERVICE itself."
+    examples:
+      - sql: >-
+          SELECT ts, entity_name, version, deployment_name, release_stage, ci_link
+          FROM dynatrace_events WHERE event_type IN ('CUSTOM_DEPLOYMENT', 'CUSTOM_CONFIGURATION')
+          ORDER BY ts DESC
+        description: Deployments and configuration changes in the window (change correlation).
+      - sql: "SELECT ts, entity_name, title FROM dynatrace_events WHERE event_type = 'PROCESS_RESTART' ORDER BY ts"
+        description: Process restarts around the incident.
+    tests:
+      - {sql: "SELECT id, event_type FROM dynatrace_events WHERE event_type = 'CUSTOM_DEPLOYMENT' LIMIT 5", min_rows: 0}
+    fixtures:
+      - file: events_example.json
+        note: "Example response of GET /api/v2/events (eventType PROCESS_RESTART) from the official docs page; one trailing comma removed so it is valid JSON, otherwise verbatim."
+        filters: {event_type: PROCESS_RESTART}
+        expect_rows: 2
+        expect_columns: {id: "-6475311485380369979_1628500180000", event_type: PROCESS_RESTART, ts: "2021-08-09T09:09:40Z", entity_type: PROCESS_GROUP_INSTANCE, status: OPEN, under_maintenance: true, has_more: false}
+      - file: events_reference.json
+        note: "Verbatim EventList JSON model from the official docs page."
+        filters: {event_type: LOW_DISK_SPACE}
+        expect_rows: 1
+        expect_columns: {event_type: LOW_DISK_SPACE, title: High CPU load on host X, correlation_id: 933613657e1c8fcf, has_more: true}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/events-v2/get-events
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_event_types
+    title: Event types
+    description: All event types that can be raised in the environment, with severity level. Use to pick a valid event_type for dynatrace_events.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/eventTypes
+      query: {pageSize: 500}
+    response:
+      rows_path: "$.eventTypeInfos[*]"
+    columns:
+      - {name: event_type, path: type}
+      - {name: display_name, path: displayName}
+      - {name: severity, path: severityLevel}
+      - {name: description, path: description}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')"}
+    examples:
+      - sql: "SELECT event_type, display_name, severity FROM dynatrace_event_types WHERE event_type LIKE 'CUSTOM_%' OR event_type LIKE '%DEPLOY%'"
+        description: Change-related event types.
+    fixtures:
+      - file: event_types_example.json
+        note: "Verbatim example response of GET /api/v2/eventTypes?pageSize=3 from the official docs page."
+        expect_rows: 3
+        expect_columns: {event_type: APPLICATION_UNEXPECTED_LOW_LOAD, severity: AVAILABILITY, has_more: true}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/events-v2/get-event-types
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_logs
+    title: Log search (Log Monitoring Classic)
+    description: >-
+      Log records matching a classic log search query, newest first, max 1,000 per slice (follows
+      nextSliceKey). Filter on query (Dynatrace search query language), level (status), host,
+      log_source and ts. Deprecated endpoint (removed end of 2027); on Grail-enabled environments
+      prefer dynatrace_grail_logs.
+    kind: logs
+    request:
+      method: GET
+      path: /api/v2/logs/search
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        limit: "{{ [limit or 1000, 1000] | min }}"
+        sort: "-timestamp"
+        query: >-
+          {%- set s -%}{% if filters.query %} AND ({{ filters.query }}){% endif %}{% if filters.level %} AND status="{{ filters.level | upper | label_escape }}"{% endif %}{% if filters.host %} AND host.name="{{ filters.host | label_escape }}"{% endif %}{% if filters.log_source %} AND log.source="{{ filters.log_source | label_escape }}"{% endif %}{%- endset -%}{{ s[5:] }}
+    filters:
+      - {column: query, description: "Classic search query, e.g. content=\"timeout\" AND k8s.namespace.name=\"shop\"", examples: ['content="connection refused"']}
+      - {column: level, description: "Log status ERROR | WARN | INFO | NONE", examples: [ERROR]}
+      - {column: host, variants: hostname, description: "host.name attribute (exact; add * in query for prefixes)", examples: ['ip-10-0-1-17']}
+      - {column: log_source, description: "log.source attribute (file path / source)", examples: ['/var/log/app/app.log']}
+    time: {column: ts, default_lookback: 1h, max_window: 35d, retention: 35d}
+    pagination: {type: cursor, cursor_path: "$.nextSliceKey", cursor_param: query.nextSliceKey, max_pages: 5}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: message, path: content}
+      - {name: level, expr: "filters.level if filters.level and (filters.level | upper) == _.status else _.status", description: "Log status derived from the log level: ERROR, WARN, INFO, NONE, NOT_APPLICABLE"}
+      - {name: loglevel, path: "additionalColumns.loglevel[0]", description: "Raw log level as written (e.g. SEVERE)"}
+      - {name: host, path: "additionalColumns['host.name'][0]"}
+      - {name: log_source, path: "additionalColumns['log.source'][0]"}
+      - {name: service, expr: "(_.additionalColumns['dt.service.name'] or _.additionalColumns['service.name'] or [none])[0] if _.additionalColumns else none", description: "dt.service.name / service.name attribute when present"}
+      - {name: namespace, path: "additionalColumns['k8s.namespace.name'][0]"}
+      - {name: pod, path: "additionalColumns['k8s.pod.name'][0]"}
+      - {name: trace_id, path: "additionalColumns.trace_id[0]"}
+      - {name: span_id, path: "additionalColumns.span_id[0]"}
+      - {name: event_type, expr: "_['event.type'] or _.eventType"}
+      - {name: attributes, type: JSON, path: additionalColumns, description: "All attributes (each value is an array): attributes->'dt.entity.process_group'->>0"}
+      - {name: query, filter_only: true}
+    sort_hint: "Newest first (sort=-timestamp)."
+    pitfalls:
+      - "Each slice returns at most 1,000 records and slices can be empty; the engine follows nextSliceKey for up to 5 slices. Aggregate with dynatrace_log_counts instead of counting raw rows."
+      - "Every additionalColumns value is an ARRAY; columns here take element [0]."
+      - "Content search only matches whole tokens (or a trailing * wildcard); 'timeou' does not match 'timeout'."
+      - "On Log Management and Analytics (Grail) this endpoint needs an OAuth/platform token with storage:logs:read; with an Api-Token it can return nothing. Use dynatrace_grail_logs there."
+      - "Service attribution is weak in classic logs: prefer host, k8s.namespace.name, log.source or content filters."
+    examples:
+      - sql: >-
+          SELECT ts, host, log_source, message FROM dynatrace_logs
+          WHERE level = 'ERROR' AND query = 'k8s.namespace.name="shop"'
+          ORDER BY ts DESC LIMIT 200
+        description: Latest error logs in a namespace during the window.
+      - sql: "SELECT ts, host, message, trace_id FROM dynatrace_logs WHERE query = 'content=\"connection refused\"' ORDER BY ts"
+        description: Phrase search across all logs.
+    fixtures:
+      - file: logs_search_reference.json
+        note: "Verbatim LogRecordsList JSON model from the official docs page (timestamp is a string of epoch ms, key 'event.type')."
+        expect_rows: 1
+        expect_columns: {ts: "2021-09-09T13:11:29Z", message: example log content, level: ERROR, loglevel: SEVERE, event_type: LOG}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/log-monitoring-v2/get-search-logs
+    ui_link: "{{ source.base_url }}/#logs"
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_log_counts
+    title: Log volume over time (Log Monitoring Classic)
+    description: >-
+      Aggregated log counts per time bucket and group value. One row per (group_by attribute,
+      bucket, value). Filter on group_by (attribute(s) to group by; default status), query, level,
+      host, log_source and ts. Use to see when errors started and which source/host spikes.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/v2/logs/aggregate
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        timeBuckets: "{{ filters.time_buckets or ([time.range_s // ([time.step_s, 60] | max), 1] | max) }}"
+        maxGroupValues: "{{ filters.max_group_values or 20 }}"
+        groupBy: "{{ filters.group_by | as_list if filters.group_by else ['status'] }}"
+        query: >-
+          {%- set s -%}{% if filters.query %} AND ({{ filters.query }}){% endif %}{% if filters.level %} AND status="{{ filters.level | upper | label_escape }}"{% endif %}{% if filters.host %} AND host.name="{{ filters.host | label_escape }}"{% endif %}{% if filters.log_source %} AND log.source="{{ filters.log_source | label_escape }}"{% endif %}{%- endset -%}{{ s[5:] }}
+    filters:
+      - {column: group_by, ops: ["=", "in"], fan_out: false, description: "Attribute(s) to group by: status, log.source, host.name, dt.entity.host, k8s.namespace.name ... (not high-cardinality ones like trace_id)", examples: ['log.source']}
+      - {column: query, description: "Classic search query"}
+      - {column: level, description: "status ERROR | WARN | INFO", examples: [ERROR]}
+      - {column: host, description: "host.name attribute"}
+      - {column: log_source, description: "log.source attribute"}
+      - {column: time_buckets, type: BIGINT, description: "Number of buckets (default window/step, >= 1)"}
+      - {column: max_group_values, type: BIGINT, description: "Values per group, max 100 (default 20)"}
+    time: {column: ts, default_lookback: 1h, max_window: 35d, retention: 35d}
+    zero_fill: true
+    response:
+      rows_path: "$.aggregationResult"
+      expand:
+        - {entries: ".", as: g}
+        - {entries: "@g.value", as: b}
+        - {entries: "@b.value", as: v}
+    columns:
+      - {name: group_by, path: "@g.key", description: "Attribute grouped by"}
+      - {name: ts, type: TIMESTAMP, path: "@b.key", transform: auto_time, description: "Bucket start"}
+      - {name: group_value, path: "@v.key", description: "Attribute value, e.g. ERROR or /var/log/syslog"}
+      - {name: value, type: BIGINT, path: "@v.value", description: "Number of log records"}
+      - {name: query, filter_only: true}
+      - {name: level, filter_only: true}
+      - {name: host, filter_only: true}
+      - {name: log_source, filter_only: true}
+      - {name: time_buckets, type: BIGINT, filter_only: true}
+      - {name: max_group_values, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Buckets without logs are omitted by the API (zero_fill adds them back)."
+      - "Without group_by the API returns ALL possible groupings; this table defaults to status."
+      - "The result may cover more time than requested and return fewer buckets than timeBuckets."
+    examples:
+      - sql: >-
+          SELECT ts, group_value AS source, value FROM dynatrace_log_counts
+          WHERE group_by = 'log.source' AND level = 'ERROR' ORDER BY ts, value DESC
+        description: Error log volume per log source over time (when did errors start, where).
+      - sql: "SELECT group_value AS status, sum(value) AS n FROM dynatrace_log_counts WHERE group_by = 'status' GROUP BY 1 ORDER BY n DESC"
+        description: Log volume by status in the window.
+    fixtures:
+      - file: logs_aggregate_reference.json
+        note: "Verbatim AggregatedLog JSON model from the official docs page (4 groupings x 2 buckets)."
+        expect_rows: 12
+        expect_columns: {group_by: hostId, ts: "2020-08-19T11:07:51Z", group_value: localhost, value: 12}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/log-monitoring-v2/get-aggregate-logs
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_slos
+    title: Service-level objectives (classic) with evaluation
+    description: >-
+      SLOs with their evaluation: status (SUCCESS/WARNING/FAILURE), evaluated percentage vs
+      target, error budget, burn rate and related open problems. By default each SLO is evaluated
+      over its own timeframe (e.g. -1w); set eval_timeframe = 'WINDOW' to evaluate it over the SQL ts
+      window instead (incident window). Filter on id, name, text, health_state,
+      problem_display_id, management_zone or raw slo_selector.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/slo
+      query:
+        evaluate: "{{ 'false' if filters.evaluate == false else 'true' }}"
+        pageSize: "{{ 10000 if filters.evaluate == false else 25 }}"
+        sort: name
+        timeFrame: "{{ 'GTF' if (filters.eval_timeframe or '') | upper == 'WINDOW' else 'CURRENT' }}"
+        from: "{{ (time.start | epoch_ms) if (filters.eval_timeframe or '') | upper == 'WINDOW' else None }}"
+        to: "{{ (time.end | epoch_ms) if (filters.eval_timeframe or '') | upper == 'WINDOW' else None }}"
+        sloSelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- macro ql(v) -%}{% for x in v | as_list %}{{ ',' if not loop.first }}{{ q(x) }}{% endfor %}{%- endmacro -%}{%- set s -%}{% if filters.slo_selector %},{{ filters.slo_selector }}{% endif %}{% if filters.id %},id({{ ql(filters.id) }}){% endif %}{% if filters.name %},name({{ q(filters.name) }}){% endif %}{% if filters.text %},text({{ q(filters.text) }}){% endif %}{% if filters.health_state %},healthState({{ q(filters.health_state | upper) }}){% endif %}{% if filters.management_zone %},managementZone({{ q(filters.management_zone) }}){% endif %}{% if filters.problem_display_id %},problemDisplayName({{ q(filters.problem_display_id) }}){% endif %}{%- endset -%}{{ s[1:] }}
+    filters:
+      - {column: id, ops: ["=", "in"], fan_out: false}
+      - {column: name, description: "Exact SLO name (case-sensitive)", examples: ['Payment service availability']}
+      - {column: text, description: "Case-insensitive search in name/description", examples: [checkout]}
+      - {column: health_state, description: "UNHEALTHY = has related open problems", examples: [UNHEALTHY]}
+      - {column: management_zone, description: "Management zone name"}
+      - {column: slo_selector, description: "Raw SLO selector"}
+      - {column: evaluate, type: BOOLEAN, description: "false = definitions only (no evaluation, page size up to 10000)"}
+      - {column: eval_timeframe, description: "CURRENT (default: SLO's own timeframe) | WINDOW (evaluate over the SQL ts window: timeFrame=GTF)", examples: [WINDOW]}
+      - {column: problem_display_id, description: "SLOs related to a problem, e.g. P-24101234 (problemDisplayName)", examples: ['P-24101234']}
+    time: {column: ts, default_lookback: 2h, max_window: 365d, reapply: false}
+    response:
+      rows_path: "$.slo[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: status, path: status, description: "SUCCESS | WARNING | FAILURE"}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: value, type: DOUBLE, path: evaluatedPercentage, description: "Evaluated SLO %, -1 on calculation error or when not evaluated"}
+      - {name: target, type: DOUBLE, path: target}
+      - {name: warning, type: DOUBLE, path: warning}
+      - {name: error_budget, type: DOUBLE, path: errorBudget, description: "Evaluated - target; negative = budget exhausted"}
+      - {name: burn_rate, type: DOUBLE, path: "errorBudgetBurnRate.burnRateValue", description: "Burn rate over the last hour"}
+      - {name: burn_rate_type, path: "errorBudgetBurnRate.burnRateType", description: "FAST | SLOW | NONE"}
+      - {name: hours_to_exhaust, type: DOUBLE, path: "errorBudgetBurnRate.estimatedTimeToConsumeErrorBudget"}
+      - {name: timeframe, path: timeframe, description: "SLO evaluation window, e.g. -1w"}
+      - {name: metric_expression, path: metricExpression}
+      - {name: entity_filter, path: filter}
+      - {name: metric_key, path: metricKey, description: "func:slo.* metric: query it with dynatrace_metrics for a time series"}
+      - {name: related_open_problems, type: BIGINT, path: relatedOpenProblems}
+      - {name: related_total_problems, type: BIGINT, path: relatedTotalProblems}
+      - {name: calc_error, path: error, description: "NONE when the calculation is fine"}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')", description: "More SLOs than one page (25 when evaluating): filter by name/text"}
+      - {name: text, filter_only: true}
+      - {name: health_state, filter_only: true}
+      - {name: management_zone, filter_only: true}
+      - {name: slo_selector, filter_only: true}
+      - {name: evaluate, type: BOOLEAN, filter_only: true}
+      - {name: eval_timeframe, expr: "filters.eval_timeframe or 'CURRENT'", description: "CURRENT or WINDOW: which timeframe value/error_budget refer to"}
+      - {name: problem_display_id, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Evaluation window, used only when eval_timeframe = 'WINDOW'"}
+    pitfalls:
+      - "With evaluation the API caps the page at 25 SLOs; filter by text/name/health_state when has_more is true."
+      - "value/error_budget are -1 when not evaluated or on calculation errors (check calc_error)."
+      - "By default values are for the SLO's own timeframe (column timeframe, e.g. -1w), not the incident window: add eval_timeframe = 'WINDOW' (plus a ts range) to evaluate over the incident window; for a curve query metric_key (func:slo.<name>) via dynatrace_metrics."
+      - "Classic SLOs are deprecated on latest Dynatrace (new SLOs live in the platform SLO app and are NOT returned here)."
+      - "name(...) is case-sensitive and exact; text(...) is a case-insensitive contains over name and description."
+    examples:
+      - sql: "SELECT name, status, value, target, error_budget, burn_rate_type, hours_to_exhaust FROM dynatrace_slos WHERE status <> 'SUCCESS' ORDER BY error_budget"
+        description: SLOs in warning/failure, worst error budget first.
+      - sql: "SELECT name, value, target, related_open_problems FROM dynatrace_slos WHERE text = 'checkout'"
+        description: SLOs of one service.
+      - sql: >-
+          SELECT name, status, value, target, error_budget, eval_timeframe FROM dynatrace_slos
+          WHERE eval_timeframe = 'WINDOW' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY error_budget
+        description: SLO attainment during the incident hour only (timeFrame=GTF).
+    fixtures:
+      - file: slos_reference.json
+        note: "Verbatim SLOs JSON model from the official docs page."
+        filters: {eval_timeframe: CURRENT}
+        expect_rows: 1
+        expect_columns: {name: Payment service availability, status: WARNING, value: 96.25, target: 95.0, burn_rate_type: SLOW, calc_error: NONE, has_more: true, eval_timeframe: CURRENT, timeframe: "-1d"}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/service-level-objectives-classic/get-all
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_audit_logs
+    title: Audit log (who changed which configuration)
+    description: >-
+      Audit log entries in the window, newest first: configuration CREATE/UPDATE/DELETE with the
+      JSON patch (old and new values), tag changes, token operations and logins, with the user.
+      Filter on event_type, category (CONFIG for settings changes), author, entity_id, schema_id.
+    kind: changes
+    request:
+      method: GET
+      path: /api/v2/auditlogs
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        pageSize: 5000
+        sort: "-timestamp"
+        filter: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- macro ql(v) -%}{% for x in v | as_list %}{{ ',' if not loop.first }}{{ q(x) }}{% endfor %}{%- endmacro -%}{%- set s -%}{% if filters.event_type %},eventType({{ ql(filters.event_type | as_list | map('upper') | list) }}){% endif %}{% if filters.category %},category({{ ql(filters.category | as_list | map('upper') | list) }}){% endif %}{% if filters.author %},user({{ ql(filters.author) }}){% endif %}{% if filters.entity_id %},entityId({{ q(filters.entity_id | replace('%', '')) }}){% endif %}{% if filters.schema_id %},dt.settings.schema_id({{ ql(filters.schema_id) }}){% endif %}{%- endset -%}{{ s[1:] }}
+    filters:
+      - {column: event_type, ops: ["=", "in"], fan_out: false, description: "CREATE, UPDATE, DELETE, TAG_ADD, TAG_REMOVE, TAG_UPDATE, LOGIN, LOGOUT, REVOKE, REORDER", examples: [UPDATE]}
+      - {column: category, ops: ["=", "in"], fan_out: false, description: "CONFIG, WEB_UI, TOKEN, MANUAL_TAGGING_SERVICE, ACTIVEGATE_TOKEN, BUILD_UNIT_V2, TENANT_LIFECYCLE", examples: [CONFIG]}
+      - {column: author, ops: ["=", "in"], fan_out: false, description: "User id (e-mail, token id or service name)"}
+      - {column: entity_id, ops: ["=", "like"], description: "Affected config/entity id (CONTAINS match)", examples: ['%SERVICE-5D53A2A6A1F2C3B4%']}
+      - {column: schema_id, description: "Settings schema id, e.g. builtin:anomaly-detection.metric-events", examples: ['builtin:anomaly-detection.metric-events']}
+    time: {column: ts, default_lookback: 24h, max_window: 365d}
+    response:
+      rows_path: "$.auditLogs[*]"
+    columns:
+      - {name: id, path: logId}
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: event_type, path: eventType}
+      - {name: category, path: category}
+      - {name: entity_id, path: entityId}
+      - {name: author, path: user}
+      - {name: author_type, path: userType}
+      - {name: origin, path: userOrigin}
+      - {name: success, type: BOOLEAN, path: success}
+      - {name: message, path: message}
+      - {name: patch, type: JSON, path: patch, description: "RFC 6902 patch with oldValue: what changed"}
+      - {name: schema_id, path: "['dt.settings.schema_id']"}
+      - {name: scope_id, path: "['dt.settings.scope_id']"}
+      - {name: scope_name, path: "['dt.settings.scope_name']"}
+      - {name: object_summary, path: "['dt.settings.object_summary']"}
+      - {name: settings_key, path: "['dt.settings.key']"}
+      - {name: environment_id, path: environmentId}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')"}
+    sort_hint: "Newest first."
+    pitfalls:
+      - "Needs the auditLogs.read scope AND audit logging enabled in the environment settings; otherwise the result is empty or 403."
+      - "Logins dominate volume: filter category = 'CONFIG' (settings) for change correlation."
+    examples:
+      - sql: >-
+          SELECT ts, author, event_type, schema_id, scope_name, object_summary, patch
+          FROM dynatrace_audit_logs WHERE category = 'CONFIG' AND event_type IN ('CREATE', 'UPDATE', 'DELETE')
+          ORDER BY ts DESC
+        description: Configuration changes (who/what/old->new) before the incident.
+    fixtures:
+      - file: audit_logs_example.json
+        note: "Verbatim example response (filter=eventType(LOGIN)) from the official docs page."
+        filters: {event_type: LOGIN}
+        expect_rows: 3
+        expect_columns: {id: "157607341600050000", event_type: LOGIN, category: WEB_UI, ts: "2019-12-11T14:10:15Z", has_more: true}
+      - file: audit_logs_reference.json
+        note: "Verbatim AuditLog JSON model from the official docs page (CONFIG update with patch)."
+        expect_rows: 1
+        expect_columns: {event_type: UPDATE, category: CONFIG, author: test.user@company.com, success: true}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/audit-logs/get-log
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_releases
+    title: Releases (versions running per component and stage)
+    description: >-
+      Releases observed in the window: one row per (component, product, stage, version) with
+      instances, problem count, throughput and health. Filter on name (contains), version, stage,
+      product, health_state. Use to see which version was running when, and whether a new version
+      appeared around the incident.
+    kind: changes
+    request:
+      method: GET
+      path: /api/v2/releases
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        pageSize: 1000
+        releasesSelector: >-
+          {%- macro q(v) -%}"{{ v | string | replace('~', '~~') | replace('"', '~"') }}"{%- endmacro -%}{%- set s -%}{% if filters.releases_selector %},{{ filters.releases_selector }}{% endif %}{% if filters.name %},entityName({{ q(filters.name | replace('%', '')) }}){% endif %}{% if filters.version %},releasesVersion({{ q(filters.version | replace('%', '')) }}){% endif %}{% if filters.stage %},releasesStage({{ q(filters.stage | replace('%', '')) }}){% endif %}{% if filters.product %},releasesProduct({{ q(filters.product | replace('%', '')) }}){% endif %}{% if filters.health_state %},healthState({{ q(filters.health_state | upper) }}){% endif %}{%- endset -%}{{ s[1:] }}
+    filters:
+      - {column: name, ops: ["=", "like"], description: "Component name (contains, case-insensitive)", examples: [checkout]}
+      - {column: version, ops: ["=", "like"], description: "Version (contains)"}
+      - {column: stage, ops: ["=", "like"], description: "Release stage (contains), e.g. production", examples: [production]}
+      - {column: product, ops: ["=", "like"], description: "Product (contains)"}
+      - {column: health_state, description: "HEALTHY | UNHEALTHY"}
+      - {column: releases_selector, description: "Raw releases selector"}
+    time: {column: ts, default_lookback: 24h, max_window: 365d}
+    response:
+      rows_path: "$.releases[*]"
+    columns:
+      - {name: name, path: name, description: "Component (service / process group) name"}
+      - {name: product, path: product}
+      - {name: stage, path: stage}
+      - {name: version, path: version}
+      - {name: release_entity_id, path: releaseEntityId}
+      - {name: running, type: BOOLEAN, path: running}
+      - {name: affected_by_problems, type: BOOLEAN, path: affectedByProblems}
+      - {name: problem_count, type: BIGINT, path: problemCount}
+      - {name: throughput, type: DOUBLE, path: throughput, description: "Bytes per second"}
+      - {name: instances, type: JSON, path: instances}
+      - {name: instance_count, type: BIGINT, path: instances, transform: length}
+      - {name: software_techs, type: JSON, path: softwareTechs}
+      - {name: vulnerabilities, type: BIGINT, path: securityVulnerabilitiesCount}
+      - {name: has_more, type: BOOLEAN, expr: "root.nextPageKey is string and root.nextPageKey not in ('', 'null')"}
+      - {name: health_state, filter_only: true}
+      - {name: releases_selector, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Versions come from release-detection (DT_RELEASE_VERSION/STAGE/PRODUCT env vars or k8s labels); components without them have no version."
+      - "Name/version/stage/product filters are CONTAINS matches."
+    examples:
+      - sql: "SELECT name, stage, version, running, problem_count, instance_count FROM dynatrace_releases WHERE name LIKE '%checkout%' ORDER BY stage, version"
+        description: Versions of a component per stage, and whether the new one has problems.
+    fixtures:
+      - file: releases_reference.json
+        note: "Verbatim Releases JSON model from the official docs page."
+        expect_rows: 1
+        expect_columns: {name: cluster, product: Sockshop, stage: staging, version: "1.195.34.12341232423-012342", instance_count: 2, problem_count: 4, has_more: true}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/releaseapi/get-releaseall
+
+roles:
+  metrics:
+    table: dynatrace_metrics
+    query_language: dynatrace_metric_selector
+    columns: {query: metric_selector, ts: ts, value: value, labels: dimensions, metric: metric}
+  active_alerts:
+    table: dynatrace_problems
+    filters: {status: OPEN}
+    columns: {id: id, ts: ts, title: title, state: status, severity: severity, service: service, labels: tags}
+  alert_history:
+    table: dynatrace_problems
+    columns: {id: id, ts: ts, title: title, state: status, severity: severity, service: service}
+  incidents:
+    table: dynatrace_problems
+    columns: {id: id, ts: ts, title: title, state: status, severity: severity, service: service}
+  logs:
+    table: dynatrace_logs
+    filters:
+      level: "{{ 'ERROR' if error_only else '' }}"
+      host: "{{ host or '' }}"
+      query: "{{ query or '' }}"
+    columns: {ts: ts, message: message, level: level, host: host, service: service, trace_id: trace_id}
+    query_language: dynatrace_log_search
+    notes: "Classic logs rarely carry a service attribute; scope with host, k8s namespace or content. Prefer the dynatrace_grail logs role on Grail environments."
+  log_counts:
+    table: dynatrace_log_counts
+    filters: {level: "{{ 'ERROR' if error_only else '' }}", group_by: "log.source"}
+    columns: {ts: ts, value: value, group: group_value}
+  services:
+    table: dynatrace_entities
+    filters: {type: SERVICE}
+    columns: {id: entity_id, service: name, tags: tags}
+  hosts:
+    table: dynatrace_entities
+    filters: {type: HOST}
+    columns: {id: entity_id, host: name, tags: tags}
+  service_map:
+    table: dynatrace_relationships_out
+    filters: {from_type: SERVICE, relationship: calls}
+    columns: {source_id: from_id, source: from_name, target_id: to_id}
+    notes: "Join dynatrace_entities on to_id for callee names; callers of a service: dynatrace_relationships_in."
+  change_events:
+    - table: dynatrace_events
+      filters: {event_type: CUSTOM_DEPLOYMENT}
+      columns: {ts: ts, service: service, title: title, version: version, url: ci_link}
+    - table: dynatrace_events
+      filters: {event_type: CUSTOM_CONFIGURATION}
+      columns: {ts: ts, service: service, title: title}
+    - table: dynatrace_audit_logs
+      filters: {category: CONFIG}
+      columns: {ts: ts, author: author, title: object_summary}
+    - table: dynatrace_releases
+      columns: {service: name, version: version, env: stage}
+  slo:
+    table: dynatrace_slos
+    columns: {id: id, title: name, state: status, value: value}

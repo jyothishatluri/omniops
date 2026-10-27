@@ -1,0 +1,1256 @@
+# Honeycomb (honeycomb.io) REST API v1: Query Data API (async 3-step queries over events/spans),
+# saved queries + query annotations, datasets, columns, dataset definitions, calculated fields,
+# markers (deploys!), triggers, SLOs (status, history, hourly / realtime SLI counts), burn alerts,
+# boards, Anomaly Detection signals and service maps.
+# Docs: https://docs.honeycomb.io/api/introduction  (OpenAPI: https://docs.honeycomb.io/api/openapi-public.yaml)
+source: honeycomb
+display_name: Honeycomb
+vendor: Hound Technology, Inc. (Honeycomb)
+description: >-
+  Honeycomb observability API: run aggregate queries (COUNT, P99, HEATMAP, breakdowns, filters)
+  over trace spans / events with the async Query Data API, read deploy markers, triggers (alert
+  rules + currently-triggered state), SLOs with burn rate / budget, burn alerts, anomaly signals,
+  service dependency maps, dataset schemas and boards.
+docs_url: https://docs.honeycomb.io/api/introduction
+categories: [traces, events, metrics, alerts, slo, changes, dashboards]
+base_url: "{{ env.HONEYCOMB_API_URL }}"
+env:
+  - {name: HONEYCOMB_API_KEY, description: "Configuration API key (the Token) for ONE environment; sent as X-Honeycomb-Team. Needs Run Queries + Manage Queries and Columns for the query tables, Manage Triggers / Manage SLOs / Manage Markers / Manage Public Boards / Manage Signals / Read Service Maps for the others.", secret: true}
+  - {name: HONEYCOMB_API_URL, description: "API host: https://api.honeycomb.io (US) or https://api.eu1.honeycomb.io (EU)", default: "https://api.honeycomb.io"}
+  - {name: HONEYCOMB_UI_URL, description: "UI host for links: https://ui.honeycomb.io (US) or https://ui.eu1.honeycomb.io (EU)", default: "https://ui.honeycomb.io"}
+  - {name: HONEYCOMB_DEFAULT_DATASET, description: "Dataset slug used when a query does not filter dataset (default __all__ = environment-wide; Classic environments need a real dataset)", default: "__all__"}
+  - {name: HONEYCOMB_SERVICE_COLUMN, description: "Column holding the service name, used by the `service` convenience filter (OpenTelemetry: service.name)", default: "service.name"}
+required_env: [HONEYCOMB_API_KEY]
+auth:
+  type: headers
+  headers:
+    X-Honeycomb-Team: "{{ env.HONEYCOMB_API_KEY }}"
+rate_limit:
+  concurrency: 3
+  max_retries: 2
+  notes: >-
+    General v1 API limit is returned in RateLimit / RateLimit-Policy headers (the docs' example
+    policy is 100 req/60s; no fixed number is published). 429 bodies are RFC 7807 problem details
+    and most carry Retry-After as an HTTP date. Create Query Result is limited to 10
+    requests/minute (1/minute when the query uses relational fields such as
+    root./parent./child./any.); Query Data API 429s carry no Retry-After. Every
+    honeycomb_query / honeycomb_query_series SQL statement costs exactly one query-result creation,
+    so batch questions into one query (several calculations + breakdowns) instead of many.
+retention:
+  traces: 60d
+  events: 60d
+ui_base_url: "{{ env.HONEYCOMB_UI_URL }}"
+errors:
+  - {path: "$.error", non_empty: true, message: "$.error", hint: "Honeycomb reported a failure in a 2xx body (a failed query result is complete:true with an error field)"}
+pitfalls:
+  - "Datasets are per service in Honeycomb Environments (OpenTelemetry creates one dataset per service.name). Use dataset = '__all__' for environment-wide queries (not available in Honeycomb Classic). List honeycomb_datasets first when unsure of the slug: an unknown dataset is HTTP 404, not empty data."
+  - "Column names are case-sensitive and dotted (service.name, http.route, http.response.status_code, duration_ms, error, trace.trace_id, trace.parent_id). A filter on a column that does not exist matches nothing: check honeycomb_columns or honeycomb_dataset_definitions before concluding 'no errors'."
+  - "Query results are SAMPLE-RATE CORRECTED estimates (COUNT is multiplied by each event's sample rate). Low-volume groups in heavily sampled datasets can be noisy."
+  - "There is no raw-event / raw-span listing API. To find example traces, query honeycomb_query with breakdowns trace.trace_id and orders MAX(duration_ms) desc, then open the trace in the UI (url column)."
+  - "The Query Data API (honeycomb_query, honeycomb_query_series) only reads the last 7 days and at most a 7-day window, is an Enterprise feature, and truncates start/end to 1 min (<=6h windows), 5 min (<=2d) or 30 min (<=7d)."
+  - "API keys are environment-scoped: one key sees one environment (production OR staging). Classic keys see Classic datasets only."
+query_languages:
+  honeycomb_query: >-
+    Honeycomb query spec, expressed through filter columns: calculations = 'COUNT, P99(duration_ms),
+    HEATMAP(duration_ms), COUNT_DISTINCT(trace.trace_id)' (ops: COUNT CONCURRENCY SUM AVG
+    COUNT_DISTINCT HEATMAP MAX MIN P001 P01 P05 P10 P20 P25 P50 P75 P80 P90 P95 P99 P999 RATE_AVG
+    RATE_SUM RATE_MAX); breakdowns = 'service.name, http.route'; filter_expr = 'http.response.status_code
+    >= 500 AND name contains checkout' (clauses `column op value` joined by ' AND ' (or all by ' OR ');
+    ops = != > >= < <= starts-with does-not-start-with ends-with does-not-end-with exists
+    does-not-exist contains does-not-contain in not-in; in/not-in take comma lists; quote a value with
+    "..." to force a string; true/false are booleans; numbers are numbers); orders = 'P99(duration_ms)
+    desc' (default: first calculation descending); havings = 'COUNT > 10'. Each of these also
+    accepts a raw Honeycomb JSON array (e.g. filter_expr = '[{"column":"error","op":"=","value":true}]'),
+    and query_spec accepts a whole JSON query object (without start_time/end_time/time_range).
+    Result columns: COUNT -> count, P99(duration_ms) -> p99_duration_ms, service.name -> service_name
+    (dynamic columns), or read them from the data JSON column: data->>'P99(duration_ms)'.
+
+tables:
+  # ------------------------------------------------------------------------------------------
+  # Query Data API: create query spec -> create query result -> poll result
+  # ------------------------------------------------------------------------------------------
+  - name: honeycomb_query
+    title: Aggregate query (summary table)
+    description: >-
+      Run a Honeycomb query over the ts window and return its summary table: one row per breakdown
+      group (or one row without breakdowns) with every calculation. Filter on dataset (default
+      __all__ = whole environment), calculations (default COUNT), breakdowns, filter_expr (WHERE), orders,
+      havings, service (adds service.name = X), trace_id, or pass query_spec (full JSON) or query_id
+      (re-run a saved query, e.g. a trigger's query_id). `value`/`calc` hold the FIRST calculation;
+      every calculation and breakdown is also a dynamic column (COUNT -> count, P99(duration_ms) ->
+      p99_duration_ms, service.name -> service_name) and is in the `data` JSON. Use it for error
+      counts by service/route/status, latency percentiles by endpoint, top slow traces (breakdown
+      trace.trace_id) and "which version/host/customer is affected" breakdowns. Implemented as
+      POST /1/queries -> POST /1/query_results (disable_series) -> poll GET /1/query_results/{id}.
+    kind: traces
+    steps:
+      - name: create_query
+        method: POST
+        path: "/1/queries/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+        when: "not filters.query_id"
+        headers: {Content-Type: application/json}
+        body_format: text
+        body: &hc_query_body |-
+          {%- macro scalar(v) -%}
+          {%- set v = v | trim -%}
+          {%- set digits = (v[1:] if v[:1] == '-' else v) -%}
+          {%- if v | length > 1 and v[:1] == '"' and v[-1:] == '"' -%}{{ v[1:-1] | tojson }}
+          {%- elif v | length > 1 and v[:1] == "'" and v[-1:] == "'" -%}{{ v[1:-1] | tojson }}
+          {%- elif v | lower in ['true', 'false'] -%}{{ v | lower }}
+          {%- elif digits and digits.isdigit() -%}{{ v | int }}
+          {%- elif digits and digits.replace('.', '', 1).isdigit() -%}{{ v | float }}
+          {%- else -%}{{ v | tojson }}{%- endif -%}
+          {%- endmacro -%}
+          {%- macro opcol(term, key='op') -%}
+          {%- set term = term | trim -%}
+          {%- if '(' in term -%}"{{ key }}": {{ term.split('(')[0] | trim | upper | tojson }}, "column": {{ term.split('(', 1)[1].rsplit(')', 1)[0] | trim | tojson }}
+          {%- else -%}"{{ key }}": {{ term | upper | tojson }}{%- endif -%}
+          {%- endmacro -%}
+          {%- macro clause(cl) -%}
+          {%- set parts = (cl | trim).split(' ', 2) -%}
+          {%- set op = (parts[1] | lower) if parts | length > 1 else 'exists' -%}
+          {%- if parts | length < 3 -%}{"column": {{ parts[0] | tojson }}, "op": {{ op | tojson }}}
+          {%- elif op in ['in', 'not-in'] -%}{"column": {{ parts[0] | tojson }}, "op": {{ op | tojson }}, "value": [{% for x in parts[2].split(',') %}{{ scalar(x) }}{{ ', ' if not loop.last }}{% endfor %}]}
+          {%- else -%}{"column": {{ parts[0] | tojson }}, "op": {{ op | tojson }}, "value": {{ scalar(parts[2]) }}}{%- endif -%}
+          {%- endmacro -%}
+          {%- macro order(o) -%}
+          {%- set toks = (o | trim).split(' ') -%}
+          {%- set has_dir = toks | length > 1 and (toks[-1] | lower) in ['asc', 'desc', 'ascending', 'descending'] -%}
+          {%- set term = (toks[:-1] | join(' ')) if has_dir else (o | trim) -%}
+          {%- set is_calc = '(' in term or (term | upper) in ['COUNT', 'CONCURRENCY'] -%}
+          {%- set dir = ((toks[-1] | lower)[:3] == 'asc') and 'ascending' or 'descending' if has_dir else ('descending' if is_calc else 'ascending') -%}
+          {%- if is_calc -%}{ {{- opcol(term) }}, "order": "{{ dir }}"}
+          {%- else -%}{"column": {{ term | tojson }}, "order": "{{ dir }}"}{%- endif -%}
+          {%- endmacro -%}
+          {%- macro having(h) -%}
+          {%- set parts = (h | trim).rsplit(' ', 2) -%}
+          { {{- opcol(parts[0], 'calculate_op') }}, "op": {{ parts[1] | tojson }}, "value": {{ parts[2] | float }}}
+          {%- endmacro -%}
+          {%- set spec = (filters.query_spec | trim) if filters.query_spec else '' -%}
+          {%- set calcs = (filters.calculations | trim) if filters.calculations else 'COUNT' -%}
+          {%- set first = calcs.split(',')[0] | trim -%}
+          {%- set where = (filters.filter_expr | trim) if filters.filter_expr else '' -%}
+          {%- set use_or = (' OR ' in where) and (' AND ' not in where) -%}
+          {%- set clauses = (where.split(' OR ') if use_or else where.split(' AND ')) if (where and where[:1] != '[') else [] -%}
+          {%- set orders = (filters.orders | trim) if filters.orders else '' -%}
+          {%- set havings = (filters.havings | trim) if filters.havings else '' -%}
+          {%- set ns = namespace(n=0) -%}
+          {"start_time": {{ time.start | epoch_s }}, "end_time": {{ time.end | epoch_s }}
+          {%- if spec -%}
+          {%- set inner = spec[1:-1] | trim -%}{%- if inner -%}, {{ inner }}{%- endif -%}
+          {%- else -%}
+          , "calculations": {% if calcs[:1] == '[' %}{{ calcs }}{% else %}[{% for c in calcs.split(',') %}{ {{- opcol(c) }}}{{ ', ' if not loop.last }}{% endfor %}]{% endif %}
+          {%- if filters.breakdowns -%}
+          , "breakdowns": {% if (filters.breakdowns | trim)[:1] == '[' %}{{ filters.breakdowns }}{% else %}{{ filters.breakdowns.split(',') | map('trim') | reject('equalto', '') | list | tojson }}{% endif %}
+          {%- endif -%}
+          , "filters": [
+          {%- if filters.service -%}{"column": {{ env.HONEYCOMB_SERVICE_COLUMN | default('service.name', true) | tojson }}, "op": "=", "value": {{ filters.service | string | tojson }}}{%- set ns.n = 1 -%}{%- endif -%}
+          {%- if filters.trace_id -%}{{ ', ' if ns.n }}{"column": "trace.trace_id", "op": "=", "value": {{ filters.trace_id | string | tojson }}}{%- set ns.n = 1 -%}{%- endif -%}
+          {%- for cl in clauses -%}{{ ', ' if ns.n }}{{ clause(cl) }}{%- set ns.n = 1 -%}{%- endfor -%}
+          {%- if where[:1] == '[' and where[1:-1] | trim -%}{{ ', ' if ns.n }}{{ where[1:-1] | trim }}{%- endif -%}
+          ], "filter_combination": "{{ 'OR' if (use_or or (filters.filter_combination | default('') | upper) == 'OR') else 'AND' }}"
+          {%- if orders[:1] == '[' -%}, "orders": {{ orders }}
+          {%- elif orders -%}, "orders": [{% for o in orders.split(',') %}{{ order(o) }}{{ ', ' if not loop.last }}{% endfor %}]
+          {%- elif calcs[:1] != '[' and (first.split('(')[0] | trim | upper) not in ['HEATMAP'] -%}, "orders": [{ {{- opcol(first) }}, "order": "descending"}]
+          {%- endif -%}
+          {%- if havings[:1] == '[' -%}, "havings": {{ havings }}
+          {%- elif havings -%}, "havings": [{% for h in havings.split(',') %}{{ having(h) }}{{ ', ' if not loop.last }}{% endfor %}]
+          {%- endif -%}
+          , "limit": {{ [[(filters.group_limit or limit or 100) | int, 1000] | min, 1] | max }}
+          {%- if filters.granularity is defined and filters.granularity is not none -%}, "granularity": {{ (filters.granularity | int) or time.step_s }}{%- endif -%}
+          {%- endif -%}
+          }
+        capture: {query_id: "$.id"}
+      - name: run_query
+        method: POST
+        path: "/1/query_results/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+        body:
+          query_id: "{{ filters.query_id or captures.query_id }}"
+          disable_series: true
+          limit: "{{ ([limit, 10000] | min) if (limit and limit > 1000) else none }}"
+        capture: {result_id: "$.id"}
+      - name: poll_result
+        method: GET
+        path: "/1/query_results/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}/{{ captures.result_id }}"
+        poll: {until: "response.complete", interval_s: 1, timeout_s: 40}
+    filters:
+      - {column: dataset, description: "Dataset slug, or __all__ for the whole environment (default HONEYCOMB_DEFAULT_DATASET)", examples: ["__all__"]}
+      - {column: calculations, description: "Comma list of calculations, e.g. 'COUNT, P99(duration_ms)' (default COUNT); or a raw JSON calculations array", examples: ["COUNT, P99(duration_ms)"]}
+      - {column: breakdowns, description: "Comma list of group-by columns, e.g. 'service.name, http.route'", examples: ["service.name"]}
+      - {column: filter_expr, description: "Event filters: 'col op value' clauses joined by ' AND ' (or all by ' OR '), e.g. \"error = true AND http.route starts-with /api\"; or a raw JSON filters array", examples: ["http.response.status_code >= 500"]}
+      - {column: orders, description: "Comma list like 'P99(duration_ms) desc, service.name asc' (default: first calculation descending)", examples: ["COUNT desc"]}
+      - {column: havings, description: "Comma list of result filters like 'COUNT > 10' or 'P99(duration_ms) >= 1000'", examples: ["COUNT > 10"]}
+      - {column: filter_combination, description: "AND (default) or OR for the filter_expr clauses"}
+      - {column: service, description: "Convenience: adds service.name = <value> (column from HONEYCOMB_SERVICE_COLUMN)", examples: ["checkout-api"]}
+      - {column: trace_id, description: "Convenience: adds trace.trace_id = <value>"}
+      - {column: query_spec, description: "Whole Honeycomb query JSON object (calculations, breakdowns, filters, orders, havings, limit, calculated_fields...) WITHOUT time keys; overrides the other spec filters"}
+      - {column: query_id, description: "Run an existing saved query id instead of building one (e.g. honeycomb_triggers.query_id). The saved query's own time range applies, not ts."}
+      - {column: group_limit, type: BIGINT, description: "Max breakdown groups (default: SQL LIMIT or 100; max 1000 in the spec, up to 10000 via SQL LIMIT)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, retention: 7d, control_lookback: 6h}
+    response:
+      rows_path: "$.data.results[*]"
+      dynamic: "data"
+    columns:
+      - {name: value, type: DOUBLE, expr: "_.data[(root.query.calculations[0].name or (root.query.calculations[0].op ~ (('(' ~ root.query.calculations[0].column ~ ')') if root.query.calculations[0].column else '')))] if (root.query and root.query.calculations) else none", description: "Value of the FIRST calculation for this group (e.g. COUNT or P99(duration_ms))"}
+      - {name: calc, expr: "(root.query.calculations[0].name or (root.query.calculations[0].op ~ (('(' ~ root.query.calculations[0].column ~ ')') if root.query.calculations[0].column else ''))) if (root.query and root.query.calculations) else none", description: "Name of the first calculation, e.g. P99(duration_ms)"}
+      - {name: service, path: "data['service.name']", description: "service.name when it is a breakdown (else the service filter)"}
+      - {name: trace_id, path: "data['trace.trace_id']", description: "trace.trace_id when it is a breakdown"}
+      - {name: data, type: JSON, path: data, description: "The whole result row: every breakdown value and calculation keyed by Honeycomb's names, e.g. data->>'P99(duration_ms)', data->>'http.route'"}
+      - {name: url, path: "$.links.query_url", description: "Query result in the Honeycomb UI"}
+      - {name: graph_url, path: "$.links.graph_image_url", description: "PNG snapshot of the query graph"}
+      - {name: query_result_id, path: "$.id"}
+      - {name: dataset, filter_only: true}
+      - {name: calculations, filter_only: true}
+      - {name: breakdowns, filter_only: true}
+      - {name: filter_expr, filter_only: true}
+      - {name: orders, filter_only: true}
+      - {name: havings, filter_only: true}
+      - {name: filter_combination, filter_only: true}
+      - {name: query_spec, filter_only: true}
+      - {name: query_id, filter_only: true}
+      - {name: group_limit, type: BIGINT, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Query window (pushed down as start_time/end_time, epoch seconds)"}
+    max_rows: 10000
+    sort_hint: "Rows come back in the query's orders (default: first calculation descending), so LIMIT n is a server-side top-n."
+    pitfalls:
+      - "Costs one of the 10/minute query-result creations; put every calculation and breakdown you need into ONE query instead of many."
+      - "Breakdowns are capped by limit (default 100 groups, max 1000; SQL LIMIT up to 10000): with many unique values (trace ids, user ids) the long tail is dropped, so always order by the metric you care about."
+      - "HEATMAP results are histogram objects (value is NULL); use P50/P95/P99 for numbers."
+      - "Use error = true (OpenTelemetry error flag, boolean) or http.response.status_code >= 500 (older semconv: http.status_code) for errors; check honeycomb_columns for which one the dataset has."
+      - "With query_id the saved query keeps its own (usually relative 'last N seconds') time range: the ts window is ignored."
+      - "Mixed AND/OR is not expressible: all filter_expr clauses share one filter_combination. The service/trace_id convenience filters join that same combination."
+    examples:
+      - sql: >-
+          SELECT service, value AS errors, url FROM honeycomb_query
+          WHERE dataset = '__all__' AND calculations = 'COUNT' AND breakdowns = 'service.name'
+            AND filter_expr = 'error = true'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY errors DESC LIMIT 20
+        description: Which services threw errors in the incident hour (environment-wide).
+      - sql: >-
+          SELECT data->>'http.route' AS route, CAST(data->>'P99(duration_ms)' AS DOUBLE) AS p99_ms,
+                 CAST(data->>'COUNT' AS BIGINT) AS requests
+          FROM honeycomb_query
+          WHERE dataset = 'checkout-api' AND calculations = 'P99(duration_ms), COUNT'
+            AND breakdowns = 'http.route' AND filter_expr = 'span.kind = server'
+          ORDER BY p99_ms DESC LIMIT 10
+        description: Slowest server routes of one service by p99 latency over the default window.
+      - sql: >-
+          SELECT trace_id, value AS max_duration_ms, data->>'name' AS root_span, url
+          FROM honeycomb_query
+          WHERE service = 'checkout-api' AND calculations = 'MAX(duration_ms)'
+            AND breakdowns = 'trace.trace_id, name' AND filter_expr = 'trace.parent_id does-not-exist'
+          LIMIT 10
+        description: The ten slowest root spans (example traces) of a service, to open in the UI.
+      - sql: >-
+          SELECT data->>'service.version' AS version, value AS errors
+          FROM honeycomb_query
+          WHERE dataset = 'checkout-api' AND breakdowns = 'service.version' AND filter_expr = 'error = true'
+        description: Error count per deployed version (did the new version introduce the errors?).
+    fixtures:
+      - file: query_result_breakdown.json
+        filters: {dataset: test-via-curl}
+        expect_rows: 3
+        expect_columns: {value: 2728.0, calc: COUNT, url: "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/hij678a", query_result_id: hij678a, user_agent: "Mozilla/5.0 (X11; Linux x86_64)", count: 2728}
+        note: "Official docs example response of GET /1/query_results/{dataset}/{id} ('Query with Filter and Group By'), docs.honeycomb.io/api/query-data/get-query-result."
+      - file: query_result_simple.json
+        expect_rows: 1
+        expect_columns: {value: 20769.0, calc: COUNT, count: 20769}
+        note: "Official docs example response of GET /1/query_results/{dataset}/{id} ('Simple Query')."
+      - file: query_result_series.json
+        expect_rows: 1
+        expect_columns: {value: 77482.0, calc: COUNT, p99_duration_ms: 857.0309715273646, name: TestGoogleCallbackLogin}
+        note: "Built strictly from the QueryResultDetails / QueryResultsData schema of the official OpenAPI spec, using its documented data examples (COUNT, P99(duration_ms), name)."
+      - file: query_result_failed.json
+        expect_error: "we had trouble fetching your results"
+        note: "Official docs example 'Failed Query': HTTP 200 with complete:true and an error field must be a loud failure."
+    docs_url: https://docs.honeycomb.io/api/query-data/create-a-query-result
+
+  - name: honeycomb_query_series
+    title: Aggregate query (time series)
+    description: >-
+      Same query as honeycomb_query but returns the graph: one row per (time bucket, breakdown
+      group) with ts = bucket start. Granularity defaults to ~200 points over the window (override
+      with granularity seconds). `value`/`calc` hold the first calculation; every calculation and
+      breakdown is also a dynamic column and in `data`. Use it to find WHEN errors / latency
+      started, whether a deploy marker lines up with the change, and which group moved.
+      Default limit is 10 groups (top by the first calculation).
+    kind: timeseries
+    steps:
+      - name: create_query
+        method: POST
+        path: "/1/queries/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+        when: "not filters.query_id"
+        headers: {Content-Type: application/json}
+        body_format: text
+        body: *hc_query_body
+        capture: {query_id: "$.id"}
+      - name: run_query
+        method: POST
+        path: "/1/query_results/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+        body:
+          query_id: "{{ filters.query_id or captures.query_id }}"
+          disable_series: false
+        capture: {result_id: "$.id"}
+      - name: poll_result
+        method: GET
+        path: "/1/query_results/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}/{{ captures.result_id }}"
+        poll: {until: "response.complete", interval_s: 1, timeout_s: 40}
+    filters:
+      - {column: dataset, description: "Dataset slug, or __all__ for the whole environment", examples: ["checkout-api"]}
+      - {column: calculations, description: "Comma list of calculations (default COUNT)", examples: ["COUNT"]}
+      - {column: breakdowns, description: "Comma list of group-by columns (keep it small: rows = groups x buckets)", examples: ["http.response.status_code"]}
+      - {column: filter_expr, description: "Event filters, same syntax as honeycomb_query.filter_expr", examples: ["error = true"]}
+      - {column: orders, description: "Group ordering (default: first calculation descending)"}
+      - {column: havings, description: "Result filters like 'COUNT > 10'"}
+      - {column: filter_combination, description: "AND (default) or OR"}
+      - {column: service, description: "Convenience: adds service.name = <value>", examples: ["checkout-api"]}
+      - {column: trace_id, description: "Convenience: adds trace.trace_id = <value>"}
+      - {column: query_spec, description: "Whole Honeycomb query JSON object without time keys"}
+      - {column: query_id, description: "Run an existing saved query id (its own time range applies)"}
+      - {column: granularity, type: BIGINT, default: 0, description: "Bucket size in seconds (0 = auto, ~window/200; valid range window/1000 .. window)"}
+      - {column: group_limit, type: BIGINT, default: 10, description: "Max breakdown groups (default 10, max 1000); SQL LIMIT does not change it here"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, retention: 7d, target_points: 200, min_step: 1m, control_lookback: 6h, reapply: false}
+    response:
+      rows_path: "$.data.series[*]"
+      dynamic: "data"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: time, transform: auto_time, description: "Bucket start (UTC)"}
+      - {name: value, type: DOUBLE, expr: "_.data[(root.query.calculations[0].name or (root.query.calculations[0].op ~ (('(' ~ root.query.calculations[0].column ~ ')') if root.query.calculations[0].column else '')))] if (root.query and root.query.calculations) else none", description: "First calculation in this bucket for this group"}
+      - {name: calc, expr: "(root.query.calculations[0].name or (root.query.calculations[0].op ~ (('(' ~ root.query.calculations[0].column ~ ')') if root.query.calculations[0].column else ''))) if (root.query and root.query.calculations) else none"}
+      - {name: service, path: "data['service.name']"}
+      - {name: trace_id, path: "data['trace.trace_id']"}
+      - {name: data, type: JSON, path: data, description: "Breakdown values + calculations of this bucket"}
+      - {name: url, path: "$.links.query_url", description: "Query result in the Honeycomb UI"}
+      - {name: dataset, filter_only: true}
+      - {name: calculations, filter_only: true}
+      - {name: breakdowns, filter_only: true}
+      - {name: filter_expr, filter_only: true}
+      - {name: orders, filter_only: true}
+      - {name: havings, filter_only: true}
+      - {name: filter_combination, filter_only: true}
+      - {name: query_spec, filter_only: true}
+      - {name: query_id, filter_only: true}
+      - {name: granularity, type: BIGINT, filter_only: true}
+      - {name: group_limit, type: BIGINT, filter_only: true}
+    max_rows: 20000
+    zero_fill: true
+    sort_hint: "Rows are per bucket and group; ORDER BY ts in SQL. Honeycomb omits empty buckets (zero-filled by the engine)."
+    pitfalls:
+      - "Honeycomb omits buckets with no events: a series that stops does not mean the value stayed at its last level (the engine zero-fills COUNT-like series)."
+      - "rows = groups x buckets: keep breakdowns to low-cardinality columns (status code, service, version) and the default top-10 group limit."
+      - "Costs one of the 10/minute query-result creations."
+      - "The window is truncated to whole minutes (<=6h), 5 minutes (<=2d) or 30 minutes (<=7d); the first/last bucket can be partial."
+    examples:
+      - sql: >-
+          SELECT ts, value AS errors FROM honeycomb_query_series
+          WHERE dataset = 'checkout-api' AND filter_expr = 'error = true'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:30:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: When did errors start for one service (per-bucket error count).
+      - sql: >-
+          SELECT ts, data->>'http.response.status_code' AS status, value AS requests
+          FROM honeycomb_query_series
+          WHERE dataset = 'checkout-api' AND breakdowns = 'http.response.status_code'
+            AND filter_expr = 'http.response.status_code >= 500'
+          ORDER BY ts, status
+        description: 5xx count over time split by status code.
+      - sql: >-
+          SELECT ts, value AS p99_ms FROM honeycomb_query_series
+          WHERE service = 'checkout-api' AND calculations = 'P99(duration_ms)' AND filter_expr = 'span.kind = server'
+          ORDER BY ts
+        description: p99 latency of a service's server spans over the default window.
+    fixtures:
+      - file: query_result_series.json
+        expect_rows: 2
+        expect_columns: {ts: "2021-04-09T14:16:00Z", value: 1.0, calc: COUNT, p99_duration_ms: 210, name: TestGoogleCallbackLogin, url: "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/HprJhV1fYy"}
+        note: "Built strictly from the QueryResultDetails / QueryResultsSeries schema of the official OpenAPI spec (docs.honeycomb.io/api/query-data/get-query-result) using its documented time and data examples; the docs' full examples return empty series."
+      - file: query_result_failed.json
+        expect_error: "we had trouble fetching your results"
+        note: "Official docs example 'Failed Query' (HTTP 200 + error)."
+    docs_url: https://docs.honeycomb.io/api/query-data/get-query-result
+
+  - name: honeycomb_query_specs
+    title: Saved query specification
+    description: >-
+      Look up a query spec by id (from a trigger's query_id, a board panel's query_id or a query
+      URL): calculations, filters, breakdowns, time range. One row per query id. Filter on query_id
+      (required) and dataset (default __all__).
+    kind: entities
+    request:
+      method: GET
+      path: "/1/queries/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}/{{ filters.query_id }}"
+    filters:
+      - {column: query_id, required: true, description: "Query id", examples: ["abc3419d"]}
+      - {column: dataset, description: "Dataset slug or __all__"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: query_id, path: id}
+      - {name: calculations, type: JSON, path: calculations}
+      - {name: breakdowns, type: JSON, path: breakdowns}
+      - {name: filters, type: JSON, path: filters}
+      - {name: filter_combination, path: filter_combination}
+      - {name: orders, type: JSON, path: orders}
+      - {name: havings, type: JSON, path: havings}
+      - {name: query_limit, type: BIGINT, path: limit}
+      - {name: time_range_s, type: BIGINT, path: time_range, description: "Relative window in seconds"}
+      - {name: start_time, type: TIMESTAMP, path: start_time, transform: epoch_s}
+      - {name: end_time, type: TIMESTAMP, path: end_time, transform: epoch_s}
+      - {name: granularity, type: BIGINT, path: granularity}
+      - {name: calculated_fields, type: JSON, path: calculated_fields}
+      - {name: spec, type: JSON, path: ".", description: "The whole spec (can be passed back as honeycomb_query.query_spec after removing time keys)"}
+      - {name: dataset, filter_only: true}
+    examples:
+      - sql: "SELECT calculations, filters, breakdowns, time_range_s FROM honeycomb_query_specs WHERE query_id = 'abc3419d' AND dataset = 'checkout-api'"
+        description: What does a trigger's saved query actually measure.
+    fixtures:
+      - file: query_spec.json
+        filters: {query_id: abc3419d}
+        expect_rows: 1
+        expect_columns: {query_id: abc3419d, query_limit: 10, time_range_s: 7200, end_time: "2023-02-15T13:30:28Z"}
+        note: "Official docs example response of GET /1/queries/{dataset}/{queryId} (docs.honeycomb.io/api/queries/get-a-query)."
+    docs_url: https://docs.honeycomb.io/api/queries/get-a-query
+
+  - name: honeycomb_query_annotations
+    title: Named saved queries (query annotations)
+    description: >-
+      Named queries of a dataset, or of the environment with dataset = '__all__': name,
+      description, query_id and source (query = saved from the query builder, board = a board
+      panel). One row per annotation. Use it to find the team's curated query for a service or
+      symptom ("Checkout 5xx by route") and then re-run it with honeycomb_query WHERE query_id =
+      ... (or inspect it with honeycomb_query_specs). Board annotations are included by default.
+    kind: entities
+    request:
+      method: GET
+      path: "/1/query_annotations/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+      query:
+        include_board_annotations: "{{ 'false' if filters.include_board_annotations == false else 'true' }}"
+      accept_status: [404]
+    filters:
+      - {column: dataset, ops: ["=", "in"], description: "Dataset slug or __all__ (environment-wide); IN fans out", examples: ["__all__"]}
+      - {column: include_board_annotations, type: BOOLEAN, description: "false = only queries saved from the query builder (API default false; this table defaults to true)"}
+    response: {rows_path: "$"}
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: description, path: description}
+      - {name: query_id, path: query_id, description: "Pass to honeycomb_query.query_id / honeycomb_query_specs.query_id (same dataset)"}
+      - {name: source, path: source, description: "query | board"}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, transform: auto_time}
+      - {name: dataset, expr: "filters.dataset if filters.dataset else none", description: "Dataset the annotation list was read from"}
+      - {name: include_board_annotations, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "Annotations are per dataset; environment-wide (__all__) ones are a separate list: query dataset IN ('<dataset>', '__all__'). An unknown dataset (404) yields 0 rows."
+      - "A query_id belongs to the dataset it was saved in: re-run it with the same dataset filter."
+    examples:
+      - sql: "SELECT name, description, query_id, source FROM honeycomb_query_annotations WHERE dataset IN ('checkout-api', '__all__') AND (name ILIKE '%error%' OR name ILIKE '%latency%')"
+        description: Find the team's saved error / latency queries for a service, to re-run with honeycomb_query.
+    fixtures:
+      - file: query_annotations.json
+        filters: {dataset: checkout-api}
+        expect_rows: 1
+        expect_columns: {id: sGUnkBHgRFN, name: "My Named Query", query_id: mabAMpSPDjH, source: query, dataset: checkout-api, created_at: "2022-10-26T21:36:04Z"}
+        note: "The docs give no full 200 example for GET /1/query_annotations/{dataset}; built strictly from the QueryAnnotation schema and its property examples (docs.honeycomb.io/api/query-annotations/list-query-annotations)."
+    docs_url: https://docs.honeycomb.io/api/query-annotations/list-query-annotations
+
+  # ------------------------------------------------------------------------------------------
+  # Schema / inventory
+  # ------------------------------------------------------------------------------------------
+  - name: honeycomb_datasets
+    title: Datasets
+    description: >-
+      Every dataset in the API key's environment (in Environments usually one per service), with
+      when it last received data. Use it to find dataset slugs and to spot a service that STOPPED
+      sending telemetry (last_written_at older than the incident).
+    kind: entities
+    request: {method: GET, path: /1/datasets}
+    response: {rows_path: "$"}
+    columns:
+      - {name: dataset, path: slug, description: "Slug used in every other table's dataset filter"}
+      - {name: name, path: name}
+      - {name: service, path: name, description: "Dataset name (= service.name for OpenTelemetry datasets)"}
+      - {name: description, path: description}
+      - {name: dataset_type, path: dataset_type, description: "metrics for time-series metrics datasets, else null"}
+      - {name: last_written_at, type: TIMESTAMP, path: last_written_at, transform: auto_time}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: columns_count, type: BIGINT, path: regular_columns_count}
+      - {name: expand_json_depth, type: BIGINT, path: expand_json_depth}
+      - {name: delete_protected, type: BOOLEAN, path: "settings.delete_protected"}
+    examples:
+      - sql: "SELECT dataset, last_written_at FROM honeycomb_datasets ORDER BY last_written_at ASC LIMIT 20"
+        description: Datasets that stopped receiving data longest ago (telemetry gaps).
+      - sql: "SELECT dataset, name, columns_count FROM honeycomb_datasets WHERE name ILIKE '%checkout%'"
+        description: Find the dataset slug for a service.
+    tests:
+      - {sql: "SELECT dataset, last_written_at FROM honeycomb_datasets LIMIT 5", min_rows: 0}
+    fixtures:
+      - file: datasets.json
+        expect_rows: 2
+        expect_columns: {dataset: my-dataset-, name: "my dataset!", last_written_at: "2022-07-22T19:52:00Z", columns_count: 12}
+        note: "Official docs example response of GET /1/datasets (docs.honeycomb.io/api/datasets/list-all-datasets)."
+    docs_url: https://docs.honeycomb.io/api/datasets/list-all-datasets
+
+  - name: honeycomb_columns
+    title: Columns of a dataset
+    description: >-
+      Columns (fields) of a dataset, or of the whole environment with dataset = '__all__', with
+      type and last_written time. Check here before filtering on a field: an unknown column
+      silently matches nothing. Filter key_name to look up one column.
+    kind: entities
+    request:
+      method: GET
+      path: "/1/columns/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+      query:
+        key_name: "{{ filters.key_name }}"
+      accept_status: [404]
+    filters:
+      - {column: dataset, description: "Dataset slug or __all__", examples: ["checkout-api"]}
+      - {column: key_name, description: "Exact column name (returns one column)", examples: ["http.route"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: key_name, path: key_name}
+      - {name: type, path: type, description: "string | float | integer | boolean | histogram"}
+      - {name: description, path: description}
+      - {name: hidden, type: BOOLEAN, path: hidden}
+      - {name: last_written, type: TIMESTAMP, path: last_written, transform: auto_time, description: "Last time an event carried this column"}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, transform: auto_time}
+      - {name: id, path: id}
+      - {name: dataset, filter_only: true}
+    pitfalls:
+      - "With key_name the API returns one object (404 when the column does not exist: 0 rows here)."
+      - "Large datasets have thousands of columns; filter with key_name or SQL LIKE."
+    examples:
+      - sql: "SELECT key_name, type, last_written FROM honeycomb_columns WHERE dataset = 'checkout-api' AND (key_name LIKE 'http.%' OR key_name LIKE '%status%')"
+        description: Which HTTP/status columns exist (http.status_code vs http.response.status_code).
+    fixtures:
+      - file: columns.json
+        filters: {dataset: my-dataset}
+        expect_rows: 2
+        expect_columns: {key_name: my_column, type: integer, hidden: false, last_written: "2022-07-26T22:38:05Z"}
+        note: "Official docs example 'list-of-columns' of GET /1/columns/{dataset} (docs.honeycomb.io/api/columns/list-all-columns)."
+      - file: column_by_key_name.json
+        filters: {key_name: my_column}
+        expect_rows: 1
+        expect_columns: {key_name: my_column, id: yUheCUmgZ8p}
+        note: "Official docs example 'get-column-by-key-name' (single object when key_name is given)."
+    docs_url: https://docs.honeycomb.io/api/columns/list-all-columns
+
+  - name: honeycomb_dataset_definitions
+    title: Dataset definitions (special columns)
+    description: >-
+      Which column of a dataset plays each special role: trace_id, span_id, parent_id, name,
+      service_name, duration_ms, error, status, route, user, log_severity, log_message... One row
+      per definition. Use it to learn the right column names before writing queries.
+    kind: entities
+    request:
+      method: GET
+      path: "/1/dataset_definitions/{{ filters.dataset }}"
+    filters:
+      - {column: dataset, required: true, description: "Dataset slug", examples: ["checkout-api"]}
+    response:
+      rows_path: "$"
+      expand:
+        - {entries: ".", as: d}
+    columns:
+      - {name: definition, path: "@d.key", description: "trace_id | span_id | parent_id | name | service_name | duration_ms | span_kind | annotation_type | link_span_id | link_trace_id | error | status | route | user | log_severity | log_message"}
+      - {name: column_name, path: "@d.value.name", description: "Mapped column or calculated field (NULL = not mapped)"}
+      - {name: column_type, path: "@d.value.column_type", description: "column | derived_column"}
+      - {name: dataset, filter_only: true}
+    examples:
+      - sql: "SELECT definition, column_name FROM honeycomb_dataset_definitions WHERE dataset = 'checkout-api' AND column_name IS NOT NULL"
+        description: The trace/duration/error/route columns this dataset uses.
+    fixtures:
+      - file: dataset_definitions.json
+        filters: {dataset: mydataset}
+        expect_rows: 16
+        expect_columns: {definition: duration_ms, column_name: duration_ms, column_type: column}
+        note: "Official docs example response of GET /1/dataset_definitions/{dataset} (docs.honeycomb.io/api/dataset-definitions/get-all-dataset-definitions)."
+    docs_url: https://docs.honeycomb.io/api/dataset-definitions/get-all-dataset-definitions
+
+  - name: honeycomb_calculated_fields
+    title: Calculated fields (derived columns)
+    description: >-
+      Calculated fields of a dataset (or environment with __all__) with their formula. SLO SLIs are
+      calculated fields: read the expression to know what an SLO counts as success. Filter alias
+      to look one up.
+    kind: entities
+    request:
+      method: GET
+      path: "/1/derived_columns/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+      query:
+        alias: "{{ filters.alias }}"
+      accept_status: [404]
+    filters:
+      - {column: dataset, description: "Dataset slug or __all__", examples: ["checkout-api"]}
+      - {column: alias, description: "Calculated field alias (e.g. an SLO's sli alias)", examples: ["error_sli"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: alias, path: alias}
+      - {name: expression, path: expression, description: "Formula, e.g. IF(EQUALS($error, true), false, true)"}
+      - {name: description, path: description}
+      - {name: id, path: id}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, transform: auto_time}
+      - {name: dataset, filter_only: true}
+    examples:
+      - sql: "SELECT alias, expression FROM honeycomb_calculated_fields WHERE dataset = '__all__' AND alias = 'error_sli'"
+        description: What an SLO's SLI actually measures.
+    fixtures:
+      - file: calculated_fields.json
+        expect_rows: 1
+        expect_columns: {alias: one, expression: "INT(1)", id: yUheCUmgZ8p}
+        note: "The official docs CalculatedField example (createCalculatedField response, same schema) as a list, per the CalculatedFieldList schema of GET /1/derived_columns/{dataset}."
+    docs_url: https://docs.honeycomb.io/api/calculated-fields/list-all-calculated-fields
+
+  - name: honeycomb_auth
+    title: API key identity
+    description: >-
+      Which team and environment the configured API key belongs to and what it may do. One row.
+      Use it to build UI links (team/environment slugs) and to explain 403s.
+    kind: entities
+    request: {method: GET, path: /1/auth}
+    response: {rows_path: "$"}
+    columns:
+      - {name: team, path: "team.slug"}
+      - {name: team_name, path: "team.name"}
+      - {name: env, path: "environment.slug", description: "Environment slug (empty for Classic)"}
+      - {name: environment_name, path: "environment.name"}
+      - {name: key_type, path: type, description: "configuration | ingest"}
+      - {name: key_id, path: id}
+      - {name: permissions, type: JSON, path: api_key_access, description: "events, markers, triggers, boards, queries, columns, createDatasets, slos, recipients, privateBoards"}
+    examples:
+      - sql: "SELECT team, env, permissions FROM honeycomb_auth"
+        description: Which environment the investigator is looking at, and whether it may run queries.
+    tests:
+      - {sql: "SELECT team, env, key_type FROM honeycomb_auth", min_rows: 1}
+    fixtures:
+      - file: auth.json
+        expect_rows: 1
+        expect_columns: {team: honeycomb-docs, env: production, key_type: configuration, key_id: FL_xMM5LapLC}
+        note: "Official docs example 'environment' of GET /1/auth (docs.honeycomb.io/api/auth/list-authorizations)."
+    docs_url: https://docs.honeycomb.io/api/auth/list-authorizations
+
+  # ------------------------------------------------------------------------------------------
+  # Changes, alerts, SLOs
+  # ------------------------------------------------------------------------------------------
+  - name: honeycomb_markers
+    title: Markers (deploys and other events on graphs)
+    description: >-
+      Markers of a dataset (or environment-wide markers with dataset = '__all__'): deploys,
+      feature-flag flips, incidents, anything teams annotate graphs with. One row per marker,
+      ts = marker start. Filter dataset (IN fans out, e.g. dataset IN ('checkout-api','__all__'))
+      and ts. This is Honeycomb's change feed.
+    kind: changes
+    request:
+      method: GET
+      path: "/1/markers/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+      accept_status: [404]
+    filters:
+      - {column: dataset, ops: ["=", "in"], description: "Dataset slug or __all__ (environment-wide markers)", examples: ["__all__"]}
+    time: {column: ts, default_lookback: 7d}
+    response: {rows_path: "$"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: start_time, transform: epoch_s, description: "Marker start (UTC)"}
+      - {name: end_ts, type: TIMESTAMP, path: end_time, transform: epoch_s, description: "End for range markers (e.g. a 5-minute deploy)"}
+      - {name: title, path: message, description: "Marker message, e.g. 'backend deploy #123'"}
+      - {name: message, path: message}
+      - {name: type, path: type, description: "Marker type (deploy, ...)"}
+      - {name: url, path: url, description: "Link attached to the marker (CI build, PR...)"}
+      - {name: id, path: id}
+      - {name: color, path: color}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, transform: auto_time}
+      - {name: dataset, filter_only: true}
+      - {name: service, expr: "filters.dataset if (filters.dataset and filters.dataset != '__all__') else none", description: "Dataset the marker was read from (= service for per-service datasets)"}
+    pitfalls:
+      - "The API returns ALL markers of the dataset (no server-side time filter); the ts predicate is applied after fetching."
+      - "Dataset markers and environment-wide (__all__) markers are separate lists: query both (dataset IN ('<service>', '__all__'))."
+      - "Markers exist only if CI/CD (honeymarker, the API, or an integration) creates them; no markers does not prove no deploy."
+    examples:
+      - sql: >-
+          SELECT ts, type, title, url FROM honeycomb_markers
+          WHERE dataset IN ('checkout-api', '__all__')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Deploys and other markers in the three hours before an incident.
+    fixtures:
+      - file: markers.json
+        filters: {dataset: my-dataset}
+        expect_rows: 2
+        expect_columns: {ts: "2016-08-12T22:26:48Z", title: "backend deploy #123", type: deploy, id: d1c84ec0, service: my-dataset}
+        note: "Official docs example response of GET /1/markers/{dataset} (docs.honeycomb.io/api/markers/list-all-markers)."
+    docs_url: https://docs.honeycomb.io/api/markers/list-all-markers
+
+  - name: honeycomb_triggers
+    title: Triggers (alert rules + triggered state)
+    description: >-
+      Triggers of a dataset (or environment-wide triggers with __all__): name, threshold, frequency,
+      query (inline spec or query_id), recipients, and `triggered` = currently over threshold
+      (firing). One row per trigger. Filter dataset (IN fans out) and SQL on name / triggered.
+    kind: alerts
+    request:
+      method: GET
+      path: "/1/triggers/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+      accept_status: [404]
+    filters:
+      - {column: dataset, ops: ["=", "in"], description: "Dataset slug or __all__", examples: ["__all__"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: description, path: description}
+      - {name: dataset_slug, path: dataset_slug, description: "__all__ for environment-wide triggers"}
+      - {name: triggered, type: BOOLEAN, path: triggered, description: "true = crossed its threshold and not resolved (firing now)"}
+      - {name: state, expr: "'disabled' if _.disabled else ('triggered' if _.triggered else 'ok')", description: "triggered | ok | disabled"}
+      - {name: disabled, type: BOOLEAN, path: disabled}
+      - {name: threshold_op, path: "threshold.op"}
+      - {name: threshold_value, type: DOUBLE, path: "threshold.value"}
+      - {name: exceeded_limit, type: BIGINT, path: "threshold.exceeded_limit", description: "Consecutive evaluations over threshold before alerting"}
+      - {name: threshold, expr: "(_.threshold.op ~ ' ' ~ _.threshold.value) if _.threshold else none", description: "e.g. '> 100'"}
+      - {name: frequency_s, type: BIGINT, path: frequency, description: "Evaluation interval in seconds"}
+      - {name: alert_type, path: alert_type, description: "on_change | on_true | on_group_change"}
+      - {name: query, type: JSON, path: query, description: "Inline query spec (calculation, filters, time_range); NULL when query_id is used"}
+      - {name: query_id, path: query_id, description: "Saved query id (look up with honeycomb_query_specs)"}
+      - {name: time_range_s, type: BIGINT, path: "query.time_range"}
+      - {name: recipients, type: JSON, path: recipients}
+      - {name: tags, type: JSON, path: tags}
+      - {name: evaluation_schedule, type: JSON, path: evaluation_schedule}
+      - {name: baseline_details, type: JSON, path: baseline_details, description: "Relative (baseline) trigger comparison, if any"}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, transform: auto_time}
+      - {name: dataset, filter_only: true}
+    pitfalls:
+      - "Dataset triggers and environment-wide (__all__) triggers are listed separately; query dataset IN ('<dataset>', '__all__')."
+      - "triggered is the current state only; Honeycomb exposes no trigger firing history API."
+    examples:
+      - sql: "SELECT name, threshold, frequency_s, query, query_id FROM honeycomb_triggers WHERE dataset IN ('checkout-api', '__all__') AND triggered"
+        description: Triggers that are firing right now, with what they measure.
+      - sql: "SELECT id, name, threshold, query FROM honeycomb_triggers WHERE dataset = 'checkout-api' AND name ILIKE '%error%'"
+        description: Look up the trigger behind an alert by name.
+    fixtures:
+      - file: triggers.json
+        filters: {dataset: checkout-api}
+        expect_rows: 2
+        expect_columns: {id: fS4WfA82kcy, name: "High error count on checkout", triggered: true, state: triggered, threshold: "> 100", threshold_value: 100.0, frequency_s: 900, time_range_s: 900}
+        note: "Built strictly from the TriggerResponse schema (BaseTrigger + inline query / query_id) of the official OpenAPI spec, docs.honeycomb.io/api/triggers/list-all-triggers (the docs give no full example response)."
+    docs_url: https://docs.honeycomb.io/api/triggers/list-all-triggers
+
+  - name: honeycomb_slos
+    title: SLOs
+    description: >-
+      SLO definitions of a dataset or the whole environment (__all__ returns every SLO, including
+      multi-dataset ones): name, SLI calculated field, target, period. One row per SLO. For live
+      compliance / budget / burn rate use honeycomb_slo_status.
+    kind: entities
+    request:
+      method: GET
+      path: "/1/slos/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+      accept_status: [404]
+    filters:
+      - {column: dataset, ops: ["=", "in"], description: "Dataset slug or __all__", examples: ["__all__"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: slo_id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: sli, path: "sli.alias", description: "Calculated field alias used as the SLI"}
+      - {name: target_pct, type: DOUBLE, expr: "_.target_per_million / 10000.0 if _.target_per_million is number else none", description: "Target as a percentage (target_per_million / 10000)"}
+      - {name: target_per_million, type: BIGINT, path: target_per_million}
+      - {name: time_period_days, type: BIGINT, path: time_period_days}
+      - {name: dataset_slugs, type: JSON, path: dataset_slugs}
+      - {name: tags, type: JSON, path: tags}
+      - {name: reset_at, type: TIMESTAMP, path: reset_at, transform: auto_time}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, transform: auto_time}
+      - {name: dataset, filter_only: true}
+    examples:
+      - sql: "SELECT slo_id, name, sli, target_pct, time_period_days FROM honeycomb_slos WHERE dataset = '__all__'"
+        description: Every SLO in the environment.
+    fixtures:
+      - file: slos.json
+        expect_rows: 1
+        expect_columns: {slo_id: bZ1aRHAUsjG, name: "My SLO", sli: my-sli, target_pct: 98.99, time_period_days: 30}
+        note: "The official docs SLO example (get-slo, GET /1/slos/{dataset}/{id}) as a one-element list, matching the array-of-SLO schema of GET /1/slos/{dataset} (docs.honeycomb.io/api/slos/get-all-slos)."
+    docs_url: https://docs.honeycomb.io/api/slos/get-all-slos
+
+  - name: honeycomb_slo_status
+    title: SLO compliance, budget and burn rate
+    description: >-
+      One SLO with reporting data (detailed=true, Enterprise): compliance %, budget_remaining %,
+      status (normal | triggered = a burn alert is firing | no_alerts | no_events) and burn_rate
+      over the last 4 hours. Filter slo_id (required; IN fans out) and dataset (default __all__).
+    kind: alerts
+    request:
+      method: GET
+      path: "/1/slos/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}/{{ filters.slo_id }}"
+      query: {detailed: "true"}
+    filters:
+      - {column: slo_id, required: true, ops: ["=", "in"], description: "SLO id from honeycomb_slos", examples: ["bZ1aRHAUsjG"]}
+      - {column: dataset, description: "Dataset slug the SLO belongs to, or __all__"}
+    response: {rows_path: "$"}
+    columns:
+      - {name: slo_id, path: id}
+      - {name: name, path: name}
+      - {name: status, path: status, description: "normal | triggered | no_alerts | no_events"}
+      - {name: state, path: status}
+      - {name: compliance_pct, type: DOUBLE, path: compliance}
+      - {name: budget_remaining_pct, type: DOUBLE, path: budget_remaining, description: "Can be negative (budget exhausted)"}
+      - {name: burn_rate, type: DOUBLE, path: burn_rate, description: "Actual / expected failures over the last 4 hours (1 = on budget)"}
+      - {name: target_pct, type: DOUBLE, expr: "_.target_per_million / 10000.0 if _.target_per_million is number else none"}
+      - {name: time_period_days, type: BIGINT, path: time_period_days}
+      - {name: sli, path: "sli.alias"}
+      - {name: dataset_slugs, type: JSON, path: dataset_slugs}
+      - {name: dataset, filter_only: true}
+    pitfalls:
+      - "Reporting fields (compliance, budget_remaining, status, burn_rate) need the Enterprise plan; without it they are NULL."
+      - "burn_rate is always over the last 4 hours relative to NOW, not the incident window; use honeycomb_slo_history for the past."
+    examples:
+      - sql: "SELECT name, status, compliance_pct, budget_remaining_pct, burn_rate FROM honeycomb_slo_status WHERE slo_id IN ('bZ1aRHAUsjG', '2LBq9LckbcA')"
+        description: Are these SLOs burning budget right now?
+    fixtures:
+      - file: slo_detailed.json
+        expect_rows: 1
+        expect_columns: {slo_id: bZ1aRHAUsjG, status: normal, compliance_pct: 95.39, budget_remaining_pct: 7.73, burn_rate: 5.39, target_pct: 98.99}
+        note: "Official docs example 'get-slo-detailed' of GET /1/slos/{dataset}/{sloId}?detailed=true (docs.honeycomb.io/api/slos/get-an-slo)."
+    docs_url: https://docs.honeycomb.io/api/slos/get-an-slo
+
+  - name: honeycomb_slo_history
+    title: SLO compliance history
+    description: >-
+      Historical compliance and budget_remaining of up to 24 SLOs over the ts window (POST
+      /1/reporting/slos/historical). One row per (SLO, interval). Filter slo_id (required, IN list
+      sent as one request) and ts (up to a year back, not in the future).
+    kind: timeseries
+    request:
+      method: POST
+      path: /1/reporting/slos/historical
+      body:
+        ids: "{{ filters.slo_id | as_list }}"
+        start_time: "{{ time.start | epoch_s }}"
+        end_time: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: slo_id, required: true, ops: ["=", "in"], fan_out: false, description: "SLO id(s), max 24", examples: ["2LBq9LckbcA"]}
+    time: {column: ts, default_lookback: 7d, retention: 365d}
+    response:
+      rows_path: "$"
+      expand:
+        - {entries: ".", as: s}
+        - {explode: "@s.value", as: h}
+    columns:
+      - {name: slo_id, path: "@s.key"}
+      - {name: ts, type: TIMESTAMP, path: "@h.timestamp", transform: epoch_s, description: "Interval start"}
+      - {name: compliance_pct, type: DOUBLE, path: "@h.compliance"}
+      - {name: budget_remaining_pct, type: DOUBLE, path: "@h.budget_remaining"}
+    pitfalls:
+      - "An SLO with no data in the window maps to an empty list (no rows), not zeros."
+    examples:
+      - sql: >-
+          SELECT slo_id, ts, compliance_pct, budget_remaining_pct FROM honeycomb_slo_history
+          WHERE slo_id IN ('2LBq9LckbcA', 'CzcpPs7cJ4d')
+            AND ts BETWEEN TIMESTAMP '2026-09-24 00:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY slo_id, ts
+        description: How budget evolved during the week before the incident.
+    fixtures:
+      - file: slo_history.json
+        filters: {slo_id: [2LBq9LckbcA, CzcpPs7cJ4d]}
+        expect_rows: 3
+        expect_columns: {slo_id: 2LBq9LckbcA, ts: "2025-04-14T17:00:00Z", compliance_pct: 91.44851657940663, budget_remaining_pct: 14.48516579406632}
+        note: "Official docs example of the SLOHistoryResponse of POST /1/reporting/slos/historical (docs.honeycomb.io/api/reporting/get-slo-history)."
+    docs_url: https://docs.honeycomb.io/api/reporting/get-slo-history
+
+  - name: honeycomb_slo_hourly_counts
+    title: SLO hourly good / bad event counts
+    description: >-
+      Raw SLI counts of one SLO per hour over the ts window (GET
+      /1/slos/{dataset}/{sloId}/counts/history): total_count (good + bad events), error_count (bad
+      events) and value = error_count / total_count. One row per hour, ts = hour start; the newest
+      bucket can be the in-progress hour (is_partial). Filter slo_id (required; IN fans out),
+      dataset (default __all__) and ts. Use it to see the hour an SLO started failing and how many
+      requests were bad - sharper than compliance %.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/1/slos/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}/{{ filters.slo_id }}/counts/history"
+      query:
+        start_time: "{{ time.start | epoch_s }}"
+        end_time: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: slo_id, required: true, ops: ["=", "in"], description: "SLO id from honeycomb_slos", examples: ["bZ1aRHAUsjG"]}
+      - {column: dataset, description: "Dataset slug the SLO belongs to, or __all__"}
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    response:
+      rows_path: "$.buckets[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: start_time, transform: epoch_s, description: "Hour start (UTC)"}
+      - {name: end_ts, type: TIMESTAMP, path: end_time, transform: epoch_s}
+      - {name: slo_id, path: "$.slo_id"}
+      - {name: total_count, type: BIGINT, path: total_count, description: "Good + bad events in the hour"}
+      - {name: error_count, type: BIGINT, path: error_count, description: "Bad (SLI false) events in the hour"}
+      - {name: value, type: DOUBLE, expr: "(_.error_count / _.total_count) if (_.total_count and _.error_count is number) else none", description: "Error ratio (0..1) of the hour"}
+      - {name: is_partial, type: BOOLEAN, path: is_partial, description: "In-progress hour: counts still growing"}
+      - {name: dataset, filter_only: true}
+    sort_hint: "Ordered by hour ascending."
+    pitfalls:
+      - "Enterprise plan only, and the feature must be enabled for the team (else 403/404). Needs a key with Manage SLOs."
+      - "Missing hours mean no data was recorded, not zero events. The last bucket may be partial: a lower count there is not a recovery."
+      - "Counts are raw and ignore budget resets; for reset-aware compliance use honeycomb_slo_status / honeycomb_slo_history."
+    examples:
+      - sql: >-
+          SELECT ts, total_count, error_count, round(100 * value, 3) AS error_pct, is_partial
+          FROM honeycomb_slo_hourly_counts
+          WHERE slo_id = 'bZ1aRHAUsjG'
+            AND ts BETWEEN TIMESTAMP '2026-09-30 12:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Hour-by-hour bad events of an SLO over the day before the incident.
+    fixtures:
+      - file: slo_hourly_counts.json
+        filters: {slo_id: bZ1aRHAUsjG}
+        expect_rows: 3
+        expect_columns: {ts: "2025-04-20T17:00:00Z", slo_id: bZ1aRHAUsjG, total_count: 74520, error_count: 182, is_partial: false}
+        note: "Official docs example response of GET /1/slos/{dataset}/{sloId}/counts/history (docs.honeycomb.io/api/slos/get-slo-hourly-counts-history)."
+    docs_url: https://docs.honeycomb.io/api/slos/get-slo-hourly-counts-history
+
+  - name: honeycomb_slo_counts
+    title: SLO per-minute good / bad counts (current hour)
+    description: >-
+      Realtime SLI counts of one SLO per minute (GET /1/slos/{dataset}/{sloId}/counts):
+      total_count, error_count and value = error ratio for each minute. The API only serves ONE
+      clock hour within the last 24 hours per request, so the window is narrowed to the clock
+      hour that contains the end of the ts window. One row per minute. Filter slo_id (required;
+      IN fans out), dataset and ts. Use it for "is the SLO failing right now, minute by minute".
+    kind: timeseries
+    request:
+      method: GET
+      path: "/1/slos/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}/{{ filters.slo_id }}/counts"
+      query:
+        start_time: "{{ [time.start | epoch_s, ((time.end | epoch_s) - 1) // 3600 * 3600] | max }}"
+        end_time: "{{ [time.end | epoch_s, ((time.end | epoch_s) - 1) // 3600 * 3600 + 3599] | min }}"
+    filters:
+      - {column: slo_id, required: true, ops: ["=", "in"], description: "SLO id from honeycomb_slos", examples: ["bZ1aRHAUsjG"]}
+      - {column: dataset, description: "Dataset slug the SLO belongs to, or __all__"}
+    time: {column: ts, default_lookback: 1h, max_window: 1h, retention: 24h, control_lookback: 1h}
+    response:
+      rows_path: "$.windows[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: window_start, transform: epoch_s, description: "Minute start (UTC)"}
+      - {name: end_ts, type: TIMESTAMP, path: window_end, transform: epoch_s}
+      - {name: slo_id, path: "$.slo_id"}
+      - {name: total_count, type: BIGINT, path: total_count}
+      - {name: error_count, type: BIGINT, path: error_count}
+      - {name: value, type: DOUBLE, expr: "(_.error_count / _.total_count) if (_.total_count and _.error_count is number) else none", description: "Error ratio (0..1) of the minute"}
+      - {name: is_partial, type: BOOLEAN, path: is_partial, description: "Provisional minute (started < 10 min ago, after a gap, or across the hour reset)"}
+      - {name: period_start, type: TIMESTAMP, path: "$.period_start", transform: epoch_s, description: "Start of the current accumulation hour"}
+      - {name: dataset, filter_only: true}
+    sort_hint: "Ordered by minute ascending."
+    pitfalls:
+      - "Only the last 24 hours and ONE clock hour per request: a longer ts window silently becomes the clock hour containing its end. For earlier or longer periods use honeycomb_slo_hourly_counts."
+      - "Enterprise plan only, and the feature must be enabled for the team. Needs a key with Manage SLOs."
+      - "Minutes can be missing (unavailable data, not zero events); is_partial minutes are provisional."
+    examples:
+      - sql: >-
+          SELECT ts, total_count, error_count, value AS error_ratio, is_partial
+          FROM honeycomb_slo_counts WHERE slo_id = 'bZ1aRHAUsjG' ORDER BY ts
+        description: Minute-by-minute good/bad events of an SLO in the current hour.
+    fixtures:
+      - file: slo_counts.json
+        filters: {slo_id: bZ1aRHAUsjG}
+        expect_rows: 3
+        expect_columns: {ts: "2025-04-21T16:00:00Z", slo_id: bZ1aRHAUsjG, total_count: 1243, error_count: 3, is_partial: false, period_start: "2025-04-21T16:00:00Z"}
+        note: "Official docs example response of GET /1/slos/{dataset}/{sloId}/counts (docs.honeycomb.io/api/slos/get-slo-realtime-counts)."
+    docs_url: https://docs.honeycomb.io/api/slos/get-slo-realtime-counts
+
+  - name: honeycomb_burn_alerts
+    title: SLO burn alerts
+    description: >-
+      Burn alerts of one SLO with `triggered` (currently firing), type (exhaustion_time /
+      budget_rate) and thresholds. Filter slo_id (required; IN fans out) and dataset (default
+      __all__).
+    kind: alerts
+    request:
+      method: GET
+      path: "/1/burn_alerts/{{ filters.dataset or env.HONEYCOMB_DEFAULT_DATASET or '__all__' }}"
+      query:
+        slo_id: "{{ filters.slo_id }}"
+    filters:
+      - {column: slo_id, required: true, ops: ["=", "in"], description: "SLO id", examples: ["2LBq9LckbcA"]}
+      - {column: dataset, description: "Dataset slug of the SLO, or __all__"}
+    response: {rows_path: "$"}
+    columns:
+      - {name: id, path: id}
+      - {name: slo_id, path: "slo.id"}
+      - {name: alert_type, path: alert_type, description: "exhaustion_time | budget_rate"}
+      - {name: triggered, type: BOOLEAN, path: triggered}
+      - {name: state, expr: "'triggered' if _.triggered else 'ok'"}
+      - {name: description, path: description}
+      - {name: exhaustion_minutes, type: BIGINT, path: exhaustion_minutes, description: "exhaustion_time: alert when budget runs out within this many minutes"}
+      - {name: budget_rate_window_minutes, type: BIGINT, path: budget_rate_window_minutes}
+      - {name: budget_rate_decrease_pct, type: DOUBLE, expr: "_.budget_rate_decrease_threshold_per_million / 10000.0 if _.budget_rate_decrease_threshold_per_million is number else none", description: "budget_rate: alert when budget drops by this % within the window"}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, transform: auto_time}
+      - {name: dataset, filter_only: true}
+    pitfalls:
+      - "There is no 'all burn alerts' endpoint: list SLO ids with honeycomb_slos first."
+    examples:
+      - sql: "SELECT slo_id, alert_type, triggered, exhaustion_minutes, description FROM honeycomb_burn_alerts WHERE slo_id = '2LBq9LckbcA'"
+        description: Is a burn alert firing for this SLO, and what is its runbook text.
+    fixtures:
+      - file: burn_alerts.json
+        filters: {slo_id: 2LBq9LckbcA}
+        expect_rows: 2
+        expect_columns: {id: fS7vfB81Wcy, slo_id: 2LBq9LckbcA, alert_type: exhaustion_time, triggered: true, state: triggered, exhaustion_minutes: 120}
+        note: "Official docs example of GET /1/burn_alerts/{dataset}?slo_id= (docs.honeycomb.io/api/burn-alerts/list-all-burn-alerts-for-an-slo)."
+    docs_url: https://docs.honeycomb.io/api/burn-alerts/list-all-burn-alerts-for-an-slo
+
+  - name: honeycomb_signals
+    title: Anomaly Detection signals
+    description: >-
+      Anomaly Detection signals (per service: error_rate or presence) with status (onboarding |
+      normal | anomalous | ineligible | off), currently_anomalous and the last anomaly window.
+      Filter service, dataset, measured_signal, status, currently_anomalous.
+    kind: alerts
+    request:
+      method: GET
+      path: /1/signals
+      query:
+        service_name: "{{ filters.service }}"
+        dataset_slug: "{{ filters.dataset }}"
+        measured_signal: "{{ filters.measured_signal }}"
+        status: "{{ filters.status }}"
+        currently_anomalous: "{{ filters.currently_anomalous }}"
+        "page[size]": 100
+    filters:
+      - {column: service, description: "Service name", examples: ["checkout-api"]}
+      - {column: dataset, description: "Dataset slug"}
+      - {column: measured_signal, description: "error_rate | presence"}
+      - {column: status, description: "onboarding | normal | anomalous | ineligible | off"}
+      - {column: currently_anomalous, type: BOOLEAN, description: "true = anomalous now"}
+    pagination: {type: next_url, next_url_path: "$.links.next", max_pages: 5}
+    response: {rows_path: "$.signals[*]"}
+    columns:
+      - {name: id, path: id}
+      - {name: service, path: service_name}
+      - {name: dataset, path: dataset_slug}
+      - {name: env, path: environment_slug}
+      - {name: measured_signal, path: measured_signal}
+      - {name: status, path: status}
+      - {name: state, path: status}
+      - {name: currently_anomalous, type: BOOLEAN, path: currently_anomalous}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: sensitivity, path: sensitivity, description: "low | medium | high (NULL for presence / untrained)"}
+      - {name: last_anomaly_started_at, type: TIMESTAMP, path: last_anomaly_started_at, transform: epoch_s}
+      - {name: last_anomaly_ended_at, type: TIMESTAMP, path: last_anomaly_ended_at, transform: epoch_s, description: "NULL while still anomalous"}
+      - {name: created_at, type: TIMESTAMP, path: created_at, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, transform: auto_time}
+    pitfalls:
+      - "Needs a key with the Manage Signals permission; Anomaly Detection must be enabled for the environment (else 0 rows or 403)."
+    examples:
+      - sql: "SELECT service, measured_signal, last_anomaly_started_at FROM honeycomb_signals WHERE currently_anomalous = true"
+        description: Which services are anomalous right now (error rate or disappeared traffic).
+    fixtures:
+      - file: signals.json
+        expect_rows: 1
+        expect_columns: {id: hcasp_01j9x1yq0k2t8m9n3v4b5r6c7d, service: checkout-api, status: anomalous, currently_anomalous: true, last_anomaly_started_at: "2025-03-04T12:00:00Z"}
+        note: "Built strictly from the PaginatedSignalsResponse / Signal schema of the official OpenAPI spec and its property examples (docs.honeycomb.io/api/anomaly-detection/list-all-signals)."
+    docs_url: https://docs.honeycomb.io/api/anomaly-detection/list-all-signals
+
+  - name: honeycomb_signal_anomalies
+    title: Historical anomalies of a signal
+    description: >-
+      Resolved anomalies of one signal in the ts window (max 30 days), most recent first: start,
+      end, measured value and the trained normal band. Filter signal_id (required) and ts.
+    kind: events
+    request:
+      method: GET
+      path: "/1/signals/{{ filters.signal_id }}/historical_anomalies"
+      query:
+        start_time: "{{ time.start | epoch_s }}"
+        end_time: "{{ time.end | epoch_s }}"
+        "page[size]": 100
+    filters:
+      - {column: signal_id, required: true, ops: ["=", "in"], description: "Signal id from honeycomb_signals", examples: ["hcasp_01j9x1yq0k2t8m9n3v4b5r6c7d"]}
+    time: {column: ts, default_lookback: 7d, max_window: 30d}
+    pagination: {type: next_url, next_url_path: "$.links.next", max_pages: 5}
+    response: {rows_path: "$.historical_anomalies[*]"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: started_at, transform: epoch_s, description: "Anomaly start"}
+      - {name: ended_at, type: TIMESTAMP, path: ended_at, transform: epoch_s}
+      - {name: duration_s, type: BIGINT, expr: "(_.ended_at - _.started_at) if (_.ended_at and _.started_at) else none"}
+      - {name: value, type: DOUBLE, path: measurement, description: "Measured value (e.g. error rate fraction)"}
+      - {name: normal_lower, type: DOUBLE, path: "normal_range.lower"}
+      - {name: normal_upper, type: DOUBLE, path: "normal_range.upper"}
+      - {name: id, path: id}
+      - {name: signal_id, filter_only: true}
+    pitfalls:
+      - "Only RESOLVED anomalies are listed; an ongoing anomaly shows up in honeycomb_signals.currently_anomalous instead."
+    examples:
+      - sql: "SELECT ts, ended_at, value, normal_upper FROM honeycomb_signal_anomalies WHERE signal_id = 'hcasp_01j9x1yq0k2t8m9n3v4b5r6c7d' ORDER BY ts DESC"
+        description: Has this service had similar anomalies recently?
+    fixtures:
+      - file: historical_anomalies.json
+        expect_rows: 1
+        expect_columns: {ts: "2025-03-04T12:00:00Z", duration_s: 3600, value: 0.42, normal_upper: 0.08}
+        note: "Built strictly from the PaginatedHistoricalAnomaliesResponse / HistoricalAnomaly schema of the official OpenAPI spec and its property examples (docs.honeycomb.io/api/anomaly-detection/list-historical-anomalies)."
+    docs_url: https://docs.honeycomb.io/api/anomaly-detection/list-historical-anomalies
+
+  - name: honeycomb_service_map
+    title: Service dependencies (service map)
+    description: >-
+      Service-to-service call edges observed in traces over the ts window: parent (caller), child
+      (callee), call_count. Filter service (only edges touching that service; an IN list is sent
+      as several service nodes in ONE map request) and ts. Implemented as POST
+      /1/maps/dependencies/requests (start_time/end_time epoch seconds, filters [{name, type:
+      service}]) then polling GET /1/maps/dependencies/requests/{id} until status != pending and
+      following links.next (page[size] 100).
+    kind: entities
+    steps:
+      - name: create
+        method: POST
+        path: /1/maps/dependencies/requests
+        query: {limit: "{{ [limit or 10000, 64000] | min }}"}
+        headers: {Content-Type: application/json}
+        body_format: text
+        body: >-
+          {"start_time": {{ time.start | epoch_s }}, "end_time": {{ time.end | epoch_s }}{% if filters.service %}, "filters": [{% for s in (filters.service | as_list) %}{"name": {{ s | string | tojson }}, "type": "service"}{{ ', ' if not loop.last }}{% endfor %}]{% endif %}}
+        capture: {request_id: "$.request_id"}
+      - name: results
+        method: GET
+        path: "/1/maps/dependencies/requests/{{ captures.request_id }}"
+        query: {"page[size]": 100}
+        poll: {until: "response.status != 'pending'", interval_s: 1, timeout_s: 40}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Only dependencies involving these service node names (one request, all nodes)", examples: ["user-service"]}
+    time: {column: ts, default_lookback: 2h, max_window: 7d, reapply: false}
+    pagination: {type: next_url, next_url_path: "$.links.next", max_pages: 10}
+    response:
+      rows_path: "$.dependencies[*]"
+      errors:
+        - {path: "$.status", equals: error, message: "$.status", hint: "the service map request failed (status error); retry with a shorter window"}
+    columns:
+      - {name: parent_service, path: "parent_node.name", description: "Caller"}
+      - {name: child_service, path: "child_node.name", description: "Callee"}
+      - {name: call_count, type: BIGINT, path: call_count}
+      - {name: parent_type, path: "parent_node.type"}
+      - {name: child_type, path: "child_node.type"}
+      - {name: service, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Needs a key with the Read Service Maps permission. Edges come from trace parent/child spans across services: a service that is not instrumented (or whose spans are dropped by sampling) has no edges."
+      - "call_count is the number of calls in the window (not a rate); compare windows of equal length."
+      - "status error is HTTP 200 with dependencies null (declared as an error rule)."
+    examples:
+      - sql: "SELECT parent_service, child_service, call_count FROM honeycomb_service_map WHERE service = 'checkout-api' ORDER BY call_count DESC"
+        description: Upstream callers and downstream dependencies of a service.
+      - sql: >-
+          SELECT parent_service AS caller, call_count FROM honeycomb_service_map
+          WHERE service IN ('payments-api', 'checkout-api')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND child_service = 'payments-api'
+          ORDER BY call_count DESC
+        description: Who called the failing payments service during the incident hour.
+    fixtures:
+      - file: map_dependencies.json
+        expect_rows: 1
+        expect_columns: {parent_service: frontend, child_service: user-service, call_count: 142}
+        note: "Built strictly from the GetMapDependenciesResponse / MapDependency / MapNode schema of the official OpenAPI spec and its property examples (docs.honeycomb.io/api/service-maps/get-map-dependencies)."
+      - file: map_dependencies_error.json
+        expect_error: "service map request failed"
+        note: "Built strictly from the GetMapDependenciesResponse schema: status 'error' with dependencies null is returned with HTTP 200 (create-a-map-dependency-request: '200: results are ready, or the request failed. Check status')."
+    docs_url: https://docs.honeycomb.io/api/service-maps/get-map-dependencies
+
+  - name: honeycomb_boards
+    title: Boards
+    description: >-
+      Boards (dashboards) of the environment with their panels (query ids, SLO ids, text). One row
+      per board; panels as JSON. Use it to find the team's curated view of a service.
+    kind: entities
+    request: {method: GET, path: /1/boards}
+    response: {rows_path: "$"}
+    columns:
+      - {name: id, path: id}
+      - {name: title, path: name}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: type, path: type}
+      - {name: panels, type: JSON, path: panels, description: "query_panel.query_id / slo_panel.slo_id / text_panel.content"}
+      - {name: panel_count, type: BIGINT, path: panels, transform: length}
+      - {name: tags, type: JSON, path: tags}
+      - {name: url, path: "links.board_url"}
+      - {name: layout_generation, path: layout_generation}
+    examples:
+      - sql: "SELECT id, title, description, panel_count, url FROM honeycomb_boards WHERE title ILIKE '%checkout%' OR description ILIKE '%checkout%'"
+        description: Find boards about a service.
+    fixtures:
+      - file: boards.json
+        expect_rows: 2
+        expect_columns: {id: abc123, title: "Production Monitoring", panel_count: 2, type: flexible}
+        note: "Official docs example 'Mixed Board Types' of GET /1/boards (docs.honeycomb.io/api/boards/list-all-boards)."
+    docs_url: https://docs.honeycomb.io/api/boards/list-all-boards
+
+roles:
+  traces:
+    table: honeycomb_query
+    filters:
+      dataset: "__all__"
+      service: "{{ service }}"
+      calculations: "MAX(duration_ms), COUNT"
+      breakdowns: "trace.trace_id, name, service.name"
+      filter_expr: "{{ 'error = true' if error_only else 'trace.parent_id does-not-exist' }}"
+    columns: {trace_id: trace_id, service: service, duration_ms: value, url: url}
+    query_language: honeycomb_query
+    notes: "Aggregated per trace (no raw span listing API): top traces by MAX(duration_ms); one query-result creation (10/min)."
+  trace_detail:
+    table: honeycomb_query
+    filters:
+      dataset: "__all__"
+      calculations: "MAX(duration_ms)"
+      breakdowns: "trace.span_id, trace.parent_id, service.name, name"
+      orders: "MAX(duration_ms) desc"
+    columns: {trace_id: trace_id, service: service, duration_ms: value, url: url}
+    query_language: honeycomb_query
+    notes: "Filter trace_id = '<id>': one row per span (span id, parent, service, name, duration)."
+  metrics:
+    table: honeycomb_query_series
+    filters:
+      dataset: "__all__"
+      service: "{{ service }}"
+      filter_expr: "{{ 'error = true' if error_only else '' }}"
+    columns: {ts: ts, value: value, labels: data}
+    query_language: honeycomb_query
+    notes: "COUNT (default) or any calculation over spans/events as a time series."
+  change_events:
+    table: honeycomb_markers
+    filters:
+      dataset: "{{ [service, '__all__'] if service else '__all__' }}"
+    columns: {ts: ts, service: service, title: title, url: url, type: type}
+  alert_rules:
+    table: honeycomb_triggers
+    filters:
+      dataset: "{{ [service, '__all__'] if service else '__all__' }}"
+    columns: {id: id, name: name, query: query, threshold: threshold, state: state}
+  active_alerts:
+    table: honeycomb_signals
+    filters:
+      service: "{{ service }}"
+      currently_anomalous: "{{ true }}"
+    columns: {name: measured_signal, service: service, state: status, ts: last_anomaly_started_at}
+    notes: "Anomalous Anomaly Detection signals (server-side filter). Firing triggers: honeycomb_triggers WHERE triggered (no server-side filter, so not bound here)."
+  slo:
+    table: honeycomb_slos
+    filters: {dataset: "__all__"}
+    columns: {id: slo_id, name: name, target: target_pct}
+    notes: "Live compliance / budget / burn rate: honeycomb_slo_status WHERE slo_id = ...; history: honeycomb_slo_history; hourly / per-minute good-vs-bad event counts: honeycomb_slo_hourly_counts / honeycomb_slo_counts (Enterprise); burn alerts: honeycomb_burn_alerts"
+  service_map:
+    table: honeycomb_service_map
+    filters: {service: "{{ service }}"}
+    columns: {service: parent_service, calls: child_service, value: call_count}
+  services:
+    table: honeycomb_datasets
+    columns: {service: service, ts: last_written_at}
+  dashboards:
+    table: honeycomb_boards
+    columns: {id: id, title: title, url: url}

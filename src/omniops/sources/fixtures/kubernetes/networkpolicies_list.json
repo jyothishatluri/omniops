@@ -1,0 +1,41 @@
+{
+ "kind": "NetworkPolicyList",
+ "apiVersion": "networking.k8s.io/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "restrict-cart-ingress",
+    "namespace": "shop",
+    "uid": "f5b52637-0000-4000-8000-000000000015",
+    "generation": 1,
+    "creationTimestamp": "2026-10-01T11:40:00Z",
+    "managedFields": [
+     {
+      "manager": "kubectl-client-side-apply",
+      "operation": "Update",
+      "apiVersion": "v1",
+      "time": "2026-10-01T11:40:00Z",
+      "fieldsType": "FieldsV1",
+      "fieldsV1": {
+       "f:metadata": {}
+      }
+     }
+    ]
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "app.kubernetes.io/name": "cart"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ]
+   }
+  }
+ ]
+}

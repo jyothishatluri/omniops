@@ -1,0 +1,17 @@
+{
+  "from": "2025-01-15T00:00:00Z",
+  "to": "2025-01-15T01:00:00Z",
+  "window": "1m0s",
+  "records": [
+    {
+      "values": ["my-pipeline", "worker-1"],
+      "timeseries": [
+        {"timestamp": "2025-01-15T00:01:00Z", "value": 1048576},
+        {"timestamp": "2025-01-15T00:02:00Z", "value": 2097152},
+        {"timestamp": "2025-01-15T00:03:00Z", "value": 3145728}
+      ],
+      "aggregate": {"value": 6291456}
+    }
+  ],
+  "keys": ["ed.tag", "host.name"]
+}

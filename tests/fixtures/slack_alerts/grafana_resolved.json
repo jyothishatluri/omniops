@@ -1,0 +1,43 @@
+{
+  "platform": "grafana",
+  "description": "Grafana Alerting default Slack message for the same alert as grafana_firing after it resolved (EndsAt set, so the dashboard link ends at the resolution).",
+  "provenance": "Same sources as grafana_firing. For resolved alerts template_data.go sets the dashboard/panel 'to' to EndsAt; the color is #36a64f; the subject is '[RESOLVED] ...'.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B02GRAFANA",
+    "username": "Grafana",
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "36a64f",
+        "fallback": "[RESOLVED] CheckoutHighErrorRate Shop (shop checkout critical payments)",
+        "title": "[RESOLVED] CheckoutHighErrorRate Shop (shop checkout critical payments)",
+        "title_link": "https://grafana.acme.example/alerting/grafana/fe2kq1x9abcd0e/view?orgId=1",
+        "text": "**Resolved**\n\nValue: A=0.0121, C=0\nLabels:\n - alertname = CheckoutHighErrorRate\n - grafana_folder = Shop\n - namespace = shop\n - service = checkout\n - severity = critical\n - team = payments\nAnnotations:\n - description = 1.2% of checkout requests are failing with 5xx (threshold 5%).\n - runbook_url = https://wiki.acme.example/runbooks/checkout-errors\n - summary = Checkout 5xx error rate above 5%\nSource: https://grafana.acme.example/alerting/grafana/fe2kq1x9abcd0e/view?orgId=1\nSilence: https://grafana.acme.example/alerting/silence/new?alertmanager=grafana&amp;matcher=__alert_rule_uid__%3Dfe2kq1x9abcd0e&amp;matcher=namespace%3Dshop&amp;matcher=service%3Dcheckout&amp;matcher=severity%3Dcritical&amp;matcher=team%3Dpayments&amp;orgId=1\nDashboard: https://grafana.acme.example/d/checkout-red?from=1792501320000&amp;orgId=1&amp;to=1792506120000\nPanel: https://grafana.acme.example/d/checkout-red?from=1792501320000&amp;orgId=1&amp;to=1792506120000&amp;viewPanel=4\n",
+        "footer": "Grafana v12.2.1",
+        "footer_icon": "https://grafana.com/static/assets/img/fav32.png",
+        "ts": 1792506150
+      }
+    ],
+    "ts": "1792506151.000700",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792506151.000700",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "grafana",
+    "rule_id": "fe2kq1x9abcd0e",
+    "rule_name": "CheckoutHighErrorRate",
+    "status": "resolved",
+    "raw_status": "RESOLVED",
+    "is_recovery": true,
+    "group": "namespace=shop,service=checkout,team=payments",
+    "value": "A=0.0121, C=0",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "window_start": "2026-10-20T13:02:00Z",
+    "window_end": "2026-10-20T14:22:00Z",
+    "same_key_as": "grafana_firing.json"
+  }
+}

@@ -1,0 +1,81 @@
+{
+    "data": [
+        {
+            "id": "4e8de428-f403-4e82-b46a-4402b8e7a5ed",
+            "name": "EscalationName",
+            "description": "EscalationDescription",
+            "rules": [
+                {
+                    "condition": "if-not-closed",
+                    "notifyType": "default",
+                    "delay": {
+                        "timeAmount": 0,
+                        "timeUnit": "minutes"
+                    },
+                    "recipient": {
+                        "type": "user",
+                        "id": "1a1b24d2-a218-4309-af6a-cca8a8e6d344",
+                        "username": "alp@opsgenie.com"
+                    }
+                }
+            ],
+            "repeat": {
+              "waitInterval": 15,
+              "count": 13,
+              "resetRecipientStates": true,
+              "closeAlertAfterAll": true
+            }
+        },
+        {
+            "id": "d8b704e3-665d-4387-8678-2816dc8d4d5a",
+            "name": "ops_team_escalation",
+            "ownerTeam": {
+                "id": "0c55f7f6-e081-4915-91df-d35b459ecaa1",
+                "name": "ops_team"
+            },
+            "rules": [
+                {
+                    "condition": "if-not-acked",
+                    "notifyType": "default",
+                    "delay": {
+                        "timeAmount": 0,
+                        "timeUnit": "minutes"
+                    },
+                    "recipient": {
+                        "type": "schedule",
+                        "id": "3bc03dcc-b5eb-475d-9d66-3c574c6a8d3f",
+                        "name": "ops_team_schedule"
+                    }
+                },
+                {
+                    "condition": "if-not-acked",
+                    "notifyType": "next",
+                    "delay": {
+                        "timeAmount": 5,
+                        "timeUnit": "minutes"
+                    },
+                    "recipient": {
+                        "type": "schedule",
+                        "id": "3bc03dcc-b5eb-475d-9d66-3c574c6a8d3f",
+                        "name": "ops_team_schedule"
+                    }
+                },
+                {
+                    "condition": "if-not-acked",
+                    "notifyType": "all",
+                    "delay": {
+                        "timeAmount": 10,
+                        "timeUnit": "minutes"
+                    },
+                    "recipient": {
+                        "type": "team",
+                        "id": "0c55f7f6-e081-4915-91df-d35b459ecaa1",
+                        "name": "ops_team"
+                    }
+                }
+            ]
+        }
+    ],
+    "took": 0.99,
+    "requestId": "c5bb2a56-b02d-49e9-b073-f5264fd4115d"
+}

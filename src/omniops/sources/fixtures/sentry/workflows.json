@@ -1,0 +1,179 @@
+[
+ {
+  "id": "123",
+  "name": "Send a notification for high priority issues",
+  "organizationId": "1",
+  "createdBy": null,
+  "dateCreated": "2025-03-18T20:48:55.495059Z",
+  "dateUpdated": "2025-03-18T20:48:55.579094Z",
+  "triggers": {
+   "id": "12345",
+   "organizationId": "1",
+   "logicType": "any-short",
+   "conditions": [
+    {
+     "id": "2345",
+     "type": "new_high_priority_issue",
+     "comparison": true,
+     "conditionResult": true
+    },
+    {
+     "id": "3456",
+     "type": "existing_high_priority_issue",
+     "comparison": true,
+     "conditionResult": true
+    }
+   ],
+   "actions": []
+  },
+  "actionFilters": [
+   {
+    "id": "5678",
+    "organizationId": "1",
+    "logicType": "all",
+    "conditions": [],
+    "actions": [
+     {
+      "id": "234",
+      "type": "email",
+      "integrationId": null,
+      "data": {
+       "fallthroughType": "ActiveMembers"
+      },
+      "config": {
+       "targetType": "issue_owners",
+       "targetDisplay": null,
+       "targetIdentifier": null
+      },
+      "status": "active"
+     }
+    ]
+   }
+  ],
+  "environment": null,
+  "config": {
+   "frequency": 30
+  },
+  "detectorIds": [],
+  "enabled": true,
+  "lastTriggered": null,
+  "owner": "user:123456"
+ },
+ {
+  "id": "456",
+  "name": "Notify team #example-team",
+  "organizationId": "1",
+  "createdBy": "34567",
+  "dateCreated": "2026-01-15T23:46:39.594915Z",
+  "dateUpdated": "2026-01-15T23:46:39.594903Z",
+  "triggers": {
+   "id": "12345",
+   "organizationId": "1",
+   "logicType": "any-short",
+   "conditions": [],
+   "actions": []
+  },
+  "actionFilters": [
+   {
+    "id": "6789",
+    "organizationId": "1",
+    "logicType": "any-short",
+    "conditions": [
+     {
+      "id": "5678",
+      "type": "event_frequency_count",
+      "comparison": {
+       "value": 100,
+       "interval": "1h"
+      },
+      "conditionResult": true
+     }
+    ],
+    "actions": [
+     {
+      "id": "1234",
+      "type": "email",
+      "integrationId": null,
+      "data": {},
+      "config": {
+       "targetType": "team",
+       "targetDisplay": null,
+       "targetIdentifier": "1234567890"
+      },
+      "status": "active"
+     }
+    ]
+   }
+  ],
+  "environment": null,
+  "config": {
+   "frequency": 1440
+  },
+  "detectorIds": [],
+  "enabled": true,
+  "lastTriggered": null,
+  "owner": "team:456789"
+ },
+ {
+  "id": "789",
+  "name": "Notify Jane Doe",
+  "organizationId": "1",
+  "createdBy": "2345",
+  "dateCreated": "2026-01-15T23:46:39.594915Z",
+  "dateUpdated": "2026-01-15T23:49:57.697583Z",
+  "triggers": {
+   "id": "56789",
+   "organizationId": "1",
+   "logicType": "any-short",
+   "conditions": [],
+   "actions": []
+  },
+  "actionFilters": [
+   {
+    "id": "56789",
+    "organizationId": "1",
+    "logicType": "any-short",
+    "conditions": [
+     {
+      "id": "234567",
+      "type": "event_unique_user_frequency_count",
+      "comparison": {
+       "value": 100,
+       "filters": [
+        {
+         "key": "foo",
+         "match": "eq",
+         "value": "bar"
+        }
+       ],
+       "interval": "1h"
+      },
+      "conditionResult": true
+     }
+    ],
+    "actions": [
+     {
+      "id": "456789",
+      "type": "email",
+      "integrationId": null,
+      "data": {},
+      "config": {
+       "targetType": "user",
+       "targetDisplay": null,
+       "targetIdentifier": "123456"
+      },
+      "status": "active"
+     }
+    ]
+   }
+  ],
+  "environment": null,
+  "config": {
+   "frequency": 1440
+  },
+  "detectorIds": [],
+  "enabled": true,
+  "lastTriggered": null,
+  "owner": null
+ }
+]

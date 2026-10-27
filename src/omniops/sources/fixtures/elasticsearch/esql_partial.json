@@ -1,0 +1,12 @@
+{
+  "took": 28,
+  "is_partial": true,
+  "columns": [
+    {"name": "service.name", "type": "keyword"},
+    {"name": "errors", "type": "long"}
+  ],
+  "values": [
+    ["checkout-api", "payments"],
+    [42, 7]
+  ]
+}

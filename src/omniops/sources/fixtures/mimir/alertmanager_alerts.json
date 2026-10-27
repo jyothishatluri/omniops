@@ -1,0 +1,27 @@
+[
+ {
+  "annotations": {
+   "summary": "checkout 5xx ratio above 5%"
+  },
+  "endsAt": "2026-10-01T12:05:00.000Z",
+  "fingerprint": "8d5e2c5d3b1a0f42",
+  "receivers": [
+   {
+    "name": "slack-oncall"
+   }
+  ],
+  "startsAt": "2026-10-01T11:52:00.000Z",
+  "status": {
+   "inhibitedBy": [],
+   "silencedBy": [],
+   "state": "active"
+  },
+  "updatedAt": "2026-10-01T11:59:00.000Z",
+  "generatorURL": "http://mimir/prometheus/graph?g0.expr=...",
+  "labels": {
+   "alertname": "CheckoutHighErrorRate",
+   "severity": "critical",
+   "service": "checkout"
+  }
+ }
+]

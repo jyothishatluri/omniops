@@ -1,0 +1,12 @@
+{
+  "status": "success",
+  "data": {
+    "complete": true,
+    "values": {
+      "stringValues": ["DEBUG", "INFO"],
+      "numberValues": [],
+      "boolValues": [],
+      "relatedValues": []
+    }
+  }
+}

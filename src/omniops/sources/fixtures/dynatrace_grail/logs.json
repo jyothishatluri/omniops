@@ -1,0 +1,134 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 42,
+    "locale": "en_US",
+    "query": "fetch logs | sort timestamp desc | limit 1000 | fields ...",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 125000,
+    "scannedBytes": 52428800,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "timestamp": "2026-10-01T11:42:07.512000000Z",
+    "content": "ERROR c.s.checkout.PaymentClient - POST /charge failed: connection refused (payment-service:8080)",
+    "loglevel": "ERROR",
+    "status": "ERROR",
+    "dt.service.name": "checkout-service",
+    "service.name": "checkout-service",
+    "k8s.workload.name": "checkout-service",
+    "host.name": "ip-10-0-1-17.eu-west-1.compute.internal",
+    "k8s.namespace.name": "shop",
+    "k8s.pod.name": "checkout-service-7895755b94-mzs5m",
+    "k8s.container.name": "checkout",
+    "k8s.cluster.name": "prod-eu-1",
+    "log.source": "Container Output",
+    "trace_id": "357bf70f3c617cb34584b31bd4616af8",
+    "span_id": "f76281848bd8288c",
+    "dt.entity.host": "HOST-06F288EE2A930951",
+    "dt.entity.process_group": "PROCESS_GROUP-0A9A52EA262BC039"
+   },
+   {
+    "timestamp": "2026-10-01T11:41:55.003000000Z",
+    "content": "WARN retrying POST /charge (attempt 3/3)",
+    "loglevel": "WARN",
+    "status": "WARN",
+    "dt.service.name": "checkout-service",
+    "service.name": "checkout-service",
+    "k8s.workload.name": "checkout-service",
+    "host.name": "ip-10-0-1-17.eu-west-1.compute.internal",
+    "k8s.namespace.name": "shop",
+    "k8s.pod.name": "checkout-service-7895755b94-mzs5m",
+    "k8s.container.name": "checkout",
+    "k8s.cluster.name": "prod-eu-1",
+    "log.source": "Container Output",
+    "trace_id": "357bf70f3c617cb34584b31bd4616af8",
+    "span_id": "a1b2c3d4e5f60718",
+    "dt.entity.host": "HOST-06F288EE2A930951",
+    "dt.entity.process_group": "PROCESS_GROUP-0A9A52EA262BC039"
+   },
+   {
+    "timestamp": "2026-10-01T11:40:12.100000000Z",
+    "content": "No keepalive from datasource statsd. Restarting",
+    "loglevel": "INFO",
+    "status": "INFO",
+    "host.name": "ip-10-0-1-18.eu-west-1.compute.internal",
+    "log.source": "/var/log/syslog",
+    "dt.entity.host": "HOST-B64B6B9CB11E2244"
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     2
+    ],
+    "mappings": {
+     "timestamp": {
+      "type": "timestamp"
+     },
+     "content": {
+      "type": "string"
+     },
+     "loglevel": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "dt.service.name": {
+      "type": "string"
+     },
+     "service.name": {
+      "type": "string"
+     },
+     "k8s.workload.name": {
+      "type": "string"
+     },
+     "host.name": {
+      "type": "string"
+     },
+     "k8s.namespace.name": {
+      "type": "string"
+     },
+     "k8s.pod.name": {
+      "type": "string"
+     },
+     "k8s.container.name": {
+      "type": "string"
+     },
+     "k8s.cluster.name": {
+      "type": "string"
+     },
+     "log.source": {
+      "type": "string"
+     },
+     "trace_id": {
+      "type": "string"
+     },
+     "span_id": {
+      "type": "string"
+     },
+     "dt.entity.host": {
+      "type": "string"
+     },
+     "dt.entity.process_group": {
+      "type": "string"
+     }
+    }
+   }
+  ]
+ }
+}

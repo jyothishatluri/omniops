@@ -1,0 +1,12 @@
+{
+ "status": "success",
+ "data": {
+  "aggregator_openapi_v2_regeneration_count": [
+   {
+    "type": "counter",
+    "help": "[ALPHA] Counter of OpenAPI v2 spec regeneration count broken down by causing APIService name and reason.",
+    "unit": ""
+   }
+  ]
+ }
+}

@@ -1,0 +1,32 @@
+{
+ "results": [
+  {
+   "id": "98305",
+   "key": "OPS",
+   "name": "Operations",
+   "type": "global",
+   "status": "current",
+   "authorId": "5b10a2844c20165700ede21g",
+   "spaceOwnerId": "5b10a2844c20165700ede21g",
+   "currentActiveAlias": "OPS",
+   "createdAt": "2023-01-10T09:00:00.000Z",
+   "homepageId": "98306",
+   "description": {
+    "plain": {
+     "representation": "plain",
+     "value": "Runbooks, postmortems and on-call guides"
+    }
+   },
+   "icon": {
+    "path": "/wiki/download/attachments/98305/OPS?version=1",
+    "apiDownloadLink": "/wiki/rest/api/space/OPS/icon"
+   },
+   "_links": {
+    "webui": "/spaces/OPS"
+   }
+  }
+ ],
+ "_links": {
+  "base": "https://your-domain.atlassian.net/wiki"
+ }
+}

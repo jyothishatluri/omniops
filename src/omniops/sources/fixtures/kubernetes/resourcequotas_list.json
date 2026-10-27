@@ -1,0 +1,57 @@
+{
+ "kind": "ResourceQuotaList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "platform-limits",
+    "namespace": "shop",
+    "uid": "9f5f2031-0000-4000-8000-000000000025",
+    "creationTimestamp": "2026-10-01T11:40:00Z",
+    "managedFields": [
+     {
+      "manager": "kubectl-client-side-apply",
+      "operation": "Update",
+      "apiVersion": "v1",
+      "time": "2026-10-01T11:40:00Z",
+      "fieldsType": "FieldsV1",
+      "fieldsV1": {
+       "f:metadata": {}
+      }
+     },
+     {
+      "manager": "kube-controller-manager",
+      "operation": "Update",
+      "apiVersion": "v1",
+      "time": "2026-10-01T11:40:01Z",
+      "fieldsType": "FieldsV1",
+      "fieldsV1": {
+       "f:metadata": {}
+      },
+      "subresource": "status"
+     }
+    ]
+   },
+   "spec": {
+    "hard": {
+     "requests.cpu": "8",
+     "pods": "50"
+    }
+   },
+   "status": {
+    "hard": {
+     "pods": "50",
+     "requests.cpu": "8"
+    },
+    "used": {
+     "pods": "19",
+     "requests.cpu": "950m"
+    }
+   }
+  }
+ ]
+}

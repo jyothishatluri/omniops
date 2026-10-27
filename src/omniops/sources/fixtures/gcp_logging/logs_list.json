@@ -1,0 +1,8 @@
+{
+  "logNames": [
+    "projects/my-project/logs/syslog",
+    "projects/my-project/logs/cloudaudit.googleapis.com%2Factivity",
+    "projects/my-project/logs/run.googleapis.com%2Frequests"
+  ],
+  "nextPageToken": ""
+}

@@ -1,0 +1,18 @@
+{
+  "stats": [
+    {
+      "pattern": "payment provider timeout after * ms order_id=*",
+      "count": 1834,
+      "proportion": 12.4,
+      "sentiment": -0.82,
+      "delta": 2650.0
+    },
+    {
+      "pattern": "GET /healthz * 200",
+      "count": 9120,
+      "proportion": 61.7,
+      "sentiment": 0.0,
+      "delta": -1.5
+    }
+  ]
+}

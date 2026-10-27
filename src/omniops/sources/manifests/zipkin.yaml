@@ -1,0 +1,392 @@
+# Zipkin API v2 (Zipkin server, and Zipkin-compatible query APIs).
+# Docs: https://zipkin.io/zipkin-api/ (Swagger UI) built from
+# https://github.com/openzipkin/zipkin-api/blob/master/zipkin2-api.yaml (basePath /api/v2).
+# Verified against zipkin2-api.yaml on master (October 2026): microsecond span timestamps and
+# durations, millisecond endTs/lookback, lowercase hex ids, tags as a flat string map.
+source: zipkin
+display_name: Zipkin
+vendor: OpenZipkin
+description: Zipkin v2 API - services, span names, trace search, trace by id, service dependency links, tag autocomplete.
+docs_url: https://zipkin.io/zipkin-api/
+categories: [traces]
+base_url: "{{ env.ZIPKIN_URL }}"
+env:
+  - {name: ZIPKIN_URL, description: "Zipkin server base URL without /api/v2, e.g. http://zipkin:9411"}
+  - {name: ZIPKIN_TOKEN, description: "Optional bearer token for a reverse proxy (Zipkin has no built-in auth)", secret: true}
+  - {name: ZIPKIN_USERNAME, description: "Optional basic-auth user for a reverse proxy (ZIPKIN_TOKEN wins)"}
+  - {name: ZIPKIN_PASSWORD, description: "Optional basic-auth password", secret: true}
+required_env: [ZIPKIN_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Bearer ' ~ env.ZIPKIN_TOKEN) if env.ZIPKIN_TOKEN
+         else (('Basic ' ~ ((env.ZIPKIN_USERNAME ~ ':' ~ (env.ZIPKIN_PASSWORD or '')) | b64)) if env.ZIPKIN_USERNAME else None) }}
+rate_limit:
+  concurrency: 4
+  notes: "No API rate limit; QUERY_LOOKBACK (default 1 day) caps lookback, QUERY_LIMIT/limit default 10 traces."
+ui_base_url: "{{ env.ZIPKIN_URL }}/zipkin"
+pitfalls:
+  - "Span timestamps and durations are MICROSECONDS on the wire (converted here to ts / duration_ms); endTs and lookback are MILLISECONDS - the engine sends them for you."
+  - "Service and span names are stored lowercase: write them lowercase in SQL (the server lowercases the query, but SQL re-applies your literal to the rows). An unknown service, span name or annotationQuery returns an empty list, not an error. Check zipkin_services / zipkin_span_names / zipkin_autocomplete_keys first."
+  - "Trace search returns at most limit traces (Zipkin default 10; 100 here) newest-first within endTs-lookback, and lookback is capped by the server's QUERY_LOOKBACK (default 86400000 ms = 1 day) - longer windows silently shrink."
+  - "Errors are marked by an 'error' tag (its value is the message) rather than a status field; HTTP failures also carry http.status_code."
+  - "Retention depends on storage: in-memory keeps MEM_MAX_SPANS (500000) and loses data on restart; Elasticsearch/Cassandra use their own TTL (Cassandra default 7 days)."
+  - "Dependency links come from the storage layer: in-memory and MySQL compute them live; Elasticsearch and Cassandra need the zipkin-dependencies Spark job, otherwise the list is empty."
+tables:
+  - name: zipkin_services
+    title: Services
+    description: All service names with spans, from GET /api/v2/services.
+    kind: entities
+    request: {method: GET, path: /api/v2/services}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: service, path: ".", description: "Service name (lowercase label)"}
+    examples:
+      - sql: "SELECT service FROM zipkin_services ORDER BY service"
+        description: Traced services.
+        verified: false
+    fixtures:
+      - file: services.json
+        note: "Built from the zipkin2-api.yaml GET /services 200 schema (array of strings) using the spec's example service names."
+        expect_rows: 2
+        expect_columns: {service: backend}
+    docs_url: https://zipkin.io/zipkin-api/#/default/get_services
+
+  - name: zipkin_span_names
+    title: Span names of a service
+    description: Span (operation) names recorded by a service, from GET /api/v2/spans?serviceName=.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/spans
+      query: {serviceName: "{{ filters.service }}"}
+    filters:
+      - {column: service, required: true, ops: ["=", "in"], description: "Service name", examples: [backend]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: name, expr: "_ if _ is string else _.name", description: "Span name"}
+      - {name: service, filter_only: true}
+    pitfalls:
+      - "The spec's response schema says ListOfSpans while the endpoint description (and the server) return span-name strings; both shapes are accepted."
+    examples:
+      - sql: "SELECT name FROM zipkin_span_names WHERE service = 'backend' ORDER BY name"
+        description: Operations of one service.
+        verified: false
+    fixtures:
+      - file: span_names.json
+        filters: {service: backend}
+        note: "Array of span-name strings, per the GET /spans description 'Get all the span names recorded by a particular service'."
+        expect_rows: 2
+        expect_columns: {name: get /api, service: backend}
+      - file: trace.json
+        filters: {service: backend}
+        note: "ListOfSpans as the zipkin2-api.yaml response schema states (the spec's Span example)."
+        expect_rows: 1
+        expect_columns: {name: get /api}
+    docs_url: https://zipkin.io/zipkin-api/#/default/get_spans
+
+  - name: zipkin_traces
+    title: Trace search (all spans of matching traces)
+    description: >-
+      Traces matching the filters from GET /api/v2/traces, one row per span of each returned
+      trace: trace/span/parent ids, local service, remote service, name, kind, start,
+      duration, error flag/message, HTTP tags and all tags as JSON. Filter on service
+      (serviceName), name (spanName), duration_ms (minDuration/maxDuration), status = 'error'
+      and http_status_code (annotationQuery), or a raw annotation_query; window via ts.
+    kind: spans
+    request:
+      method: GET
+      path: /api/v2/traces
+      query:
+        serviceName: "{{ filters.service }}"
+        spanName: "{{ filters.name }}"
+        annotationQuery: >-
+          {{ ([filters.annotation_query or None,
+               'error' if (filters.status or '') | lower == 'error' else None,
+               ('http.status_code=' ~ filters.http_status_code) if filters.http_status_code else None] | compact | join(' and ')) or None }}
+        minDuration: >-
+          {{ (((filters.duration_ms[0] if filters.duration_ms__op == 'between' else filters.duration_ms) | float * 1000) | round | int)
+             if (filters.duration_ms is defined and filters.duration_ms is not none and (filters.duration_ms__op or '>=') in ['>', '>=', 'between'])
+             else (1 if (filters.duration_ms is defined and filters.duration_ms is not none) else None) }}
+        maxDuration: >-
+          {{ (((filters.duration_ms[1] if filters.duration_ms__op == 'between' else filters.duration_ms) | float * 1000) | round | int)
+             if (filters.duration_ms is defined and filters.duration_ms is not none and filters.duration_ms__op in ['<', '<=', 'between']) else None }}
+        endTs: "{{ time.end | epoch_ms }}"
+        lookback: "{{ time.range_s * 1000 }}"
+        limit: "{{ filters.trace_limit or limit or 100 }}"
+    filters:
+      - {column: service, ops: ["=", "in"], max_fan_out: 10, description: "Local service name (serviceName)", examples: [backend]}
+      - {column: name, ops: ["=", "in"], description: "Span name (spanName, lowercase)", examples: [get /api]}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<=", "between"], description: "Span duration in ms (minDuration/maxDuration in microseconds)", examples: ["100"]}
+      - {column: status, description: "'error' adds the annotationQuery term error (spans with an error tag)", examples: [error]}
+      - {column: http_status_code, type: BIGINT, description: "annotationQuery http.status_code=<code>"}
+      - {column: annotation_query, description: "Raw annotationQuery, e.g. 'http.path=/api and retried' (terms AND-ed on one span)"}
+      - {column: trace_limit, type: BIGINT, description: "Max traces (limit; default 100, or the SQL LIMIT)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$[*][*]"
+    columns:
+      - {name: trace_id, path: traceId, description: "Trace id (16 or 32 lowercase hex)"}
+      - {name: span_id, path: id, description: "Span id (16 hex)"}
+      - {name: parent_span_id, path: parentId, description: "Parent span id; NULL for the root"}
+      - {name: service, path: localEndpoint.serviceName, description: "Service that recorded the span"}
+      - {name: remote_service, path: remoteEndpoint.serviceName, description: "Other side of an RPC/messaging span (callee for CLIENT spans)"}
+      - {name: name, path: name, description: "Span name (lowercase)"}
+      - {name: kind, expr: "(_.kind | lower) if _.kind else 'local'", description: "server | client | producer | consumer | local"}
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_us, description: "Span start (UTC)"}
+      - {name: duration_ms, type: DOUBLE, path: duration, transform: us_to_ms, description: "Span duration in ms"}
+      - {name: status, expr: "'error' if 'error' in (_.tags or {}) else 'unset'", description: "error when the span has an error tag"}
+      - {name: error_message, expr: "(_.tags or {})['error']", description: "Value of the error tag"}
+      - {name: http_method, path: "tags['http.method']"}
+      - {name: http_path, expr: "(_.tags or {})['http.route'] or (_.tags or {})['http.path']", description: "http.route or http.path tag"}
+      - {name: http_status_code, type: BIGINT, path: "tags['http.status_code']"}
+      - {name: host, path: localEndpoint.ipv4, description: "IPv4 of the recording host"}
+      - {name: tags, type: JSON, path: tags, description: "All tags (flat string map): tags->>'http.path'"}
+      - {name: annotations, type: JSON, path: annotations, description: "Timestamped events [{timestamp (us), value}]"}
+      - {name: annotation_query, filter_only: true}
+      - {name: trace_limit, type: BIGINT, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "Rows are all spans of each matching trace; SQL predicates (service, duration_ms, status) are re-applied to the spans themselves."
+      - "annotationQuery terms must all match ONE span; 'error' matches the error tag key or an annotation value."
+    examples:
+      - sql: >-
+          SELECT trace_id, max(duration_ms) AS slowest_span_ms, arg_max(service || ' ' || name, duration_ms) AS slowest_span
+          FROM zipkin_traces
+          WHERE service = 'backend' AND duration_ms > 500 AND ts >= now() - INTERVAL 1 HOUR
+          GROUP BY trace_id ORDER BY slowest_span_ms DESC LIMIT 10
+        description: Slow backend spans and the traces they belong to.
+        verified: false
+      - sql: >-
+          SELECT service, name, error_message, count(*) AS errors, any_value(trace_id) AS example_trace
+          FROM zipkin_traces WHERE status = 'error' AND ts >= now() - INTERVAL 6 HOUR
+          GROUP BY service, name, error_message ORDER BY errors DESC
+        description: Error spans by service and operation with an example trace.
+        verified: false
+    fixtures:
+      - file: traces.json
+        filters: {service: backend}
+        note: "ListOfTraces (array of Trace arrays) containing the Span example from zipkin2-api.yaml definitions.Span.example."
+        expect_rows: 1
+        expect_columns: {trace_id: 5af7183fb1d4cf5f, span_id: 352bff9a74ca9ad2, parent_span_id: 6b221d5bc9e6496c, service: backend, name: get /api, kind: server, ts: "2019-04-30T06:02:52Z", duration_ms: 1.431, status: unset, http_method: GET, http_path: /api, host: 192.168.99.1}
+      - file: trace_many.json
+        filters: {service: frontend, status: error}
+        note: "ListOfTraces built strictly from the zipkin2-api.yaml Span/Endpoint/Annotation schemas: the spec's Span example plus a frontend trace whose spans carry the error tag and http.status_code (tags are a flat string map, timestamps/durations in microseconds)."
+        expect_rows: 3
+        expect_columns: {trace_id: 5af7183fb1d4cf5f, kind: server}
+    docs_url: https://zipkin.io/zipkin-api/#/default/get_traces
+
+  - name: zipkin_trace
+    title: Trace by id (one row per span)
+    description: >-
+      All spans of one trace from GET /api/v2/trace/{traceId}: ids, parent ids, local and remote
+      service, name, kind, start, duration, error tag, HTTP tags, all tags. trace_id required
+      (IN fans out). Walk parent_span_id -> span_id for the call chain; CLIENT and SERVER sides
+      of one RPC can share a span id (shared = true on the server side).
+    kind: traces
+    request:
+      method: GET
+      path: "/api/v2/trace/{{ filters.trace_id | trim | lower }}"
+      accept_status: [404]
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Trace id (16 or 32 lowercase hex)", examples: [5af7183fb1d4cf5f]}
+    response:
+      rows_path: "$[*]"
+    columns:
+      - {name: trace_id, filter_only: true, description: "Trace id as requested"}
+      - {name: span_id, path: id}
+      - {name: parent_span_id, path: parentId}
+      - {name: service, path: localEndpoint.serviceName}
+      - {name: remote_service, path: remoteEndpoint.serviceName}
+      - {name: name, path: name}
+      - {name: kind, expr: "(_.kind | lower) if _.kind else 'local'"}
+      - {name: shared, type: BOOLEAN, expr: "_.shared or false", description: "Server side of a span id shared with the client"}
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_us}
+      - {name: duration_ms, type: DOUBLE, path: duration, transform: us_to_ms}
+      - {name: status, expr: "'error' if 'error' in (_.tags or {}) else 'unset'"}
+      - {name: error_message, expr: "(_.tags or {})['error']"}
+      - {name: is_root, type: BOOLEAN, expr: "not _.parentId"}
+      - {name: http_method, path: "tags['http.method']"}
+      - {name: http_path, expr: "(_.tags or {})['http.route'] or (_.tags or {})['http.path']"}
+      - {name: http_status_code, type: BIGINT, path: "tags['http.status_code']"}
+      - {name: host, path: localEndpoint.ipv4}
+      - {name: tags, type: JSON, path: tags}
+      - {name: annotations, type: JSON, path: annotations}
+    max_rows: 20000
+    pitfalls:
+      - "A missing trace returns 0 rows (HTTP 404)."
+      - "With shared span ids (client + server halves), join children on parent_span_id = span_id AND kind <> 'client' to avoid double counting self time."
+    examples:
+      - sql: >-
+          WITH s AS (SELECT * FROM zipkin_trace WHERE trace_id = '5af7183fb1d4cf5f')
+          SELECT e.service, e.name, e.error_message, e.http_status_code
+          FROM s e WHERE e.status = 'error'
+            AND NOT EXISTS (SELECT 1 FROM s c WHERE c.parent_span_id = e.span_id AND c.status = 'error')
+        description: Error origin in a trace (deepest failing spans).
+        verified: false
+      - sql: "SELECT ts, service, remote_service, name, kind, duration_ms, status FROM zipkin_trace WHERE trace_id = '5af7183fb1d4cf5f' ORDER BY ts"
+        description: Waterfall of one trace.
+        verified: false
+    fixtures:
+      - file: trace.json
+        filters: {trace_id: 5af7183fb1d4cf5f}
+        note: "Trace (array of spans) with the Span example from zipkin2-api.yaml."
+        expect_rows: 1
+        expect_columns: {trace_id: 5af7183fb1d4cf5f, span_id: 352bff9a74ca9ad2, service: backend, kind: server, shared: false, duration_ms: 1.431, is_root: false, http_status_code: null}
+    docs_url: https://zipkin.io/zipkin-api/#/default/get_trace__traceId_
+
+  - name: zipkin_trace_many
+    title: Several traces by id in one call (one row per span)
+    description: >-
+      All spans of two or more traces from GET /api/v2/traceMany?traceIds=<id>,<id>,... (one
+      request instead of one per id). Same columns as zipkin_trace plus trace_id taken from
+      each span. trace_id must be an IN list of at least two distinct ids; for one id use
+      zipkin_trace. Ids that are not found are simply missing from the result.
+    kind: traces
+    request:
+      method: GET
+      path: /api/v2/traceMany
+      query:
+        traceIds: "{{ filters.trace_id | as_list | map('trim') | map('lower') | unique | join(',') }}"
+    filters:
+      - {column: trace_id, required: true, ops: ["in"], fan_out: false, description: "IN list of >= 2 distinct trace ids (16 or 32 lowercase hex)", examples: ["5af7183fb1d4cf5f"]}
+    response:
+      rows_path: "$[*][*]"
+    columns:
+      - {name: trace_id, path: traceId, description: "Trace id of the span"}
+      - {name: span_id, path: id}
+      - {name: parent_span_id, path: parentId}
+      - {name: service, path: localEndpoint.serviceName}
+      - {name: remote_service, path: remoteEndpoint.serviceName}
+      - {name: name, path: name}
+      - {name: kind, expr: "(_.kind | lower) if _.kind else 'local'"}
+      - {name: shared, type: BOOLEAN, expr: "_.shared or false"}
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_us}
+      - {name: duration_ms, type: DOUBLE, path: duration, transform: us_to_ms}
+      - {name: status, expr: "'error' if 'error' in (_.tags or {}) else 'unset'"}
+      - {name: error_message, expr: "(_.tags or {})['error']"}
+      - {name: is_root, type: BOOLEAN, expr: "not _.parentId"}
+      - {name: http_method, path: "tags['http.method']"}
+      - {name: http_path, expr: "(_.tags or {})['http.route'] or (_.tags or {})['http.path']"}
+      - {name: http_status_code, type: BIGINT, path: "tags['http.status_code']"}
+      - {name: host, path: localEndpoint.ipv4}
+      - {name: tags, type: JSON, path: tags}
+      - {name: annotations, type: JSON, path: annotations}
+    max_rows: 50000
+    pitfalls:
+      - "HTTP 400 when fewer than two distinct ids are given or an id is malformed - use zipkin_trace for a single trace."
+    examples:
+      - sql: >-
+          SELECT trace_id, service, name, error_message, http_status_code, duration_ms
+          FROM zipkin_trace_many
+          WHERE trace_id IN ('5af7183fb1d4cf5f', '463ac35c9f6413ad48485a3953bb6124') AND status = 'error'
+          ORDER BY trace_id, ts
+        description: Error spans of several example traces at once (e.g. the ids found by zipkin_traces).
+        verified: false
+    fixtures:
+      - file: trace_many.json
+        filters: {trace_id: ["5af7183fb1d4cf5f", "463ac35c9f6413ad48485a3953bb6124"]}
+        note: "ListOfTraces built from the zipkin2-api.yaml schemas (spec Span example + a schema-built frontend trace with error tags)."
+        expect_rows: 3
+        expect_columns: {trace_id: 5af7183fb1d4cf5f, span_id: 352bff9a74ca9ad2, service: backend, kind: server, duration_ms: 1.431}
+    docs_url: https://zipkin.io/zipkin-api/#/default/get_traceMany
+
+  - name: zipkin_dependencies
+    title: Service dependency links
+    description: >-
+      Parent -> child call and error counts derived from spans, from GET
+      /api/v2/dependencies?endTs=<ms>&lookback=<ms>. Use for blast radius and to see which
+      downstream links have errors.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/dependencies
+      query:
+        endTs: "{{ time.end | epoch_ms }}"
+        lookback: "{{ time.range_s * 1000 }}"
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    response:
+      rows_path: "$[*]"
+    columns:
+      - {name: parent, path: parent, description: "Caller (client, producer or broker)"}
+      - {name: child, path: child, description: "Callee (server, consumer or broker)"}
+      - {name: call_count, type: BIGINT, path: callCount}
+      - {name: error_count, type: BIGINT, expr: "_.errorCount or 0", description: "Calls known to be in error"}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT parent, child, call_count, error_count, round(100.0 * error_count / call_count, 2) AS error_pct
+          FROM zipkin_dependencies WHERE ts >= now() - INTERVAL 1 HOUR ORDER BY error_pct DESC
+        description: Which service-to-service links fail most.
+        verified: false
+    fixtures:
+      - file: dependencies.json
+        note: "Built from the zipkin2-api.yaml DependencyLink schema {parent, child, callCount, errorCount} (errorCount omitted on the second link)."
+        expect_rows: 2
+        expect_columns: {parent: frontend, child: backend, call_count: 1240, error_count: 17}
+    docs_url: https://zipkin.io/zipkin-api/#/default/get_dependencies
+
+  - name: zipkin_autocomplete_keys
+    title: Tag keys usable in annotationQuery
+    description: Tag keys the server indexes for value autocompletion (AUTOCOMPLETE_KEYS), from GET /api/v2/autocompleteKeys.
+    kind: entities
+    request: {method: GET, path: /api/v2/autocompleteKeys}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: key, path: "."}
+    examples:
+      - sql: "SELECT key FROM zipkin_autocomplete_keys"
+        verified: false
+    fixtures:
+      - file: autocomplete_keys.json
+        note: "Built from the GET /autocompleteKeys 200 schema (array of strings), keys from the spec's description (environment, http.path)."
+        expect_rows: 2
+        expect_columns: {key: environment}
+    docs_url: https://zipkin.io/zipkin-api/#/default/get_autocompleteKeys
+
+  - name: zipkin_autocomplete_values
+    title: Known values of a tag key
+    description: All known values of one autocomplete tag key, from GET /api/v2/autocompleteValues?key=.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/autocompleteValues
+      query: {key: "{{ filters.key }}"}
+    filters:
+      - {column: key, required: true, ops: ["=", "in"], description: "Key from zipkin_autocomplete_keys", examples: [environment]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: value, path: "."}
+      - {name: key, filter_only: true}
+    examples:
+      - sql: "SELECT value FROM zipkin_autocomplete_values WHERE key = 'environment'"
+        verified: false
+    fixtures:
+      - file: autocomplete_values.json
+        filters: {key: environment}
+        note: "Built from the GET /autocompleteValues 200 schema (array of strings)."
+        expect_rows: 2
+        expect_columns: {value: prod, key: environment}
+    docs_url: https://zipkin.io/zipkin-api/#/default/get_autocompleteValues
+
+roles:
+  traces:
+    table: zipkin_traces
+    filters:
+      service: "{{ (service | lower) if service else '' }}"
+      status: "{{ 'error' if error_only else '' }}"
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, resource: name, duration_ms: duration_ms, status: status, status_code: http_status_code, message: error_message}
+  trace_detail:
+    table: zipkin_trace
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, parent_span_id: parent_span_id, resource: name, duration_ms: duration_ms, status: status, message: error_message}
+  services:
+    table: zipkin_services
+    columns: {service: service}
+  service_map:
+    table: zipkin_dependencies
+    columns: {parent: parent, child: child, value: call_count}

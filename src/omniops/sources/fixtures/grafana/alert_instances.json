@@ -1,0 +1,50 @@
+{
+  "status": "success",
+  "data": {
+    "alerts": [
+      {
+        "labels": {
+          "alertname": "PaymentServiceHighErrorRate",
+          "grafana_folder": "Payments",
+          "severity": "critical",
+          "service": "payment-service",
+          "__alert_rule_uid__": "pay-err-rate"
+        },
+        "annotations": {
+          "summary": "payment-service 5xx ratio above 5%"
+        },
+        "state": "Alerting",
+        "activeAt": "2026-10-01T11:42:00Z",
+        "value": "1.2e-01"
+      },
+      {
+        "labels": {
+          "alertname": "CacheRefreshLagHigh",
+          "grafana_folder": "Users",
+          "severity": "warning",
+          "service": "user-service",
+          "__alert_rule_uid__": "cache-lag"
+        },
+        "annotations": {
+          "summary": "user-service cache refresh lag above 60s"
+        },
+        "state": "Pending",
+        "activeAt": "2026-10-01T11:55:00Z",
+        "value": "A: 9.4e+01, B: 1e+00"
+      },
+      {
+        "labels": {
+          "alertname": "OrderServiceLatencyHigh",
+          "grafana_folder": "Orders",
+          "severity": "warning",
+          "service": "order-service",
+          "__alert_rule_uid__": "ord-latency"
+        },
+        "annotations": {},
+        "state": "Normal",
+        "activeAt": "2026-10-01T09:00:00Z",
+        "value": ""
+      }
+    ]
+  }
+}

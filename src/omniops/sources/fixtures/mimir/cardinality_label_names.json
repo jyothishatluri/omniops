@@ -1,0 +1,18 @@
+{
+ "label_values_count_total": 3145,
+ "label_names_count": 3,
+ "cardinality": [
+  {
+   "label_name": "pod",
+   "label_values_count": 3000
+  },
+  {
+   "label_name": "instance",
+   "label_values_count": 140
+  },
+  {
+   "label_name": "job",
+   "label_values_count": 5
+  }
+ ]
+}

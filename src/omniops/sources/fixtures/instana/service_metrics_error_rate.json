@@ -1,0 +1,31 @@
+{
+    "items": [
+        {
+            "service": {
+                "id": "service_id_1",
+                "label": "service_label_1",
+                "types": [
+                    "HTTP"
+                ],
+                "technologies": [],
+                "snapshotIds": [],
+                "entityType": "SERVICE"
+            },
+            "metrics": {
+                "errors.mean": [
+                    [
+                        1720629650000,
+                        0.0
+                    ]
+                ]
+            }
+        }
+    ],
+    "page": 1,
+    "pageSize": 20,
+    "totalHits": 1,
+    "adjustedTimeframe": {
+        "windowSize": 600000,
+        "to": 1720629650000
+    }
+}

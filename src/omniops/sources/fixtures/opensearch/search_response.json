@@ -1,0 +1,41 @@
+{
+  "took": 14,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 2,
+      "relation": "eq"
+    },
+    "max_score": 0.42727602,
+    "hits": [
+      {
+        "_index": "movies",
+        "_id": "1",
+        "_score": 0.42727602,
+        "_source": {
+          "title": "The Dark Knight",
+          "director": "Christopher Nolan",
+          "year": 2008,
+          "genre": "Action"
+        }
+      },
+      {
+        "_index": "movies",
+        "_id": "2",
+        "_score": 0.42727602,
+        "_source": {
+          "title": "Inception",
+          "director": "Christopher Nolan",
+          "year": 2010,
+          "genre": "Science Fiction"
+        }
+      }
+    ]
+  }
+}

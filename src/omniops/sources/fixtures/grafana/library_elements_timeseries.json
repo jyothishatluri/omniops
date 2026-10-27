@@ -1,0 +1,62 @@
+{
+  "result": {
+    "totalCount": 1,
+    "page": 1,
+    "perPage": 100,
+    "elements": [
+      {
+        "id": 31,
+        "orgId": 1,
+        "folderId": 0,
+        "uid": "lib-5xx-rate",
+        "name": "Service 5xx rate",
+        "kind": 1,
+        "type": "timeseries",
+        "description": "Shared 5xx rate panel used by every service dashboard",
+        "model": {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "",
+          "title": "5xx rate",
+          "type": "timeseries",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (job) (rate(http_requests_total{job=~\"$service\", status=~\"5..\"}[$__rate_interval]))",
+              "legendFormat": "{{job}}",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(http_requests_total{job=~\"$service\"}[$__rate_interval]))",
+              "legendFormat": "total",
+              "refId": "B"
+            }
+          ]
+        },
+        "version": 3,
+        "meta": {
+          "folderName": "General",
+          "folderUid": "",
+          "connectedDashboards": 4,
+          "created": "2026-09-01T09:00:00+00:00",
+          "updated": "2026-09-30T16:20:00+00:00",
+          "createdBy": {
+            "id": 1,
+            "name": "admin",
+            "avatarUrl": "/avatar/46d229b033af06a191ff2267bca9ae56"
+          },
+          "updatedBy": {
+            "id": 1,
+            "name": "admin",
+            "avatarUrl": "/avatar/46d229b033af06a191ff2267bca9ae56"
+          }
+        }
+      }
+    ]
+  }
+}

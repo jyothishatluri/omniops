@@ -1,0 +1,23 @@
+{
+ "status": "success",
+ "data": [
+  "__name__",
+  "access_mode",
+  "address",
+  "alertname",
+  "alertstate",
+  "apiservice",
+  "app",
+  "app_kubernetes_io_instance",
+  "app_kubernetes_io_managed_by",
+  "app_kubernetes_io_name",
+  "area",
+  "beta_kubernetes_io_arch",
+  "beta_kubernetes_io_instance_type",
+  "beta_kubernetes_io_os",
+  "boot_id",
+  "branch",
+  "broadcast",
+  "buildDate"
+ ]
+}

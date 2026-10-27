@@ -1,0 +1,34 @@
+{
+  "data": {
+    "actor": {
+      "entity": {
+        "guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+        "name": "checkout-service",
+        "serviceLevel": {
+          "indicators": [
+            {
+              "id": "a1b2c3d4-0000-4000-8000-000000000001",
+              "guid": "MXxFWFR8U0VSVklDRV9MRVZFTHwxMjM0NQ",
+              "name": "Latency below 0.25 seconds",
+              "description": "The proportion of valid requests that were served faster than 0.25s, which is considered to correspond to a good experience.",
+              "entityGuid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "createdAt": 1759312800000,
+              "updatedAt": 1759316400000,
+              "events": {
+                "validEvents": {"from": "Transaction", "where": "entityGuid = 'MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA'"},
+                "goodEvents": {"from": "Transaction", "where": "entityGuid = 'MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA' and duration < 0.25"},
+                "badEvents": null
+              },
+              "objectives": [
+                {"name": null, "description": null, "target": 99.5, "timeWindow": {"rolling": {"count": 7, "unit": "DAY"}}}
+              ],
+              "resultQueries": {
+                "indicator": {"nrql": "FROM Metric SELECT clamp_max((count(newrelic.sli.valid) - count(newrelic.sli.bad)) / count(newrelic.sli.valid) * 100, 100) AS 'SLI attainment' WHERE sli.id = 'a1b2c3d4-0000-4000-8000-000000000001'"}
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

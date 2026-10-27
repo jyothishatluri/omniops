@@ -1,0 +1,8 @@
+[
+    {"id": 1, "name": "Machine Availability is too low", "enabled": true},
+    {"id": 2, "name": "Overall Disk Space Available is too low", "enabled": true},
+    {"id": 3, "name": "CPU Usage is too high", "enabled": true},
+    {"id": 4, "name": "Memory Usage is too high", "enabled": true},
+    {"id": 5, "name": "Swap Usage is too high", "enabled": true},
+    {"id": 6, "name": "Disk Usage is too high on at least one partition", "enabled": false}
+]

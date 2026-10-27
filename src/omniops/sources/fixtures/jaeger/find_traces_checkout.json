@@ -1,0 +1,338 @@
+{
+  "result": {
+    "resourceSpans": [
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "webapp"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "prod"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "1.4.2"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "io.opentelemetry.http",
+              "version": "1.30.0"
+            },
+            "spans": [
+              {
+                "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "spanId": "aaaaaaaaaaaaaaaa",
+                "name": "POST /api/orders",
+                "kind": 2,
+                "startTimeUnixNano": "1792478178000000000",
+                "endTimeUnixNano": "1792478179000000000",
+                "attributes": [
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/api/orders"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "500"
+                    }
+                  }
+                ],
+                "status": {}
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "api-gateway"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "prod"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "1.4.2"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "io.opentelemetry.http",
+              "version": "1.30.0"
+            },
+            "spans": [
+              {
+                "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "spanId": "bbbbbbbbbbbbbbbb",
+                "name": "POST /api/orders",
+                "kind": 2,
+                "startTimeUnixNano": "1792478178005000000",
+                "endTimeUnixNano": "1792478178995000000",
+                "attributes": [
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/api/orders"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "500"
+                    }
+                  }
+                ],
+                "status": {},
+                "parentSpanId": "aaaaaaaaaaaaaaaa"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "order-service"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "prod"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "1.4.2"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "io.opentelemetry.http",
+              "version": "1.30.0"
+            },
+            "spans": [
+              {
+                "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "spanId": "cccccccccccccccc",
+                "name": "handle POST /api/orders",
+                "kind": 2,
+                "startTimeUnixNano": "1792478178010000000",
+                "endTimeUnixNano": "1792478178910000000",
+                "attributes": [
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/api/orders"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "500"
+                    }
+                  },
+                  {
+                    "key": "error",
+                    "value": {
+                      "boolValue": true
+                    }
+                  }
+                ],
+                "status": {
+                  "code": 2,
+                  "message": "payment failed"
+                },
+                "parentSpanId": "bbbbbbbbbbbbbbbb"
+              },
+              {
+                "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "spanId": "dddddddddddddddd",
+                "name": "call payment-service",
+                "kind": 3,
+                "startTimeUnixNano": "1792478178020000000",
+                "endTimeUnixNano": "1792478178870000000",
+                "attributes": [
+                  {
+                    "key": "peer.service",
+                    "value": {
+                      "stringValue": "payment-service"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "502"
+                    }
+                  },
+                  {
+                    "key": "error",
+                    "value": {
+                      "boolValue": true
+                    }
+                  }
+                ],
+                "status": {
+                  "code": 2,
+                  "message": "502 Bad Gateway"
+                },
+                "parentSpanId": "cccccccccccccccc"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "payment-service"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "prod"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "2.0.1"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "io.opentelemetry.http",
+              "version": "1.30.0"
+            },
+            "spans": [
+              {
+                "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "spanId": "eeeeeeeeeeeeeeee",
+                "name": "handle POST /api/payments",
+                "kind": 2,
+                "startTimeUnixNano": "1792478178025000000",
+                "endTimeUnixNano": "1792478178855000000",
+                "attributes": [
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/api/payments"
+                    }
+                  },
+                  {
+                    "key": "http.request.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.response.status_code",
+                    "value": {
+                      "intValue": "502"
+                    }
+                  },
+                  {
+                    "key": "error",
+                    "value": {
+                      "boolValue": true
+                    }
+                  }
+                ],
+                "status": {
+                  "code": 2,
+                  "message": "card processor timeout"
+                },
+                "parentSpanId": "dddddddddddddddd",
+                "events": [
+                  {
+                    "timeUnixNano": "1792478178850000000",
+                    "name": "exception",
+                    "attributes": [
+                      {
+                        "key": "exception.type",
+                        "value": {
+                          "stringValue": "TimeoutError"
+                        }
+                      },
+                      {
+                        "key": "exception.message",
+                        "value": {
+                          "stringValue": "card processor did not answer within 800ms"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

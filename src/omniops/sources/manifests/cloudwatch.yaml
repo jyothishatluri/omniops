@@ -1,0 +1,1034 @@
+# Amazon CloudWatch metrics + alarms, reached directly over HTTPS (no MCP, no SDK).
+#
+# Two API surfaces on the same host (signing name "monitoring"):
+#
+# 1. Classic CloudWatch API (API version 2010-08-01). CloudWatch now serves AWS Query (XML), AWS
+#    JSON 1.0 and Smithy RPC v2 CBOR; we use AWS JSON 1.0 (what boto3 >= 1.42.7, AWS CLI v2 >=
+#    2.32.14 and the JS SDK v3 >= 3.949.0 send):
+#      POST https://monitoring.<region>.amazonaws.com/
+#      Content-Type: application/x-amz-json-1.0
+#      X-Amz-Target: GraniteServiceVersion20100801.<Operation>
+#      body: the JSON shown in each API reference "Request Syntax"; timestamps are epoch SECONDS
+#    Protocol FAQ: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch-protocols-faq.html
+#    Service model (protocols [smithy-rpc-v2-cbor, json, query], jsonVersion 1.0, targetPrefix
+#    GraniteServiceVersion20100801): https://github.com/boto/botocore/blob/develop/botocore/data/cloudwatch/2010-08-01/service-2.json
+#
+# 2. Prometheus-compatible PromQL API for OTLP-ingested metrics and OTel-enriched vended metrics:
+#      POST (form body) https://monitoring.<region>.amazonaws.com/api/v1/{query,query_range,series,labels}
+#      GET  https://monitoring.<region>.amazonaws.com/api/v1/label/<l>/values
+#    standard Prometheus JSON envelope; start/end/time accept RFC 3339 or Unix seconds.
+#    https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL-APIs.html
+#
+# Research notes: docs/sources/cloudwatch.md
+source: cloudwatch
+display_name: Amazon CloudWatch (metrics & alarms)
+vendor: Amazon Web Services
+description: >-
+  CloudWatch metrics (GetMetricData with Metrics Insights SQL, SEARCH() or an exact MetricStat;
+  PromQL over the Prometheus-compatible API), metric inventory (ListMetrics), alarms
+  (DescribeAlarms), alarm contributors, alarm mute rules and alarm state history
+  (DescribeAlarmHistory) via SigV4-signed AWS JSON 1.0 / Prometheus HTTP requests.
+docs_url: https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/Welcome.html
+categories: [metrics, alerts]
+base_url: >-
+  {{ env.AWS_ENDPOINT_URL_CLOUDWATCH if (env.AWS_ENDPOINT_URL_CLOUDWATCH and env.AWS_ENDPOINT_URL_CLOUDWATCH != 'auto') else
+     ('https://monitoring.' ~ env.AWS_REGION ~ ('.amazonaws.com.cn' if (env.AWS_REGION or '').startswith('cn-') else '.amazonaws.com')) }}
+env:
+  - {name: AWS_REGION, description: "Region to query, e.g. us-east-1. CloudWatch is regional: metrics and alarms in other regions are invisible."}
+  - {name: AWS_ENDPOINT_URL_CLOUDWATCH, default: auto, description: "Optional endpoint override (VPC interface endpoint, FIPS endpoint https://monitoring-fips.<region>.amazonaws.com, LocalStack). 'auto' = https://monitoring.<region>.amazonaws.com (.com.cn for cn-* regions)"}
+  - {name: AWS_PROFILE, description: "Optional named profile. Credentials come from the standard AWS chain (env keys, profile, SSO, web identity, ECS/EC2 role); templates never read them."}
+  - {name: AWS_ACCESS_KEY_ID, description: "Optional static key (read by the AWS credential chain, not by templates)", secret: true}
+  - {name: AWS_SECRET_ACCESS_KEY, description: "Optional static secret (read by the AWS credential chain)", secret: true}
+  - {name: AWS_SESSION_TOKEN, description: "Optional session token for temporary credentials (read by the AWS credential chain)", secret: true}
+required_env: [AWS_REGION]
+auth:
+  type: aws_sigv4
+  service: monitoring
+  region: "{{ env.AWS_REGION }}"
+headers:
+  # AWS JSON 1.0 for every classic operation; the PromQL tables blank it per request (GET, no body).
+  Content-Type: application/x-amz-json-1.0
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 1200
+  # AWS JSON protocol throttling is HTTP 400 ThrottlingException ("Rate exceeded"), not 429.
+  retry_body_patterns: ["Throttling", "Rate exceeded"]
+  notes: >-
+    Per account per region: GetMetricData 500 TPS, but Metrics Insights expressions only 10/s and
+    SEARCH() only 50/s across all GetMetricData calls; 180,000 datapoints/s for windows within the
+    last 3h (396,000/s older). ListMetrics 25 TPS, DescribeAlarms 9 TPS, DescribeAlarmContributors
+    9 TPS, DescribeAlarmHistory 20 TPS, ListAlarmMuteRules 50 TPS. PromQL: 300 query TPS and 10
+    discovery TPS (series/labels) per account, 30 concurrent each (HTTP 422/429 when exceeded).
+retention:
+  metrics: 455d
+  timeseries: 455d
+ui_base_url: >-
+  https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}
+pitfalls:
+  - "CloudWatch is regional. AWS_REGION decides what exists: a metric or alarm in another region returns 0 rows, which is not evidence of absence."
+  - "A metric is identified by namespace + name + its EXACT full dimension set. Asking for CPUUtilization with only InstanceId does not match a series published with InstanceId and AutoScalingGroupName: you get 0 rows. List the real dimension sets with cloudwatch_metrics first."
+  - "Names and dimension values are case-sensitive (AWS/Lambda Errors, FunctionName). Unknown names return empty results, not errors."
+  - "Specifying a Unit that the data was not published with returns null/empty results. Leave unit unset unless you know it."
+  - "Periods with no published data are omitted, not zero. For count-like metrics (Errors, 5XX counts), a missing period usually means 0; for latency it means no traffic."
+  - "Resolution degrades with age: sub-minute data is kept 3 hours, 1-minute data 15 days, 5-minute data 63 days, 1-hour data 455 days. Ask for a period that exists for the window (>= 300 s beyond 15 days, >= 3600 s beyond 63 days)."
+  - "Statistics are per period: Sum over a 5-minute period is a 5-minute total. Divide by period/60 for per-minute rates, and do not average averages across series of very different traffic."
+  - "Cross-account observability: in a monitoring account, linked-account metrics need Metrics Insights WHERE AWS.AccountId = '...', SEARCH :aws.AccountId, MetricStat account_id, or ListMetrics owning_account."
+  - "Timestamps in the AWS JSON protocol are epoch seconds; all ts columns are UTC."
+  - "PromQL (cloudwatch_promql_*) only sees metrics ingested over OTLP and AWS vended metrics with OTel enrichment turned on; a classic PutMetricData custom metric or a vended metric without enrichment is NOT visible there - use Metrics Insights / MetricStat for those."
+query_languages:
+  cloudwatch_metrics_insights: >-
+    Metrics Insights SQL: SELECT AVG|COUNT|MAX|MIN|SUM(MetricName) FROM "Namespace" | SCHEMA("Namespace",
+    Dim1, Dim2) [WHERE Dim = 'value' AND Dim2 != 'x' AND tag.env = 'prod'] [GROUP BY Dim] [ORDER BY
+    MAX() DESC] [LIMIT n]. Namespaces/metric names containing / . or spaces need double quotes; label
+    values need single quotes. WHERE supports only =, != and AND (no OR, IN, LIKE). No percentiles.
+    Only the last 2 weeks. At most 10,000 metrics scanned and 500 series returned; GROUP BY output is
+    alphabetical unless you add ORDER BY ... DESC LIMIT n, so always add it for "top N" questions.
+    SCHEMA("AWS/EC2", InstanceId) matches only series with exactly that dimension set; FROM "AWS/EC2"
+    matches all. Alternative in the same column: a SEARCH() expression, which supports any statistic
+    (p99, p95, tm99): SEARCH('{AWS/ApplicationELB,LoadBalancer} MetricName="TargetResponseTime"', 'p99').
+    SEARCH matches tokens partially; use MetricName="..." and quoted dimension values for exact matches.
+  cloudwatch_promql: >-
+    PromQL (Prometheus 3, UTF-8 names). Every selector must name the metric: {"http.server.request.duration"}
+    or {__name__="..."}; label-only selectors are rejected. Names/labels with dots or @ must be quoted
+    inside the braces: {"http.server.active_requests", "@resource.service.name"="checkout"}.
+    OTLP scopes: "@resource.<attr>", "@instrumentation.@name", datapoint attributes bare or
+    "@datapoint.<attr>", AWS labels "@aws.account", "@aws.region", "@aws.tag.<Tag>". Enriched vended
+    metrics keep the CloudWatch name and dimensions: {Errors, FunctionName="checkout-api",
+    "@instrumentation.@name"="cloudwatch.aws/lambda"}. Histograms are native: use histogram_quantile(0.99, ...),
+    histogram_avg(...), histogram_count(...); min/max skip histograms. Delta histograms (label
+    __temporality__="delta") need sum_over_time(x[5m]) / 5m instead of rate(); cumulative use rate().
+    Aggregate with sum by ("@resource.service.name") (...). Max 500 series per result, 7 days range
+    including [range] lookbacks, 20 s execution.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_metrics_insights
+    title: Metric query (Metrics Insights SQL or SEARCH) via GetMetricData
+    description: >-
+      Run ONE CloudWatch metric expression through GetMetricData and get one row per (series,
+      timestamp). `query` (required) is either a Metrics Insights SQL query, e.g. SELECT
+      SUM(Errors) FROM SCHEMA("AWS/Lambda", FunctionName) GROUP BY FunctionName ORDER BY SUM() DESC
+      LIMIT 10, or a SEARCH() expression, e.g. SEARCH('{AWS/ApplicationELB,LoadBalancer}
+      MetricName="TargetResponseTime"', 'p99'). Every returned series is a separate result whose
+      `label` tells the series apart (for GROUP BY and SEARCH results it carries the grouping /
+      dimension values). `period` is in seconds (multiple of 60; default: auto, ~300 points).
+      This is the default table for "how did metric X behave across all functions / load balancers /
+      instances during the incident". Use cloudwatch_metric_data for one exact series and for
+      percentiles older than two weeks.
+    kind: timeseries
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: GraniteServiceVersion20100801.GetMetricData}
+      body:
+        StartTime: "{{ time.start | epoch_s }}"
+        EndTime: "{{ time.end | epoch_s }}"
+        ScanBy: TimestampAscending
+        MaxDatapoints: 100800
+        MetricDataQueries:
+          - Id: q1
+            Expression: "{{ filters.query }}"
+            Period: "{{ (filters.period | int) if filters.period else ([((time.step_s / 60) | round(0, 'ceil') | int) * 60, 60] | max) }}"
+            ReturnData: true
+    filters:
+      - column: query
+        required: true
+        description: "Metrics Insights SQL query or SEARCH() expression (max 2048 chars). See query_languages.cloudwatch_metrics_insights."
+        examples:
+          - 'SELECT SUM(Errors) FROM SCHEMA("AWS/Lambda", FunctionName) GROUP BY FunctionName ORDER BY SUM() DESC LIMIT 10'
+          - 'SELECT AVG(CPUUtilization) FROM SCHEMA("AWS/EC2", InstanceId) GROUP BY InstanceId ORDER BY MAX() DESC LIMIT 20'
+          - "SEARCH('{AWS/ApplicationELB,LoadBalancer} MetricName=\"TargetResponseTime\"', 'p99')"
+      - column: period
+        type: BIGINT
+        description: "Period in seconds: 60 or a multiple of 60 (1/5/10/20/30 only for high-resolution custom metrics; Metrics Insights is always >= 60). Default: auto (~300 points)."
+        examples: ["60"]
+    time: {column: ts, default_lookback: 1h, max_window: 14d, retention: 14d, target_points: 300, min_step: 60s}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.MetricDataResults[*]"
+      expand:
+        - {zip: {t: "Timestamps", v: "Values"}, as: p}
+      errors:
+        - path: "$.Messages"
+          non_empty: true
+          message: "$.Messages"
+          hint: >-
+            GetMetricData returned operation-level messages (e.g. Maximum number of allowed metrics
+            exceeded): the result is incomplete. Narrow the Metrics Insights WHERE clause or SEARCH
+            term, add ORDER BY ... LIMIT, or shorten the window.
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.t", transform: epoch_s, description: "Start of the period (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p.v", description: "Statistic value for the period"}
+      - {name: label, path: Label, description: "Series label: the group-by / dimension values for GROUP BY and SEARCH results"}
+      - {name: series_id, path: Id, description: "MetricDataQuery Id (always q1 here)"}
+      - {name: status_code, path: StatusCode, description: "Complete | PartialData | InternalError | Forbidden. Anything but Complete means missing points"}
+      - {name: messages, type: JSON, path: Messages, description: "Per-series messages (e.g. why data is partial)"}
+      - {name: query, filter_only: true, description: "The Metrics Insights / SEARCH expression"}
+      - {name: period, type: BIGINT, filter_only: true, description: "Period in seconds"}
+    max_rows: 20000
+    sort_hint: "ascending by time within each series (ScanBy=TimestampAscending); series order follows the query's ORDER BY"
+    pitfalls:
+      - "Metrics Insights: no percentiles, no OR/IN in WHERE, last two weeks only, 500 series max. Without ORDER BY the 500 returned series are an arbitrary/alphabetical subset: add ORDER BY MAX() DESC LIMIT n."
+      - "SEARCH() only finds metrics that reported data in the last two weeks and does partial token matching: SEARCH('{AWS/Lambda,FunctionName} Errors', 'Sum') also matches other metric names containing Errors. Use MetricName=\"Errors\"."
+      - "One expression per call: metric math that references other ids (m1/m2) is not possible here; compute ratios in SQL by joining two queries on ts."
+      - "A status_code other than Complete means points are missing for that series; check messages before concluding a drop."
+      - "Values are per period: SUM(RequestCount) with period 300 is requests per 5 minutes."
+      - "Account-wide quotas: Metrics Insights 10 expressions/s and SEARCH 50/s; fan-outs of many queries get throttled (retried, then a rate-limit error)."
+    examples:
+      - sql: >-
+          SELECT label AS function_name, sum(value) AS errors, max(value) AS worst_minute, arg_max(ts, value) AS worst_at
+          FROM cloudwatch_metrics_insights
+          WHERE query = 'SELECT SUM(Errors) FROM SCHEMA("AWS/Lambda", FunctionName) GROUP BY FunctionName ORDER BY SUM() DESC LIMIT 10'
+            AND period = 60
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY label ORDER BY errors DESC
+        description: Which Lambda functions threw the most errors during the incident hour, and when each peaked.
+      - sql: >-
+          SELECT label AS load_balancer, max(value) AS p99_seconds, arg_max(ts, value) AS peak_at
+          FROM cloudwatch_metrics_insights
+          WHERE query = 'SEARCH(''{AWS/ApplicationELB,LoadBalancer} MetricName="TargetResponseTime"'', ''p99'')'
+            AND period = 60
+          GROUP BY label ORDER BY p99_seconds DESC
+        description: p99 target latency per ALB (SEARCH supports percentiles; Metrics Insights does not).
+      - sql: >-
+          SELECT ts, value AS cpu_avg FROM cloudwatch_metrics_insights
+          WHERE query = 'SELECT AVG(CPUUtilization) FROM SCHEMA("AWS/RDS", DBInstanceIdentifier) WHERE DBInstanceIdentifier = ''orders-db'''
+          ORDER BY ts
+        description: One aggregated series (no GROUP BY) for a single RDS instance.
+      - sql: >-
+          SELECT label AS queue, max(value) AS oldest_message_age_s
+          FROM cloudwatch_metrics_insights
+          WHERE query = 'SELECT MAX(ApproximateAgeOfOldestMessage) FROM SCHEMA("AWS/SQS", QueueName) GROUP BY QueueName ORDER BY MAX() DESC LIMIT 10'
+          GROUP BY label ORDER BY oldest_message_age_s DESC
+        description: Which SQS queues are backing up (age of the oldest message).
+    fixtures:
+      - file: get_metric_data_insights.json
+        filters: {query: 'SELECT AVG(CPUUtilization) FROM SCHEMA("AWS/EC2", InstanceId)'}
+        expect_rows: 6
+        expect_columns: {ts: "2021-11-16T14:50:00Z", value: 0.0, label: "Unhealthy Behind Load Balancer", series_id: m1, status_code: Complete}
+        note: >-
+          Verbatim sample response of GetMetricData Example 1 (a Metrics Insights query q1 plus a
+          MetricStat m1) from https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_GetMetricData.html
+      - file: get_metric_data_messages.json
+        filters: {query: 'SELECT AVG(CPUUtilization) FROM SCHEMA("AWS/EC2", InstanceId)'}
+        expect_error: "Maximum number of allowed metrics exceeded"
+        note: >-
+          Built strictly from the GetMetricData response schema (Messages = array of MessageData
+          {Code, Value}); the message text is the example quoted in the Messages description of
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_GetMetricData.html.
+          The Code value is illustrative. Proves the 2xx Messages rule fails loudly.
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#metricsV2?query={{ filters.query | urlencode }}
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_metric_data
+    title: One exact metric series (GetMetricData MetricStat)
+    description: >-
+      Fetch one exact CloudWatch metric (namespace + metric + full dimension set) with any
+      statistic, including percentiles (p50/p90/p99), trimmed means (tm99) and SampleCount. One row
+      per timestamp. Required: namespace and metric. `dimensions` is a comma-separated list of
+      Name=Value pairs that must equal the metric's full dimension set, e.g.
+      'LoadBalancer=app/web-prod/50dc6c495c0c9188,TargetGroup=targetgroup/web/6d0ecf831eec9f09'.
+      `stat` defaults to Average; `period` defaults to auto (multiple of 60). Works over the full
+      455-day retention (Metrics Insights / SEARCH only see two weeks).
+    kind: timeseries
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: GraniteServiceVersion20100801.GetMetricData}
+      body:
+        StartTime: "{{ time.start | epoch_s }}"
+        EndTime: "{{ time.end | epoch_s }}"
+        ScanBy: TimestampAscending
+        MetricDataQueries:
+          - Id: m1
+            ReturnData: true
+            AccountId: "{{ filters.account_id }}"
+            MetricStat:
+              Metric:
+                Namespace: "{{ filters.namespace }}"
+                MetricName: "{{ filters.metric }}"
+                # 'A=1,B=2' -> [{"Name":"A","Value":"1"},{"Name":"B","Value":"2"}]; [] for dimensionless metrics
+                Dimensions: "{{ filters.dimensions | kv_list }}"
+              Period: "{{ (filters.period | int) if filters.period else ([((time.step_s / 60) | round(0, 'ceil') | int) * 60, 60] | max) }}"
+              Stat: "{{ filters.stat or 'Average' }}"
+              Unit: "{{ filters.unit }}"
+    filters:
+      - {column: namespace, required: true, description: "Metric namespace, e.g. AWS/ApplicationELB, AWS/Lambda, AWS/RDS, AWS/SQS, ECS/ContainerInsights, or a custom namespace", examples: ["AWS/ApplicationELB"]}
+      - {column: metric, required: true, ops: ["=", "in"], description: "Metric name (case-sensitive). IN fans out one request per metric.", examples: ["TargetResponseTime"]}
+      - {column: dimensions, ops: ["=", "in"], description: "Comma-separated Name=Value pairs equal to the metric's FULL dimension set; omit for dimensionless metrics. IN fans out one request per dimension set.", examples: ["LoadBalancer=app/web-prod/50dc6c495c0c9188"]}
+      - {column: stat, ops: ["=", "in"], default: Average, description: "Average | Sum | Minimum | Maximum | SampleCount | pNN (p99, p95, p50) | tmNN | wmNN | tcNN | tsNN | IQM", examples: ["p99"]}
+      - {column: period, type: BIGINT, description: "Seconds; 60 or a multiple of 60 (1/5/10/20/30 for high-resolution metrics within 3h)", examples: ["60"]}
+      - {column: unit, description: "Optional unit filter (Seconds, Milliseconds, Count, Percent, Bytes...). A wrong unit returns no data."}
+      - {column: account_id, description: "Monitoring account only: the linked source account that owns the metric"}
+    time: {column: ts, default_lookback: 1h, max_window: 455d, retention: 455d, target_points: 300, min_step: 60s}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.MetricDataResults[*]"
+      expand:
+        - {zip: {t: "Timestamps", v: "Values"}, as: p}
+      errors:
+        - {path: "$.Messages", non_empty: true, message: "$.Messages", hint: "GetMetricData operation-level message: the result is incomplete"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.t", transform: epoch_s, description: "Start of the period (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p.v", description: "Statistic value (TargetResponseTime and Duration-style metrics keep their native unit, e.g. seconds for ALB, milliseconds for Lambda)"}
+      - {name: label, path: Label}
+      - {name: series_id, path: Id}
+      - {name: status_code, path: StatusCode, description: "Complete | PartialData | InternalError | Forbidden"}
+      - {name: messages, type: JSON, path: Messages}
+      - {name: namespace, filter_only: true}
+      - {name: metric, filter_only: true}
+      - {name: dimensions, filter_only: true}
+      - {name: stat, filter_only: true}
+      - {name: period, type: BIGINT, filter_only: true}
+      - {name: unit, filter_only: true}
+      - {name: account_id, filter_only: true}
+    max_rows: 20000
+    sort_hint: "ascending by time"
+    pitfalls:
+      - "The dimension set must be complete and exact; a missing or extra dimension returns 0 rows. Copy it from cloudwatch_metrics.dimensions (Name=Value pairs, comma-separated)."
+      - "Dimension values containing a comma or '=' cannot be expressed in the Name=Value list; use cloudwatch_metrics_insights with SCHEMA(...) WHERE instead."
+      - "Percentiles are only available for metrics published as raw values (all AWS service metrics are); for StatisticSet custom metrics they return nothing."
+      - "Units differ per service: ALB TargetResponseTime is seconds, Lambda Duration and API Gateway Latency are milliseconds."
+      - "Errors/5XX count metrics are absent (not 0) in periods without errors for some services; treat missing periods as 0 for counts only."
+    examples:
+      - sql: >-
+          SELECT ts, value AS p99_seconds FROM cloudwatch_metric_data
+          WHERE namespace = 'AWS/ApplicationELB' AND metric = 'TargetResponseTime'
+            AND dimensions = 'LoadBalancer=app/web-prod/50dc6c495c0c9188' AND stat = 'p99' AND period = 60
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: p99 latency of one load balancer, minute by minute.
+      - sql: >-
+          SELECT stat, max(value) AS peak, arg_max(ts, value) AS peak_at FROM cloudwatch_metric_data
+          WHERE namespace = 'AWS/Lambda' AND metric = 'Duration' AND dimensions = 'FunctionName=checkout-api'
+            AND stat IN ('p50', 'p99') AND period = 60
+          GROUP BY stat
+        description: Median vs tail Lambda duration (two requests, one per statistic).
+      - sql: >-
+          SELECT metric, ts, value FROM cloudwatch_metric_data
+          WHERE namespace = 'AWS/RDS' AND metric IN ('DatabaseConnections', 'CPUUtilization', 'ReadLatency')
+            AND dimensions = 'DBInstanceIdentifier=orders-db' AND stat = 'Maximum'
+            AND ts BETWEEN TIMESTAMP '2026-09-01 00:00:00' AND TIMESTAMP '2026-10-01 12:00:00' AND period = 3600
+          ORDER BY metric, ts
+        description: A month of hourly RDS saturation signals (MetricStat sees the full 455 days).
+    fixtures:
+      - file: get_metric_data_metricstat.json
+        filters: {namespace: AWS/EC2, metric: CPUUtilization, dimensions: "InstanceId=i-1234567890abcdef0", stat: Average}
+        expect_rows: 9
+        expect_columns: {ts: "2018-02-17T11:47:12Z", value: 15000.0, series_id: m1, status_code: Complete, namespace: AWS/EC2, stat: Average}
+        note: >-
+          Verbatim sample response of GetMetricData Example 3 (three MetricStat queries m1, m2, m3)
+          from https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_GetMetricData.html
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#metricsV2?graph=~(metrics~(~(~'{{ filters.namespace }}~'{{ filters.metric }}))~region~'{{ env.AWS_REGION }}~stat~'{{ filters.stat or 'Average' }})
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_metrics
+    title: Metric inventory (ListMetrics)
+    description: >-
+      List metrics (namespace, metric name and exact dimension set) that exist in the region. Use it
+      before cloudwatch_metric_data to learn the full dimension set, and to discover which
+      namespaces/metrics a service emits. Filter by namespace, metric, one dimension name (and
+      optional value). recently_active = true limits to metrics with data in the past 3 hours.
+      Up to 500 metrics per page.
+    kind: entities
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: GraniteServiceVersion20100801.ListMetrics}
+      body:
+        Namespace: "{{ filters.namespace }}"
+        MetricName: "{{ filters.metric }}"
+        Dimensions: "{{ [({'Name': filters.dimension_name, 'Value': (filters.dimension_value or None)} | compact)] if filters.dimension_name else None }}"
+        RecentlyActive: "{{ 'PT3H' if filters.recently_active else None }}"
+        IncludeLinkedAccounts: "{{ true if filters.owning_account else None }}"
+        OwningAccount: "{{ filters.owning_account }}"
+    filters:
+      - {column: namespace, description: "Exact namespace, e.g. AWS/Lambda", examples: ["AWS/SNS"]}
+      - {column: metric, description: "Exact metric name", examples: ["NumberOfNotificationsFailed"]}
+      - {column: dimension_name, description: "Only metrics that have this dimension name", examples: ["TopicName"]}
+      - {column: dimension_value, description: "Value for dimension_name (requires dimension_name)"}
+      - {column: recently_active, type: BOOLEAN, description: "true = only metrics with datapoints in the past 3 hours (RecentlyActive=PT3H)"}
+      - {column: owning_account, description: "Monitoring account only: list metrics of this linked source account"}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 6}
+    response:
+      rows_path: "$.Metrics[*]"
+    columns:
+      - {name: namespace, path: Namespace}
+      - {name: metric, path: MetricName}
+      - {name: dimensions, type: JSON, expr: "dict((_.Dimensions or []) | map('dictsort') | map('map', attribute=1) | map('list') | list)", description: "Full dimension set as an object, e.g. {\"FunctionName\":\"checkout-api\"}; use dimensions->>'FunctionName'"}
+      - {name: dimension_spec, expr: "(_.Dimensions or []) | map('dictsort') | map('map', attribute=1) | map('join', '=') | join(',')", description: "The dimension set as 'Name=Value,Name2=Value2' (Name before Value) - paste into cloudwatch_metric_data.dimensions"}
+      - {name: dimension_list, path: Dimensions, type: JSON, description: "Raw Dimensions array [{Name, Value}]"}
+      - {name: owning_account, path: "$.OwningAccounts[#i]", description: "Source account (monitoring accounts with IncludeLinkedAccounts only)"}
+      - {name: dimension_name, filter_only: true}
+      - {name: dimension_value, filter_only: true}
+      - {name: recently_active, type: BOOLEAN, filter_only: true}
+    max_rows: 3000
+    pitfalls:
+      - "ListMetrics shows metrics that received data in the last two weeks; older/retired series are not listed even though their data may still be queryable."
+      - "Without namespace or dimension filters this paginates through every metric in the region (500 per page); always filter."
+      - "New metrics can take up to 15 minutes to appear in ListMetrics."
+    examples:
+      - sql: >-
+          SELECT metric, dimensions, dimension_spec FROM cloudwatch_metrics
+          WHERE namespace = 'AWS/ApplicationELB' AND metric = 'HTTPCode_Target_5XX_Count' AND recently_active = true
+        description: Exact dimension sets that carry ALB target 5xx counts right now (dimension_spec feeds cloudwatch_metric_data).
+      - sql: >-
+          SELECT DISTINCT metric FROM cloudwatch_metrics
+          WHERE namespace = 'AWS/Lambda' AND dimension_name = 'FunctionName' AND dimension_value = 'checkout-api'
+          ORDER BY metric
+        description: Which metrics a Lambda function emits.
+    fixtures:
+      - file: list_metrics.json
+        filters: {namespace: AWS/SNS}
+        expect_rows: 8
+        expect_columns: {namespace: AWS/SNS, metric: PublishSize, dimensions: '{"TopicName":"NotifyMe"}', dimension_spec: "TopicName=NotifyMe"}
+        note: >-
+          Output of the official AWS CLI example "To list the metrics for Amazon SNS"
+          (https://awscli.amazonaws.com/v2/documentation/api/latest/reference/cloudwatch/list-metrics.html);
+          the CLI prints the ListMetrics response body unchanged. Response shape per
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_ListMetrics.html
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_alarms
+    title: Alarms and their current state (DescribeAlarms)
+    description: >-
+      CloudWatch alarm definitions with their current state: metric alarms (including metric-math,
+      Metrics Insights and PromQL alarms), composite alarms and log alarms (all three types are
+      requested; the API returns only metric alarms by default). One row per alarm. Filter state =
+      'ALARM' for what is firing now, alarm_name for the alarm in the page, alarm_name LIKE
+      'prefix%' for a family. Columns include the metric, full dimension set, statistic, threshold,
+      comparison, period and evaluation settings, `expression` (PromQL query / metric-math or
+      Insights expression / log query / composite rule), StateReason (human text) and
+      StateReasonData (JSON with the datapoints that breached).
+    kind: alerts
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: GraniteServiceVersion20100801.DescribeAlarms}
+      body:
+        AlarmNames: "{{ [filters.alarm_name] if (filters.alarm_name and not filters.alarm_name__op and not (filters.children_of or filters.parents_of)) else None }}"
+        # alarm_name LIKE 'prefix%' becomes AlarmNamePrefix (DuckDB re-applies the LIKE).
+        AlarmNamePrefix: >-
+          {{ None if ((filters.alarm_name and not filters.alarm_name__op) or filters.children_of or filters.parents_of)
+             else (filters.alarm_name_prefix or ((filters.alarm_name[:-1]) if (filters.alarm_name__op == 'like'
+                   and filters.alarm_name.endswith('%') and '%' not in filters.alarm_name[:-1] and '_' not in filters.alarm_name[:-1] and filters.alarm_name | length > 1) else None)) }}
+        AlarmTypes: "{{ None if (filters.children_of or filters.parents_of) else ([filters.alarm_type] if filters.alarm_type else ['MetricAlarm', 'CompositeAlarm', 'LogAlarm']) }}"
+        StateValue: "{{ filters.state if not (filters.children_of or filters.parents_of) else None }}"
+        ActionPrefix: "{{ filters.action_prefix if not (filters.children_of or filters.parents_of) else None }}"
+        ChildrenOfAlarmName: "{{ filters.children_of }}"
+        ParentsOfAlarmName: "{{ filters.parents_of if not filters.children_of else None }}"
+        MaxRecords: 100
+    filters:
+      - {column: alarm_name, ops: ["=", "in", "like"], description: "Exact alarm name (IN fans out one request per name); LIKE 'prefix%' is pushed as AlarmNamePrefix", examples: ["myalarm"]}
+      - {column: alarm_name_prefix, description: "All alarms whose name starts with this prefix", examples: ["prod-checkout-"]}
+      - {column: state, ops: ["=", "in"], description: "OK | ALARM | INSUFFICIENT_DATA", examples: ["ALARM"]}
+      - {column: alarm_type, ops: ["=", "in"], description: "MetricAlarm | CompositeAlarm | LogAlarm (default: all three)"}
+      - {column: action_prefix, description: "Only alarms whose actions start with this ARN prefix (e.g. an SNS topic or PagerDuty integration ARN)"}
+      - {column: children_of, description: "Composite alarm name: return the alarms referenced in its AlarmRule (only name, ARN, state, state time are returned)"}
+      - {column: parents_of, description: "Alarm name: return the composite alarms that reference it (only name and ARN are returned)"}
+    response:
+      # The body has three lists (MetricAlarms, CompositeAlarms, LogAlarms); $.*[*] walks all of them.
+      rows_path: "$.*[*]"
+    columns:
+      - {name: alarm_name, path: AlarmName}
+      - {name: alarm_type, expr: "'CompositeAlarm' if _.AlarmRule else ('LogAlarm' if _.ScheduledQueryConfiguration else 'MetricAlarm')", description: "Derived from which fields are present"}
+      - {name: state, path: StateValue, description: "OK | ALARM | INSUFFICIENT_DATA"}
+      - {name: ts, type: TIMESTAMP, expr: "_.StateTransitionedTimestamp or _.StateUpdatedTimestamp", transform: auto_time, description: "When StateValue last changed (falls back to StateUpdatedTimestamp)"}
+      - {name: state_updated_at, type: TIMESTAMP, path: StateUpdatedTimestamp, transform: auto_time, description: "Last update of StateValue or EvaluationState"}
+      - {name: state_reason, path: StateReason, description: "Human-readable reason, e.g. 'Threshold Crossed: 2 datapoints were greater than the threshold (70.0)...'"}
+      - {name: state_reason_data, type: JSON, path: StateReasonData, transform: from_json, description: "Parsed StateReasonData: statistic, period, recentDatapoints, threshold, queryDate. state_reason_data->'recentDatapoints'"}
+      - {name: description, path: AlarmDescription}
+      - {name: namespace, path: Namespace}
+      - {name: metric, path: MetricName}
+      - {name: stat, expr: "_.Statistic or _.ExtendedStatistic"}
+      - {name: dimensions, type: JSON, expr: "dict((_.Dimensions or []) | map('dictsort') | map('map', attribute=1) | map('list') | list)", description: "Alarm metric dimensions as an object"}
+      - {name: threshold, type: DOUBLE, path: Threshold}
+      - {name: comparison_operator, path: ComparisonOperator}
+      - {name: period_s, type: BIGINT, path: Period}
+      - {name: evaluation_periods, type: BIGINT, path: EvaluationPeriods}
+      - {name: datapoints_to_alarm, type: BIGINT, path: DatapointsToAlarm}
+      - {name: evaluation_interval_s, type: BIGINT, path: EvaluationInterval, description: "How often the alarm is evaluated (seconds), when set"}
+      - {name: treat_missing_data, path: TreatMissingData}
+      - {name: unit, path: Unit}
+      - name: expression
+        expr: >-
+          _.EvaluationCriteria.PromQLCriteria.Query
+          or ((_.Metrics or []) | selectattr('ReturnData') | map(attribute='Expression') | select | first)
+          or _.ScheduledQueryConfiguration.QueryString
+          or _.AlarmRule
+          or (((_.Namespace or '') ~ ' ' ~ _.MetricName) if _.MetricName else None)
+        description: "What the alarm evaluates: PromQL query, the ReturnData metric-math / Metrics Insights expression, the log alarm query, the composite AlarmRule, or 'Namespace MetricName'"
+      - {name: promql_query, path: EvaluationCriteria.PromQLCriteria.Query, description: "PromQL alarms: the query; each vector element is an alarm contributor (see cloudwatch_alarm_contributors)"}
+      - {name: pending_period_s, type: BIGINT, path: EvaluationCriteria.PromQLCriteria.PendingPeriod, description: "PromQL alarms: seconds a contributor must breach before ALARM"}
+      - {name: metrics, type: JSON, path: Metrics, description: "Metric-math / Metrics Insights alarm queries (MetricDataQuery list)"}
+      - {name: threshold_metric_id, path: ThresholdMetricId, description: "Anomaly-detection band id when the threshold is a band"}
+      - {name: alarm_rule, path: AlarmRule, description: "Composite alarm rule, e.g. ALARM(cpu-high) AND ALARM(5xx-high)"}
+      - {name: log_query, type: JSON, path: ScheduledQueryConfiguration, description: "Log alarm: Logs Insights query, log groups, aggregation, schedule"}
+      - {name: evaluation_state, path: EvaluationState, description: "PARTIAL_DATA | EVALUATION_FAILURE | EVALUATION_ERROR when the alarm could not evaluate"}
+      - {name: actions_enabled, type: BOOLEAN, path: ActionsEnabled}
+      - {name: actions_suppressed_by, path: ActionsSuppressedBy, description: "Composite alarms: WaitPeriod | ExtensionPeriod | Alarm when actions are suppressed"}
+      - {name: actions_suppressed_reason, path: ActionsSuppressedReason}
+      - {name: alarm_actions, type: JSON, path: AlarmActions}
+      - {name: ok_actions, type: JSON, path: OKActions}
+      - {name: config_updated_at, type: TIMESTAMP, path: AlarmConfigurationUpdatedTimestamp, transform: auto_time, description: "Last configuration change of the alarm (a recent change can explain a new page)"}
+      - {name: arn, path: AlarmArn}
+      - {name: url, expr: "('https://' ~ _.AlarmArn.split(':')[3] ~ '.console.aws.amazon.com/cloudwatch/home?region=' ~ _.AlarmArn.split(':')[3] ~ '#alarmsV2:alarm/' ~ (_.AlarmName | urlencode)) if _.AlarmArn else None", description: "Console link to the alarm"}
+      - {name: alarm_name_prefix, filter_only: true}
+      - {name: action_prefix, filter_only: true}
+      - {name: children_of, filter_only: true}
+      - {name: parents_of, filter_only: true}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 10}
+    max_rows: 2000
+    sort_hint: "alphabetical by alarm name within each alarm type"
+    pitfalls:
+      - "Omitting AlarmTypes returns only metric alarms; this table always asks for all three types unless alarm_type is set."
+      - "state is the CURRENT state. An alarm that fired and recovered shows OK: use cloudwatch_alarm_history for what happened during the incident window."
+      - "children_of / parents_of cannot be combined with other filters and return only name, ARN, state and state time."
+      - "Alarms on metric math (metrics column), Metrics Insights, PromQL (promql_query) or anomaly bands (threshold_metric_id) have no namespace/metric of their own: read `expression`."
+      - "PromQL and Metrics Insights GROUP BY alarms are multi-time-series: which series breached is in cloudwatch_alarm_contributors, not here."
+      - "evaluation_state = PARTIAL_DATA / EVALUATION_ERROR means the alarm itself could not see all data (e.g. Metrics Insights 10,000-metric cap)."
+      - "Composite alarms are only returned when the caller's cloudwatch:DescribeAlarms permission is scoped to *."
+      - "Alarm mute rules silence notifications without changing state: check cloudwatch_alarm_mute_rules when a page did not arrive."
+    examples:
+      - sql: >-
+          SELECT alarm_name, alarm_type, ts AS in_alarm_since, namespace, metric, dimensions, stat, threshold, comparison_operator, expression, state_reason, url
+          FROM cloudwatch_alarms WHERE state = 'ALARM' ORDER BY ts DESC
+        description: Everything firing right now, newest first.
+      - sql: >-
+          SELECT alarm_name, state, metric, stat, threshold, comparison_operator, period_s, evaluation_periods, datapoints_to_alarm,
+                 treat_missing_data, state_reason_data->'recentDatapoints' AS recent_datapoints, expression, config_updated_at
+          FROM cloudwatch_alarms WHERE alarm_name = 'prod-checkout-5xx'
+        description: Full definition of the alarm that paged, with the datapoints that breached.
+      - sql: >-
+          SELECT alarm_name, state, ts FROM cloudwatch_alarms WHERE children_of = 'prod-checkout-composite'
+        description: Which child alarms make up a composite alarm, and their states.
+      - sql: >-
+          SELECT alarm_name, state, ts, metric, threshold FROM cloudwatch_alarms WHERE alarm_name LIKE 'prod-checkout-%' ORDER BY state, alarm_name
+        description: A whole alarm family by name prefix (pushed down as AlarmNamePrefix).
+      - sql: >-
+          SELECT alarm_name, config_updated_at, threshold, evaluation_periods FROM cloudwatch_alarms
+          WHERE config_updated_at >= TIMESTAMP '2026-09-30 00:00:00' ORDER BY config_updated_at DESC
+        description: Alarms reconfigured in the last day (a changed threshold can explain a new or missing page).
+    tests:
+      - {sql: "SELECT alarm_name, state FROM cloudwatch_alarms WHERE state = 'ALARM'", min_rows: 0}
+    fixtures:
+      - file: describe_alarms.json
+        filters: {alarm_name: myalarm}
+        expect_rows: 1
+        expect_columns:
+          alarm_name: myalarm
+          alarm_type: MetricAlarm
+          state: OK
+          ts: "2014-04-09T18:59:06Z"
+          metric: CPUUtilization
+          stat: Average
+          threshold: 70.0
+          dimensions: '{"InstanceId":"i-0c986c72"}'
+          expression: "AWS/EC2 CPUUtilization"
+          state_reason_data: '{"version":"1.0","queryDate":"2014-04-09T18:59:06.419+0000","startDate":"2014-04-09T18:44:00.000+0000","statistic":"Average","period":300,"recentDatapoints":[38.958,40.292],"threshold":70.0}'
+          url: "https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#alarmsV2:alarm/myalarm"
+        note: >-
+          Output of the official AWS CLI example "To list information about an alarm"
+          (https://awscli.amazonaws.com/v2/documentation/api/latest/reference/cloudwatch/describe-alarms.html).
+          The CLI renders timestamps as ISO-8601; on the JSON wire they are epoch seconds - the
+          auto_time transform accepts both. Shape per
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarms.html
+      - file: describe_alarms_promql.json
+        filters: {state: ALARM}
+        expect_rows: 2
+        expect_columns:
+          alarm_name: checkout-p99-latency
+          alarm_type: MetricAlarm
+          state: ALARM
+          ts: "2026-10-01T11:52:00Z"
+          promql_query: 'histogram_quantile(0.99, sum by ("@resource.service.name") (sum_over_time({"http.server.request.duration"}[5m]))) > 2'
+          expression: 'histogram_quantile(0.99, sum by ("@resource.service.name") (sum_over_time({"http.server.request.duration"}[5m]))) > 2'
+          pending_period_s: 120
+          evaluation_interval_s: 60
+        note: >-
+          Built strictly from the DescribeAlarms response schema (MetricAlarms[] with EvaluationCriteria
+          {PromQLCriteria {Query, PendingPeriod, RecoveryPeriod}}, EvaluationInterval, StateTransitionedTimestamp;
+          CompositeAlarms[] with AlarmRule, ActionsSuppressedBy) at
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarms.html and
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_AlarmPromQLCriteria.html
+          (no documented example). Values are illustrative.
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#alarmsV2:?~(alarmStateFilter~'{{ filters.state or 'ALARM' }})
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_alarm_contributors
+    title: Breaching contributors of a multi-time-series alarm (DescribeAlarmContributors)
+    description: >-
+      For one alarm (alarm_name required; IN fans out), the individual time series that are
+      currently in ALARM: one row per contributor with its attributes (metric dimensions / PromQL
+      labels such as FunctionName or "@resource.service.name"), the reason and when it transitioned.
+      Use it after a PromQL or Metrics Insights GROUP BY alarm fires to learn WHICH service, host
+      or function breached.
+    kind: alerts
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: GraniteServiceVersion20100801.DescribeAlarmContributors}
+      body:
+        AlarmName: "{{ filters.alarm_name }}"
+    filters:
+      - {column: alarm_name, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Alarm name (exact)", examples: ["checkout-p99-latency"]}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 5}
+    response:
+      rows_path: "$.AlarmContributors[*]"
+    columns:
+      - {name: alarm_name, filter_only: true}
+      - {name: contributor_id, path: ContributorId, description: "Use with cloudwatch_alarm_history.contributor_id"}
+      - {name: attributes, type: JSON, path: ContributorAttributes, description: "Identifying labels/dimensions of the series: attributes->>'FunctionName'"}
+      - {name: title, expr: "(_.ContributorAttributes or {}) | dictsort | map('join', '=') | join(', ')", description: "Attributes as 'k=v, k2=v2'"}
+      - {name: state_reason, path: StateReason}
+      - {name: ts, type: TIMESTAMP, path: StateTransitionedTimestamp, transform: auto_time, description: "When this contributor last transitioned (to ALARM)"}
+      - {name: state, expr: "'ALARM'", description: "The API only returns contributors currently in ALARM"}
+    max_rows: 2000
+    pitfalls:
+      - "Only contributors currently in ALARM are returned; recovered ones are in cloudwatch_alarm_history (history_item_type = 'AlarmContributorStateUpdate')."
+      - "Single-series alarms have no contributors (0 rows is normal for them); an unknown alarm name is a 404 ResourceNotFoundException."
+    examples:
+      - sql: >-
+          SELECT title, ts, state_reason FROM cloudwatch_alarm_contributors
+          WHERE alarm_name = 'checkout-p99-latency' ORDER BY ts
+        description: Which series of a multi-time-series alarm are breaching, first breach first.
+      - sql: >-
+          SELECT attributes->>'@resource.service.name' AS service, count(*) AS breaching_series
+          FROM cloudwatch_alarm_contributors WHERE alarm_name = 'checkout-p99-latency' GROUP BY 1 ORDER BY 2 DESC
+        description: Breaching contributors grouped by service label.
+    fixtures:
+      - file: describe_alarm_contributors.json
+        filters: {alarm_name: checkout-p99-latency}
+        expect_rows: 2
+        expect_columns:
+          alarm_name: checkout-p99-latency
+          contributor_id: 9f3c2a1b7d4e5f60
+          ts: "2026-10-01T11:52:00Z"
+          title: "@resource.deployment.environment=prod, @resource.service.name=checkout-api"
+          state: ALARM
+        note: >-
+          Built strictly from the DescribeAlarmContributors / AlarmContributor response schema
+          (AlarmContributors[] of ContributorAttributes map, ContributorId <= 16 chars, StateReason,
+          StateTransitionedTimestamp) at
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarmContributors.html
+          (no documented example). Timestamps are epoch seconds as on the JSON wire; values illustrative.
+    ui_link: >-
+      https://{{ env.AWS_REGION }}.console.aws.amazon.com/cloudwatch/home?region={{ env.AWS_REGION }}#alarmsV2:alarm/{{ (filters.alarm_name or '') | urlencode }}
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_alarm_mute_rules
+    title: Alarm mute rules (ListAlarmMuteRules)
+    description: >-
+      Alarm mute rules (maintenance windows, deployment mutes) in the region: name, status
+      (SCHEDULED | ACTIVE | EXPIRED), one-time vs recurring, expiry and last update. Filter
+      alarm_name to find the rules that target the alarm that did (or did not) page, status =
+      'ACTIVE' for mutes in force right now. A muted alarm still changes state but its actions do
+      not run, so "why did nobody get paged" often ends here.
+    kind: entities
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: GraniteServiceVersion20100801.ListAlarmMuteRules}
+      body:
+        AlarmName: "{{ filters.alarm_name }}"
+        Statuses: "{{ filters.status | as_list or None }}"
+        MaxRecords: 100
+    filters:
+      - {column: alarm_name, description: "Only mute rules that target this alarm", examples: ["WebServerCPUAlarm"]}
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "SCHEDULED | ACTIVE | EXPIRED (IN sends all values in one request)", examples: ["ACTIVE"]}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 10}
+    response:
+      rows_path: "$.AlarmMuteRuleSummaries[*]"
+    columns:
+      - {name: name, expr: "_.Name or (_.AlarmMuteRuleArn.split('alarm-mute-rule:')[-1] if _.AlarmMuteRuleArn else None)", description: "Mute rule name (from the ARN when the summary has no Name)"}
+      - {name: status, path: Status, description: "SCHEDULED | ACTIVE | EXPIRED"}
+      - {name: mute_type, path: MuteType, description: "ONE_TIME | RECURRING"}
+      - {name: expire_at, type: TIMESTAMP, path: ExpireDate, transform: auto_time, description: "When the rule stops being evaluated (only if configured)"}
+      - {name: updated_at, type: TIMESTAMP, path: LastUpdatedTimestamp, transform: auto_time}
+      - {name: arn, path: AlarmMuteRuleArn}
+      - {name: alarm_name, filter_only: true}
+    max_rows: 2000
+    pitfalls:
+      - "The summary does not include the schedule or the list of targeted alarms; filter alarm_name to scope rules to one alarm."
+      - "A SCHEDULED recurring rule may have been ACTIVE during the incident window even if it is not active now; check its schedule in the console (GetAlarmMuteRule)."
+    examples:
+      - sql: >-
+          SELECT name, status, mute_type, updated_at, expire_at FROM cloudwatch_alarm_mute_rules
+          WHERE alarm_name = 'prod-checkout-5xx'
+        description: Was the paging alarm muted (maintenance or deployment window)?
+      - sql: >-
+          SELECT name, mute_type, updated_at FROM cloudwatch_alarm_mute_rules WHERE status = 'ACTIVE' ORDER BY updated_at DESC
+        description: Every mute in force right now.
+    fixtures:
+      - file: list_alarm_mute_rules.json
+        expect_rows: 3
+        expect_columns:
+          name: DailyMaintenanceWindow
+          status: SCHEDULED
+          mute_type: RECURRING
+          updated_at: "2026-01-15T10:30:00Z"
+          arn: "arn:aws:cloudwatch:us-east-1:123456789012:alarm-mute-rule:DailyMaintenanceWindow"
+        note: >-
+          Verbatim sample response of "List all mute rules" from
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_ListAlarmMuteRules.html
+          (CLI-style ISO timestamps; epoch seconds on the JSON wire, auto_time accepts both; the
+          sample carries a Name field that the response schema omits - name falls back to the ARN).
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_alarm_history
+    title: Alarm state changes, config updates and actions (DescribeAlarmHistory)
+    description: >-
+      History items for alarms in the time window, newest first: state transitions
+      (history_item_type = 'StateUpdate'), configuration changes ('ConfigurationUpdate'), actions
+      taken ('Action', e.g. SNS notifications) and, for multi-time-series alarms, contributor
+      transitions/actions ('AlarmContributorStateUpdate' / 'AlarmContributorAction'). One row per
+      item. Filter alarm_name for one alarm (omit it for all alarms). new_state / old_state are
+      parsed from the summary text ("Alarm updated from OK to ALARM"); history_data is the parsed
+      JSON with the exact old/new state, reasons and breaching datapoints. Use it to answer "when
+      did this start, did it flap, was the alarm reconfigured, did the notification go out".
+    kind: events
+    request:
+      method: POST
+      path: /
+      headers: {X-Amz-Target: GraniteServiceVersion20100801.DescribeAlarmHistory}
+      body:
+        AlarmName: "{{ filters.alarm_name }}"
+        AlarmContributorId: "{{ filters.contributor_id }}"
+        AlarmTypes: "{{ [filters.alarm_type] if filters.alarm_type else ['MetricAlarm', 'CompositeAlarm', 'LogAlarm'] }}"
+        HistoryItemType: "{{ filters.history_item_type }}"
+        StartDate: "{{ time.start | epoch_s }}"
+        EndDate: "{{ time.end | epoch_s }}"
+        ScanBy: TimestampDescending
+        MaxRecords: 100
+    filters:
+      - {column: alarm_name, ops: ["=", "in"], description: "Exact alarm name (omit for every alarm)", examples: ["myalarm"]}
+      - {column: history_item_type, ops: ["=", "in"], description: "StateUpdate | ConfigurationUpdate | Action | AlarmContributorStateUpdate | AlarmContributorAction", examples: ["StateUpdate"]}
+      - {column: alarm_type, ops: ["=", "in"], description: "MetricAlarm | CompositeAlarm | LogAlarm (default: all three)"}
+      - {column: contributor_id, description: "Only history of this alarm contributor (from cloudwatch_alarm_contributors)"}
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    pagination: {type: cursor, cursor_path: "$.NextToken", cursor_param: "body.NextToken", max_pages: 10}
+    response:
+      rows_path: "$.AlarmHistoryItems[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: Timestamp, transform: auto_time}
+      - {name: alarm_name, path: AlarmName}
+      - {name: alarm_type, path: AlarmType}
+      - {name: history_item_type, path: HistoryItemType}
+      - {name: title, path: HistorySummary, description: "e.g. 'Alarm updated from OK to ALARM'"}
+      - {name: new_state, expr: "(_.HistorySummary.split(' to ')[-1].strip() if _.HistoryItemType in ['StateUpdate', 'AlarmContributorStateUpdate'] and ' to ' in (_.HistorySummary or '') else None)", description: "Parsed from the summary text; authoritative: history_data->'newState'->>'stateValue'"}
+      - {name: old_state, expr: "(_.HistorySummary.split(' from ')[-1].split(' to ')[0].strip() if _.HistoryItemType in ['StateUpdate', 'AlarmContributorStateUpdate'] and ' from ' in (_.HistorySummary or '') else None)", description: "Parsed from the summary text"}
+      - {name: history_data, type: JSON, path: HistoryData, transform: from_json, description: "Parsed HistoryData: oldState/newState (stateValue, stateReason, stateReasonData). history_data->'newState'->>'stateReason'"}
+      - {name: contributor_id, path: AlarmContributorId}
+      - {name: contributor_attributes, type: JSON, path: AlarmContributorAttributes}
+    max_rows: 3000
+    sort_hint: "newest first (ScanBy=TimestampDescending)"
+    pitfalls:
+      - "Without alarm_type the API returns only metric-alarm history; this table always asks for all three types."
+      - "Composite alarm history requires cloudwatch:DescribeAlarmHistory permission scoped to *; a narrower IAM scope silently omits composite alarms."
+      - "History survives alarm deletion: a deleted alarm can still appear here but not in cloudwatch_alarms."
+      - "ConfigurationUpdate items are changes to the ALARM (threshold, period), not to the workload; still check them when a page looks spurious."
+    examples:
+      - sql: >-
+          SELECT ts, alarm_name, old_state, new_state,
+                 json_extract_string(history_data, '$.newState.stateReason') AS reason
+          FROM cloudwatch_alarm_history
+          WHERE history_item_type = 'StateUpdate'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:30:00'
+          ORDER BY ts
+        description: Every alarm transition around the incident, in order (first alarm to fire is usually closest to the cause).
+      - sql: >-
+          SELECT alarm_name, count(*) FILTER (WHERE new_state = 'ALARM') AS times_fired, min(ts) AS first_change, max(ts) AS last_change
+          FROM cloudwatch_alarm_history WHERE history_item_type = 'StateUpdate'
+          GROUP BY alarm_name ORDER BY times_fired DESC
+        description: Flapping alarms in the last 24 hours.
+      - sql: >-
+          SELECT ts, history_item_type, title FROM cloudwatch_alarm_history
+          WHERE alarm_name = 'prod-checkout-5xx' AND history_item_type IN ('ConfigurationUpdate', 'Action') ORDER BY ts DESC
+        description: Was the paging alarm reconfigured recently, and did its notification actions run.
+    fixtures:
+      - file: describe_alarm_history.json
+        filters: {alarm_name: myalarm, history_item_type: StateUpdate}
+        expect_rows: 2
+        expect_columns: {ts: "2014-04-09T18:59:06Z", alarm_name: myalarm, history_item_type: StateUpdate, title: "Alarm updated from ALARM to OK", new_state: OK, old_state: ALARM}
+        note: >-
+          Output of the official AWS CLI example "To retrieve history for an alarm"
+          (https://awscli.amazonaws.com/v2/documentation/api/latest/reference/cloudwatch/describe-alarm-history.html).
+          Timestamps are ISO-8601 as printed by the CLI (epoch seconds on the JSON wire; auto_time
+          accepts both). Shape per https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarmHistory.html
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_promql_query_range
+    title: PromQL range query (CloudWatch Prometheus-compatible API)
+    description: >-
+      Evaluate a PromQL expression over the window against CloudWatch's Prometheus-compatible
+      endpoint. One row per (series, timestamp). Works for metrics ingested over OTLP and for AWS
+      vended metrics with OTel enrichment enabled (labels: OTLP resource attributes such as
+      "@resource.service.name", the original CloudWatch dimensions, "@aws.account", "@aws.region",
+      "@aws.tag.<Tag>"). Filter on query (required) and ts; optional step (seconds). Prefer it over
+      Metrics Insights for OTel histograms (p99 via histogram_quantile) and label-rich service metrics.
+    kind: timeseries
+    request:
+      # POST + form body (documented alternative to GET): the PromQL text is covered by the SigV4
+      # payload hash instead of the canonical query string (see pitfalls / engine gap).
+      method: POST
+      path: /api/v1/query_range
+      headers: {Content-Type: ""}
+      body_format: form
+      body:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression that names its metric (see query_languages.cloudwatch_promql)", examples: ['sum by ("@resource.service.name") (histogram_count(sum_over_time({"http.server.request.duration", "http.response.status_code"=~"5.."}[5m]))) / 300']}
+      - {column: step, type: BIGINT, description: "Resolution step in seconds (default: auto, ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 6d, min_step: 10s}
+    response:
+      rows_path: "$.data.result[*]"
+      expand:
+        - {explode: values, as: p}
+      errors:
+        - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error: fix the expression (metric name required in every selector); do not retry unchanged"}
+        - {path: "$.warnings", non_empty: true, message: "$.warnings", hint: "CloudWatch truncated or degraded the result (max 500 series): aggregate with sum by (...) or topk(); this is not complete data"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s, description: "Sample timestamp (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value"}
+      - {name: metric, path: "metric.__name__", description: "Metric name when the expression keeps it"}
+      - {name: labels, type: JSON, path: metric, description: "All series labels; keys with dots/@ work as plain keys: labels->>'@resource.service.name'"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "Raw histogram series carry no float samples (they come back as native histograms), so their rows are dropped: wrap them in histogram_quantile/histogram_avg/histogram_count."
+      - "rate()/increase() assume cumulative data and silently give wrong answers on delta histograms (__temporality__=\"delta\"): use sum_over_time(x[5m]) / 5m."
+      - "Max 7 days per request including [range] lookbacks (the window is clamped to 6 days), 500 series, 20 s execution; 422 errors mean a limit was hit - aggregate more."
+      - "Only OTLP metrics and OTel-enriched vended metrics exist here; an empty result can mean the metric was never ingested in that form."
+    examples:
+      - sql: >-
+          SELECT labels->>'@resource.service.name' AS service, max(value) AS p99_s, arg_max(ts, value) AS peak_at
+          FROM cloudwatch_promql_query_range
+          WHERE query = 'histogram_quantile(0.99, sum by ("@resource.service.name") (sum_over_time({"http.server.request.duration"}[5m])))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY p99_s DESC
+        description: Peak p99 request duration per OTel service (delta histograms) during the incident hour.
+      - sql: >-
+          SELECT ts, value AS errors FROM cloudwatch_promql_query_range
+          WHERE query = 'sum({Errors, FunctionName="checkout-api", "@instrumentation.@name"="cloudwatch.aws/lambda"})'
+          ORDER BY ts
+        description: Lambda errors for one function via OTel-enriched vended metrics.
+    fixtures:
+      - file: promql_query_range.json
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+        note: >-
+          CloudWatch documents that its PromQL endpoints return "the standard Prometheus JSON envelope"
+          (https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL-API-QueryMetrics.html)
+          but shows no range-query example; this is the verbatim range-query example response of the
+          Prometheus HTTP API reference (https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries).
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_promql_query
+    title: PromQL instant query (CloudWatch Prometheus-compatible API)
+    description: >-
+      Evaluate a PromQL expression at one instant (the end of the ts window, default the analysis
+      anchor). One row per series. Good for "which services are worst right now" with topk() /
+      sort_desc().
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/v1/query
+      headers: {Content-Type: ""}
+      body_format: form
+      body:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression returning an instant vector; must name its metric", examples: ['topk(5, sum by ("@resource.service.name") ({"http.server.active_requests"}))']}
+    time: {column: ts, default_lookback: 5m, reapply: false}
+    response:
+      rows_path: "$.data.result[*]"
+      errors:
+        - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error: fix the expression; do not retry unchanged"}
+        - {path: "$.warnings", non_empty: true, message: "$.warnings", hint: "CloudWatch truncated the result to 500 series: aggregate with sum by (...) or topk(); this is not complete data"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s, description: "Evaluation time"}
+      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Evaluation time is the end of the ts range; put the instant you care about as the upper bound."
+      - "Scalar results must be wrapped in vector(); raw histograms need histogram_* functions."
+    examples:
+      - sql: >-
+          SELECT labels->>'@resource.service.name' AS service, value AS active_requests
+          FROM cloudwatch_promql_query
+          WHERE query = 'topk(5, sum by ("@resource.service.name") ({"http.server.active_requests"}))'
+          ORDER BY value DESC
+        description: Top 5 services by in-flight requests at the anchor time.
+    fixtures:
+      - file: promql_query.json
+        filters: {query: 'sum({"http.server.active_requests"})'}
+        expect_rows: 1
+        expect_columns: {ts: "2026-05-28T20:26:40Z", value: 42.0, labels: "{}"}
+        note: >-
+          Verbatim sample response of QueryMetrics from
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL-API-QueryMetrics.html
+      - file: promql_query_truncated.json
+        filters: {query: '{"http.server.active_requests"}'}
+        expect_error: "result truncated to the maximum of 500 series"
+        note: >-
+          The documented truncated QueryMetrics response (same page); its "[ ... up to 500 series ... ]"
+          placeholder is replaced by an empty array so it parses. Proves the warnings rule fires.
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_promql_series
+    title: PromQL series discovery (GET /api/v1/series)
+    description: >-
+      Label sets of the series matching a selector in the window (cheap discovery before querying):
+      which services, accounts, regions or dimension values report a metric. `match` (required)
+      must contain an exact metric-name matcher.
+    kind: entities
+    request:
+      method: POST
+      path: /api/v1/series
+      headers: {Content-Type: ""}
+      body_format: form
+      body:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: match, required: true, description: "Series selector with an exact metric name, e.g. {\"http.server.active_requests\", \"@aws.region\"=~\"us-.*\"}", examples: ['{"http.server.active_requests","@resource.service.name"="myservice"}']}
+    time: {column: ts, default_lookback: 1h, max_window: 6d}
+    response:
+      rows_path: "$.data[*]"
+      errors:
+        - {path: "$.status", equals: "error", message: "$.error"}
+        - {path: "$.warnings", non_empty: true, message: "$.warnings", hint: "Discovery result truncated (10,000 labels max): narrow the selector"}
+    columns:
+      - {name: metric, path: "__name__"}
+      - {name: labels, type: JSON, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    max_rows: 10000
+    examples:
+      - sql: >-
+          SELECT DISTINCT labels->>'@resource.service.name' AS service, labels->>'@aws.region' AS region
+          FROM cloudwatch_promql_series WHERE match = '{"http.server.active_requests"}'
+        description: Which services (and regions) report a metric.
+    fixtures:
+      - file: promql_series.json
+        filters: {match: '{"http.server.active_requests","@resource.service.name"="myservice"}'}
+        expect_rows: 2
+        expect_columns: {metric: http.server.active_requests, labels: '{"__name__":"http.server.active_requests","@resource.service.name":"myservice","@aws.region":"us-east-1"}'}
+        note: >-
+          Verbatim sample response of GetSeries from
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL-API-GetSeries.html
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_promql_labels
+    title: PromQL label names (GET /api/v1/labels)
+    description: >-
+      Label names present in the PromQL store (optionally only on series matching `match`) - use it
+      to learn the exact OTLP attribute spelling ("@resource.service.name",
+      "@resource.deployment.environment", dimension names) before filtering.
+    kind: entities
+    request:
+      method: POST
+      path: /api/v1/labels
+      headers: {Content-Type: ""}
+      body_format: form
+      body:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: match, description: "Optional series selector", examples: ['{"http.server.active_requests"}']}
+    time: {column: ts, default_lookback: 6h, max_window: 6d}
+    response:
+      rows_path: "$.data[*]"
+      errors:
+        - {path: "$.status", equals: "error", message: "$.error"}
+    columns:
+      - {name: label, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT label FROM cloudwatch_promql_labels WHERE match = '{\"http.server.request.duration\"}' AND label LIKE '@resource.%'"
+        description: Resource attributes available on a metric.
+    fixtures:
+      - file: promql_labels.json
+        expect_rows: 6
+        expect_columns: {label: __name__}
+        note: >-
+          Verbatim /api/v1/labels sample response from
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL-API-GetLabels.html
+
+  # ------------------------------------------------------------------------------------------
+  - name: cloudwatch_promql_label_values
+    title: PromQL label values (GET /api/v1/label/<name>/values)
+    description: >-
+      Values of one label, e.g. label = '@resource.service.name' for the OTel service inventory or
+      '__name__' for metric names. Confirms a value exists before filtering on it.
+    kind: entities
+    request:
+      # GET is the only verb this path accepts; keep `match` free of spaces (SigV4 signs the
+      # encoded query string verbatim).
+      method: GET
+      path: "/api/v1/label/{{ filters.label | urlencode }}/values"
+      headers: {Content-Type: ""}
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: label, required: true, description: "Label name (URL-encoded into the path)", examples: ["@resource.service.name"]}
+      - {column: match, description: "Optional series selector to scope values; write it WITHOUT spaces, e.g. {\"http.server.active_requests\",\"@aws.region\"=\"us-east-1\"}"}
+    time: {column: ts, default_lookback: 6h, max_window: 6d}
+    response:
+      rows_path: "$.data[*]"
+      errors:
+        - {path: "$.status", equals: "error", message: "$.error"}
+    columns:
+      - {name: value, path: "."}
+      - {name: label, filter_only: true}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value AS service FROM cloudwatch_promql_label_values WHERE label = '@resource.service.name' ORDER BY 1"
+        description: OTel service inventory as seen by CloudWatch PromQL.
+    fixtures:
+      - file: promql_label_values.json
+        filters: {label: "@resource.service.name"}
+        expect_rows: 3
+        expect_columns: {value: myservice, label: "@resource.service.name"}
+        note: >-
+          Verbatim /api/v1/label/{label_name}/values sample response from
+          https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL-API-GetLabels.html
+
+roles:
+  metrics:
+    - table: cloudwatch_metrics_insights
+      query_language: cloudwatch_metrics_insights
+      columns: {ts: ts, value: value, labels: label}
+      notes: "Metrics Insights SQL or SEARCH(); for an exact series or percentiles older than two weeks use cloudwatch_metric_data."
+    - table: cloudwatch_promql_query_range
+      query_language: cloudwatch_promql
+      columns: {ts: ts, value: value, labels: labels, metric: metric}
+      notes: "Only OTLP-ingested metrics and OTel-enriched vended metrics; classic custom metrics are not visible to PromQL."
+  active_alerts:
+    table: cloudwatch_alarms
+    filters: {state: ALARM}
+    columns: {name: alarm_name, title: alarm_name, state: state, ts: ts, labels: dimensions, query: expression, url: url}
+  alert_rules:
+    table: cloudwatch_alarms
+    columns: {name: alarm_name, query: expression, state: state, url: url}
+    notes: "Filter alarm_name = '<alarm name from the page>'; threshold, comparison_operator, period_s, evaluation_periods describe the rule; cloudwatch_alarm_contributors lists breaching series of multi-time-series alarms."
+  alert_history:
+    table: cloudwatch_alarm_history
+    filters: {history_item_type: StateUpdate}
+    columns: {ts: ts, name: alarm_name, title: title, state: new_state}

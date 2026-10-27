@@ -1,0 +1,83 @@
+{
+    "id": 26,
+    "name": "My new health rule",
+    "enabled": true,
+    "useDataFromLastNMinutes": 30,
+    "waitTimeAfterViolation": 5,
+    "scheduleName": "Always",
+    "affects": {
+        "affectedEntityType": "BUSINESS_TRANSACTION_PERFORMANCE",
+        "affectedBusinessTransactions": {
+            "businessTransactionScope": "ALL_BUSINESS_TRANSACTIONS"
+        }
+    },
+    "evalCriterias": {
+        "criticalCriteria": {
+            "conditionAggregationType": "ALL",
+            "conditionExpression": null,
+            "conditions": [
+                {
+                    "name": "Condition 1",
+                    "shortName": "A",
+                    "evaluateToTrueOnNoData": false,
+                    "evalDetail": {
+                        "evalDetailType": "SINGLE_METRIC",
+                        "metricAggregateFunction": "VALUE",
+                        "metricPath": "Average CPU Used (ms)",
+                        "metricEvalDetail": {
+                            "metricEvalDetailType": "BASELINE_TYPE",
+                            "baselineCondition": "WITHIN_BASELINE",
+                            "baselineName": "All data - Last 15 days",
+                            "compareValue": 30.5,
+                            "baselineUnit": "PERCENTAGE"
+                        }
+                    },
+                    "triggerEnabled": false,
+                    "minimumTriggers": 0
+                }
+            ],
+            "evalMatchingCriteria": {
+                "matchType": "ANY_NODE",
+                "value": null
+            }
+        },
+        "warningCriteria": {
+            "conditionAggregationType": "ALL",
+            "conditionExpression": null,
+            "conditions": [
+                {
+                    "name": "Condition 1",
+                    "shortName": "A",
+                    "evaluateToTrueOnNoData": false,
+                    "evalDetail": {
+                        "evalDetailType": "METRIC_EXPRESSION",
+                        "metricExpression": "({metric1} + ({metric2} * 3))",
+                        "metricExpressionVariables": [
+                            {
+                                "variableName": "metric1",
+                                "metricAggregateFunction": "VALUE",
+                                "metricPath": "95th Percentile Response Time (ms)"
+                            },
+                            {
+                                "variableName": "metric2",
+                                "metricAggregateFunction": "MAXIMUM",
+                                "metricPath": "Average CPU Used (ms)"
+                            }
+                        ],
+                        "metricEvalDetail": {
+                            "metricEvalDetailType": "SPECIFIC_TYPE",
+                            "compareCondition": "GREATER_THAN_SPECIFIC_VALUE",
+                            "compareValue": 10
+                        }
+                    },
+                    "triggerEnabled": false,
+                    "minimumTriggers": 0
+                }
+            ],
+            "evalMatchingCriteria": {
+                "matchType": "ANY_NODE",
+                "value": null
+            }
+        }
+    }
+}

@@ -1,0 +1,63 @@
+# Slack app manifest for OmniOps (Socket Mode). Create the app at https://api.slack.com/apps ->
+# "Create New App" -> "From an app manifest", paste this file, install it to the workspace, then:
+#   SLACK_BOT_TOKEN  = OAuth & Permissions -> Bot User OAuth Token (xoxb-...)
+#   SLACK_APP_TOKEN  = Basic Information -> App-Level Tokens -> generate with scope connections:write (xapp-...)
+# Invite the bot to every alert channel (/invite @OmniOps) and list them in OMNIOPS_ALERT_CHANNELS.
+# Scopes are requested up front: missing scopes need a workspace admin and fail with "missing_scope"
+# until then (OpsIntelligence 4.4).
+display_information:
+  name: OmniOps
+  description: Tool-agnostic AI incident investigator - SQL over your observability APIs, answers in Slack.
+  background_color: "#1f2a37"
+  long_description: >-
+    OmniOps investigates alerts posted in your alert channels and answers questions about your
+    systems with live data from Datadog, Dynatrace, Grafana, Prometheus, Loki, Tempo, New Relic,
+    Splunk, Elastic, CloudWatch and more, queried through one SQL engine over their REST APIs.
+    Every claim cites evidence; links come from the data. Mention it in an alert thread, DM it, or
+    use /investigate for a private run. Dashboard and monitor changes are staged and need a human
+    to approve them in Slack.
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: OmniOps
+    always_online: true
+  slash_commands:
+    - command: /investigate
+      description: Investigate an alert or symptom privately, then post it for everyone or keep it
+      usage_hint: "<alert text, monitor link or symptom>"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      - channels:read
+      - groups:read
+      - im:read
+      - im:write
+      - chat:write
+      - chat:write.public
+      - commands
+      - reactions:read
+      - reactions:write
+      - users:read
+      - files:write
+      - metadata.message:read      # read back the run ids OmniOps stores in its own message metadata
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

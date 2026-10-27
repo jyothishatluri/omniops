@@ -1,0 +1,22 @@
+{
+ "nextPageLink": "string",
+ "page": 0,
+ "perPage": 0,
+ "runs": [
+  {
+   "artifactsTimestampMs": 0,
+   "autoRetry": true,
+   "location": "string",
+   "locationId": "string",
+   "message": "string",
+   "runDurationMs": 0,
+   "runId": "string",
+   "success": true,
+   "testId": 0,
+   "testType": "browser",
+   "timestamp": "string",
+   "triggerType": "scheduled"
+  }
+ ],
+ "totalCount": 0
+}

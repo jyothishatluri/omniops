@@ -1,0 +1,50 @@
+event: control-message
+data: {
+data:   "event" : "STREAM_START",
+data:   "timestampMs" : 1461351769440
+data: }
+
+event: control-message
+data: {
+data:   "event" : "JOB_START",
+data:   "handle" : "ChkVxy0AEAA",
+data:   "timestampMs" : 1461351771160
+data: }
+
+event: control-message
+data: {
+data:   "event" : "JOB_PROGRESS",
+data:   "timestampMs" : 1461351771168,
+data:   "progress" : 10
+data: }
+
+event: metadata
+data: {
+data:   "tsId" : "CgrT2EkAAAA",
+data:   "properties" : {
+data:     "jobId" : "CgrS6A4AIAM",
+data:     "sf_organizationID" : "BqDQY5OAAAA",
+data:     "sf_key" : [ "jobId", "sf_metric" ],
+data:     "sf_metric" : "mean_latency",
+data:     "sf_resolutionMs" : 1000,
+data:     "sf_type" : "MetricTimeSeries",
+data:     "sf_isPreQuantized" : true
+data:   }
+data: }
+
+event: data
+id: data-1461353198000
+data: {
+data:   "data" : [ {
+data:     "tsId" : "CgrT2EkAAAA",
+data:     "value" : 199.53076547689204
+data:   } ],
+data:   "logicalTimestampMs" : 1461353198000
+data: }
+
+event: control-message
+data: {
+data:   "event" : "END_OF_CHANNEL",
+data:   "timestampMs" : 1461360400235
+data: }
+

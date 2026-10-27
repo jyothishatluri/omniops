@@ -1,0 +1,39 @@
+{
+ "related_incidents": [
+  {
+   "incident": {
+    "id": "PR2P3RW",
+    "created_at": "2020-11-18T13:08:14Z",
+    "self": "https://api.pagerduty.com/incidents/PR2P3RW",
+    "title": "The server is on fire."
+   },
+   "relationships": [
+    {
+     "type": "machine_learning_inferred",
+     "metadata": {
+      "grouping_classification": "similar_contents",
+      "user_feedback": {
+       "positive_feedback_count": 12,
+       "negative_feedback_count": 3
+      }
+     }
+    },
+    {
+     "type": "service_dependency",
+     "metadata": {
+      "dependent_services": {
+       "id": "P1L1YEE",
+       "type": "business_service_reference",
+       "self": "https://api.pagerduty.com/business_services/P1L1YEE"
+      },
+      "supporting_services": {
+       "id": "PNGCNV2",
+       "type": "technical_service_reference",
+       "self": "https://api.pagerduty.com/services/PNGCNV2"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

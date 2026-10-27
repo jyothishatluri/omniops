@@ -1,0 +1,27 @@
+[
+  {
+    "id": 2699850,
+    "name": "High p99 latency on checkout",
+    "type": "query alert",
+    "query": "avg(last_5m):p99:trace.http.request{service:checkout,env:prod} > 1.5",
+    "message": "p99 above 1.5s @slack-ops-alerts",
+    "tags": ["service:checkout", "team:payments"],
+    "priority": 2,
+    "overall_state": "Alert",
+    "created": "2026-01-05T10:00:00.000Z",
+    "modified": "2026-09-30T08:00:00.000Z",
+    "creator": {"handle": "ops-bot"},
+    "multi": false,
+    "options": {
+      "thresholds": {"critical": 1.5, "warning": 1.0, "critical_recovery": 1.2},
+      "notify_no_data": false,
+      "evaluation_delay": 60,
+      "renotify_interval": 30
+    },
+    "state": {
+      "groups": {
+        "env:prod,service:checkout": {"name": "env:prod,service:checkout", "status": "Alert", "last_triggered_ts": 1790851800, "last_resolved_ts": 1790800000, "last_notified_ts": 1790851805, "last_nodata_ts": 0}
+      }
+    }
+  }
+]

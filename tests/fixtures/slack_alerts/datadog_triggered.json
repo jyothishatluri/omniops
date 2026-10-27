@@ -1,0 +1,58 @@
+{
+  "platform": "datadog",
+  "description": "Datadog app for Slack: multi-alert metric monitor triggered for one group, priority P2, with message, snapshot, related tags and recipient handle.",
+  "provenance": "Datadog Slack integration docs (message / snapshot / related tags / recipient handles / monitor actions per channel; @slack-<channel> handles) and monitor notification variables docs ({{value}}, {{threshold}}, {{last_triggered_at}}). Title '[Triggered on {group}] [Pn] <name>' and the monitor status link /monitors/<id>?group=..&from_ts=..&to_ts=..&event_id=.. (epoch ms, 15 min before to 5 min after the trigger) follow Datadog's notification conventions; the body lines are the monitor's own message template.",
+  "event": {
+    "type": "message",
+    "user": "U01DDAPP01",
+    "bot_id": "B01DDBOT01",
+    "app_id": "A01DATADOG",
+    "bot_profile": {"id": "B01DDBOT01", "app_id": "A01DATADOG", "name": "Datadog", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "E01E5A",
+        "fallback": "[Triggered on {host:web-01,env:prod}] [P2] High CPU on checkout web tier",
+        "title": "[Triggered on {host:web-01,env:prod}] [P2] High CPU on checkout web tier",
+        "title_link": "https://app.datadoghq.com/monitors/48213977?group=host%3Aweb-01%2Cenv%3Aprod&from_ts=1792504020000&to_ts=1792505220000&event_id=7781234567890123456&link_source=monitor_notif",
+        "text": "CPU usage on web-01 has been above 90% for 5 minutes.\nValue: 96.4\nThreshold: 90\nQuery: `avg(last_5m):avg:system.cpu.user{service:checkout,env:prod} by {host,env} &gt; 90`\nRunbook: <https://wiki.acme.example/runbooks/checkout-cpu|checkout CPU runbook>\nThe monitor was last triggered at Tue Oct 20 2026 14:02:00 UTC.\n@slack-acme-ops-alerts",
+        "image_url": "https://p.datadoghq.com/snapshot/view/dd-snapshots-prod/org_1234567/2026-10-20/9f3b2c1d0e4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c.png",
+        "fields": [
+          {"title": "Related Tags", "value": "env:prod, host:web-01, service:checkout, team:payments", "short": false}
+        ],
+        "footer": "Datadog",
+        "ts": 1792504920
+      }
+    ],
+    "ts": "1792504957.000200",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.000200",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "datadog",
+    "rule_id": "48213977",
+    "rule_name": "High CPU on checkout web tier",
+    "status": "firing",
+    "raw_status": "Triggered",
+    "retriggered": false,
+    "is_recovery": false,
+    "severity": "P2",
+    "service": "checkout",
+    "env": "prod",
+    "host": "web-01",
+    "group": "host:web-01,env:prod",
+    "query": "avg(last_5m):avg:system.cpu.user{service:checkout,env:prod} by {host,env} > 90",
+    "threshold": "90",
+    "value": "96.4",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "window_start": "2026-10-20T13:47:00Z",
+    "window_end": "2026-10-20T14:07:00Z",
+    "url": "https://app.datadoghq.com/monitors/48213977?group=host%3Aweb-01%2Cenv%3Aprod&from_ts=1792504020000&to_ts=1792505220000&event_id=7781234567890123456&link_source=monitor_notif",
+    "incident_id": "7781234567890123456",
+    "tags": {"team": "payments", "service": "checkout"},
+    "links_include": ["https://wiki.acme.example/runbooks/checkout-cpu"],
+    "anchor": {"source": "link_window", "window_start": "2026-10-20T13:47:00Z", "window_end": "2026-10-20T14:07:00Z"}
+  }
+}

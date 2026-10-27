@@ -1,0 +1,34 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {
+              "beginTimeSeconds": 1759321800,
+              "endTimeSeconds": 1759321860,
+              "facet": "checkout-service",
+              "appName": "checkout-service",
+              "throughput_rpm": 1790.0,
+              "latency_avg_s": 0.231,
+              "latency_p95_s": 0.612,
+              "error_rate_pct": 0.4,
+              "errors": 7
+            },
+            {
+              "beginTimeSeconds": 1759321860,
+              "endTimeSeconds": 1759321920,
+              "facet": "checkout-service",
+              "appName": "checkout-service",
+              "throughput_rpm": 1805.0,
+              "latency_avg_s": 1.874,
+              "latency_p95_s": {"95": 2.41},
+              "error_rate_pct": 22.8,
+              "errors": 412
+            }
+          ]
+        }
+      }
+    }
+  }
+}

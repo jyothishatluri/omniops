@@ -1,0 +1,57 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "alerts": {
+          "nrqlConditionsSearch": {
+            "nextCursor": null,
+            "totalCount": 1,
+            "nrqlConditions": [
+              {
+                "id": "1284850",
+                "name": "Low Host Count - Catastrophic",
+                "type": "STATIC",
+                "enabled": true,
+                "description": "Fewer than 2 hosts are serving my-app-name",
+                "policyId": "707052",
+                "runbookUrl": "https://example.com/runbooks/low-host-count",
+                "entityGuid": "MXxBSU9QU3xDT05ESVRJT058MTI4NDg1MA",
+                "titleTemplate": null,
+                "nrql": {
+                  "query": "SELECT uniqueCount(host) FROM Transaction WHERE appName='my-app-name'",
+                  "dataAccountId": 1
+                },
+                "signal": {
+                  "aggregationWindow": 60,
+                  "aggregationMethod": "EVENT_FLOW",
+                  "aggregationDelay": 120,
+                  "aggregationTimer": null,
+                  "fillOption": "NONE",
+                  "fillValue": null,
+                  "slideBy": null,
+                  "evaluationDelay": null
+                },
+                "terms": [
+                  {
+                    "operator": "BELOW",
+                    "priority": "CRITICAL",
+                    "threshold": 2,
+                    "thresholdDuration": 600,
+                    "thresholdOccurrences": "AT_LEAST_ONCE"
+                  }
+                ],
+                "expiration": {
+                  "closeViolationsOnExpiration": false,
+                  "expirationDuration": null,
+                  "openViolationOnExpiration": false
+                },
+                "violationTimeLimitSeconds": 86400,
+                "valueFunction": "SINGLE_VALUE"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

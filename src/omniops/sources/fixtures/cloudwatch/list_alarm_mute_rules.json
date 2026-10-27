@@ -1,0 +1,26 @@
+{
+    "AlarmMuteRuleSummaries": [
+        {
+            "Name": "DailyMaintenanceWindow",
+            "AlarmMuteRuleArn": "arn:aws:cloudwatch:us-east-1:123456789012:alarm-mute-rule:DailyMaintenanceWindow",
+            "Status": "SCHEDULED",
+            "MuteType": "RECURRING",
+            "LastUpdatedTimestamp": "2026-01-15T10:30:00Z"
+        },
+        {
+            "Name": "ProductionDeployment-2026-01-20",
+            "AlarmMuteRuleArn": "arn:aws:cloudwatch:us-east-1:123456789012:alarm-mute-rule:ProductionDeployment-2026-01-20",
+            "Status": "ACTIVE",
+            "MuteType": "ONE_TIME",
+            "LastUpdatedTimestamp": "2026-01-20T13:00:00Z"
+        },
+        {
+            "Name": "WeeklyBackupWindow",
+            "AlarmMuteRuleArn": "arn:aws:cloudwatch:us-west-2:123456789012:alarm-mute-rule:WeeklyBackupWindow",
+            "Status": "SCHEDULED",
+            "MuteType": "RECURRING",
+            "ExpireDate": "2026-12-31T23:59:59Z",
+            "LastUpdatedTimestamp": "2026-01-05T12:00:00Z"
+        }
+    ]
+}

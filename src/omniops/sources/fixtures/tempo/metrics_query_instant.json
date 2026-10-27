@@ -1,0 +1,41 @@
+{
+  "series": [
+    {
+      "labels": [
+        {
+          "key": "resource.service.name",
+          "value": {
+            "stringValue": "order-service"
+          }
+        },
+        {
+          "key": "p",
+          "value": {
+            "doubleValue": 0.99
+          }
+        }
+      ],
+      "value": 7.32
+    },
+    {
+      "labels": [
+        {
+          "key": "resource.service.name",
+          "value": {
+            "stringValue": "payment-service"
+          }
+        },
+        {
+          "key": "p",
+          "value": {
+            "doubleValue": 0.99
+          }
+        }
+      ],
+      "value": 1.9
+    }
+  ],
+  "metrics": {
+    "inspectedSpans": "1200"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "receiver": "My Contact Email Point",
+  "group_by": [
+    "grafana_folder",
+    "alertname"
+  ],
+  "routes": [
+    {
+      "receiver": "My Contact Email Point",
+      "object_matchers": [
+        [
+          "monitor",
+          "=",
+          "testdata"
+        ]
+      ],
+      "mute_time_intervals": [
+        "weekends"
+      ]
+    }
+  ]
+}

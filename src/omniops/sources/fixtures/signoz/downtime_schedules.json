@@ -1,0 +1,19 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "0199b2c1-7e3a-7c55-8f1d-2a6b9e0c4d11",
+      "name": "payments DB maintenance",
+      "description": "Planned failover of the payments primary",
+      "kind": "fixed",
+      "status": "active",
+      "scope": "",
+      "alertIds": ["0196f794-ff30-7bee-a5f4-ef5ad315715e"],
+      "schedule": {"timezone": "UTC", "startTime": "2026-10-01T11:00:00Z", "endTime": "2026-10-01T12:00:00Z"},
+      "createdAt": "2026-09-30T09:00:00Z",
+      "createdBy": "alice@signoz.io",
+      "updatedAt": "2026-09-30T09:00:00Z",
+      "updatedBy": "alice@signoz.io"
+    }
+  ]
+}

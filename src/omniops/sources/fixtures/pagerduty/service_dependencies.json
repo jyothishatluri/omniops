@@ -1,0 +1,28 @@
+{
+ "relationships": [
+  {
+   "supporting_service": {
+    "id": "P7AD56",
+    "type": "technical_service_reference"
+   },
+   "dependent_service": {
+    "id": "P99DJ6",
+    "type": "business_service_reference"
+   },
+   "id": "DQVP7E6G0E8AC3NR",
+   "type": "service_dependency"
+  },
+  {
+   "supporting_service": {
+    "id": "R87DK4",
+    "type": "technical_service_reference"
+   },
+   "dependent_service": {
+    "id": "P7AD56",
+    "type": "technical_service_reference"
+   },
+   "id": "D3PG0QVACE87RNE6",
+   "type": "service_dependency"
+  }
+ ]
+}

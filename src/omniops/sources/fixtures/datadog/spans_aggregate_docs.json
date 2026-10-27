@@ -1,0 +1,32 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "by": {
+          "<any-key>": "undefined"
+        },
+        "compute": {},
+        "computes": {
+          "<any-key>": {
+            "description": "undefined",
+            "type": "undefined"
+          }
+        }
+      },
+      "id": "string",
+      "type": "bucket"
+    }
+  ],
+  "meta": {
+    "elapsed": 132,
+    "request_id": "MWlFUjVaWGZTTTZPYzM0VXp1OXU2d3xLSVpEMjZKQ0VKUTI0dEYtM3RSOFVR",
+    "status": "done",
+    "warnings": [
+      {
+        "code": "unknown_index",
+        "detail": "indexes: foo, bar",
+        "title": "One or several indexes are missing or invalid, results hold data from the other indexes"
+      }
+    ]
+  }
+}

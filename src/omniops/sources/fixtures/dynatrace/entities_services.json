@@ -1,0 +1,39 @@
+{
+ "totalCount": 52,
+ "pageSize": 50,
+ "nextPageKey": "AQArdHlwZSgiU0VSVklDRSIpL",
+ "entities": [
+  {
+   "entityId": "SERVICE-1125C375A187D27A",
+   "displayName": "dotNetBackend_easyTravel_x64",
+   "lastSeenTms": 1590609632865,
+   "properties": {
+    "serviceTechnologyTypes": [
+     "IIS app pool",
+     "ASP.NET",
+     "DotNet"
+    ]
+   }
+  },
+  {
+   "entityId": "SERVICE-42C0B06C4DCFD0EF",
+   "displayName": "AuthenticationService",
+   "lastSeenTms": 1590747000977,
+   "properties": {
+    "serviceTechnologyTypes": [
+     "Java"
+    ]
+   }
+  },
+  {
+   "entityId": "SERVICE-620517BB99A7ED9E",
+   "displayName": "BookingService",
+   "lastSeenTms": 1590747028702,
+   "properties": {
+    "serviceTechnologyTypes": [
+     "Java"
+    ]
+   }
+  }
+ ]
+}

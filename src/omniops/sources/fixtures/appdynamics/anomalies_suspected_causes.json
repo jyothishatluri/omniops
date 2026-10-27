@@ -1,0 +1,98 @@
+{
+  "violationListItem": [
+    {
+      "id": 1,
+      "status": "RESOLVED",
+      "description": "AppDynamics has detected a problem. [\"Average Response Time (ms)\"] is violating.",
+      "startTime": 1756374240000,
+      "endTime": 1756375440000,
+      "duration": 1200000,
+      "affectedEntityId": 35,
+      "affectedEntityName": "/orders",
+      "affectedEntityType": "BUSINESS_TRANSACTION",
+      "eventDetailMap": {
+        "5713": {
+          "eventSeverity": "ERROR",
+          "eventType": "ANOMALY_OPEN_CRITICAL",
+          "eventTime": 1756374240000,
+          "eventSummary": "AppDynamics has detected a Critical Anomaly on /orders of originating tier ApacheWebServer-AUG28-v1. The following metrics are deviating: [Average Response Time (ms)]",
+          "suspectedCauses": []
+        },
+        "5806": {
+          "eventSeverity": "WARN",
+          "eventType": "ANOMALY_DOWNGRADED",
+          "eventTime": 1756374780000,
+          "eventSummary": "Anomaly state changed from Critical to Warning on /orders of originating tier ApacheWebServer-AUG28-v1. The following metrics are deviating: [Average Response Time (ms)]",
+          "suspectedCauses": []
+        }
+      }
+    },
+    {
+      "id": 2,
+      "status": "RESOLVED",
+      "description": "AppDynamics has detected a problem. [\"Average Response Time (ms)\"] is violating.",
+      "startTime": 1756377900000,
+      "endTime": 1756379280000,
+      "duration": 1380000,
+      "affectedEntityId": 35,
+      "affectedEntityName": "/orders",
+      "affectedEntityType": "BUSINESS_TRANSACTION",
+      "eventDetailMap": {
+        "6359": {
+          "eventSeverity": "ERROR",
+          "eventType": "ANOMALY_OPEN_CRITICAL",
+          "eventTime": 1756377900000,
+          "eventSummary": "AppDynamics has detected a Critical Anomaly on /orders of originating tier ApacheWebServer-AUG28-v1. The following metrics are deviating: [Average Response Time (ms)]",
+          "suspectedCauses": [
+            {
+              "entityType": "APPLICATION_COMPONENT_NODE",
+              "entityId": 243,
+              "entityName": "OrderServiceNode-AUG28-v1",
+              "affectedEntityMetricIds": [
+                {
+                  "metricId": 34318,
+                  "metricName": "BTM|BTs|BT:35|Component:41|Exit Call:HTTP|To:36|Component:36|Exit Call:HTTP|To:40|Component:40|Average Response Time (ms)"
+                }
+              ],
+              "rcaSummary": "/orders is possibly affected by issue on OrderServiceNode-AUG28-v1",
+              "metricBandInfo": {
+                "34318": {
+                  "upper": 531.338,
+                  "lower": 55.676,
+                  "modelType": 1
+                }
+              }
+            }
+          ]
+        },
+        "6443": {
+          "eventSeverity": "WARN",
+          "eventType": "ANOMALY_DOWNGRADED",
+          "eventTime": 1756378560000,
+          "eventSummary": "Anomaly state changed from Critical to Warning on /orders of originating tier ApacheWebServer-AUG28-v1. The following metrics are deviating: [Average Response Time (ms)]",
+          "suspectedCauses": [
+            {
+              "entityType": "APPLICATION_COMPONENT_NODE",
+              "entityId": 243,
+              "entityName": "OrderServiceNode-AUG28-v1",
+              "affectedEntityMetricIds": [
+                {
+                  "metricId": 34318,
+                  "metricName": "BTM|BTs|BT:35|Component:41|Exit Call:HTTP|To:36|Component:36|Exit Call:HTTP|To:40|Component:40|Average Response Time (ms)"
+                }
+              ],
+              "rcaSummary": "/orders is possibly affected by issue on OrderServiceNode-AUG28-v1",
+              "metricBandInfo": {
+                "34318": {
+                  "upper": 531.338,
+                  "lower": 55.676,
+                  "modelType": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

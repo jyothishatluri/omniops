@@ -1,0 +1,555 @@
+# Argo CD API server REST API (gRPC-gateway), bearer token auth.
+# Docs: https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/ (auth, 403-vs-404 rule)
+# Contract: the server's Swagger, assets/swagger.json (v3.5.6, Oct 2026), also served at
+# <ARGOCD_URL>/swagger-ui and https://cd.apps.argoproj.io/swagger-ui
+# https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+# Field semantics: pkg/apis/application/v1alpha1/types.go; resource health storage changed in 3.0
+# (docs/operator-manual/upgrading/2.14-3.0.md "Health status in the Application CR").
+source: argocd
+display_name: Argo CD
+vendor: Argo Project (CNCF)
+description: >-
+  Argo CD GitOps state: applications (sync + health, source repo/path/targetRevision,
+  destination, last operation), deployment history (status.history: revision, deployedAt,
+  initiator), the last sync's per-resource results, Git revision metadata (author, date, commit
+  message), the live resource tree, managed resources (drift), and application events.
+docs_url: https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/
+categories: [changes, deployments, gitops, kubernetes]
+base_url: "{{ env.ARGOCD_URL }}"
+env:
+  - {name: ARGOCD_URL, description: "Argo CD server URL incl. any --rootpath, e.g. https://argocd.example.com or http://localhost:8080 (port-forward). No trailing /api"}
+  - {name: ARGOCD_TOKEN, description: "API token (Authorization: Bearer). A role:readonly account token is enough: argocd account generate-token --account <name>", secret: true}
+  - {name: ARGOCD_APP_NAMESPACE, description: "Optional default Application namespace (apps-in-any-namespace); empty = the control-plane namespace / all enabled namespaces"}
+required_env: [ARGOCD_URL, ARGOCD_TOKEN]
+auth:
+  type: bearer
+  token: "{{ env.ARGOCD_TOKEN }}"
+rate_limit:
+  concurrency: 4
+  notes: >-
+    No documented REST rate limit (login has its own failure limiter). Every call reads the
+    controller's cache/informers; GET /api/v1/applications returns full Application objects,
+    so filter app/project to keep responses small.
+retention: {}
+errors:
+  - {path: "$.error", non_empty: true, message: "$.message", hint: "Argo CD (gRPC-gateway) error body"}
+ui_base_url: "{{ env.ARGOCD_URL }}"
+pitfalls:
+  - "Without a project filter, an application you may not see AND one that does not exist both answer HTTP 403 'permission denied' (Argo CD hides existence). With project = '<p>' a missing app is 404. Check the name with argocd_applications first."
+  - "Never pass refresh: the API's refresh=hard parameter forces a reconciliation (a write). These tables are read-only and never send it."
+  - "Argo CD state is eventually consistent: reconciliation runs every timeout.reconciliation (default 120 s; 60 s in the Arena), so sync_status / health lag reality by up to that much; reconciled_at says when it last compared."
+  - "Synced + Degraded is normal during an injected or real runtime fault: Synced compares Git with the cluster spec; health reflects the runtime. A fault that arrived through Git shows as a new history entry, not as OutOfSync."
+  - "History keeps only spec.revisionHistoryLimit entries (default 10) per application, and only successful syncs; a failed sync is visible only in operation_* / argocd_sync_results until the next operation."
+  - "Since Argo CD 3.0 per-resource health is not stored in the Application (resource_health_source = 'appTree'): argocd_app_resources.health_status is then null - use argocd_resource_tree."
+  - "url columns are paths relative to ARGOCD_URL (/applications/<namespace>/<app>)."
+
+tables:
+  - name: argocd_applications
+    title: Applications (sync and health)
+    description: >-
+      Applications from GET /api/v1/applications: one row per app with project, source (repo,
+      path, targetRevision, chart; sources for multi-source apps), destination, sync status
+      (Synced / OutOfSync / Unknown) and synced revision, health (Healthy / Progressing /
+      Degraded / Suspended / Missing / Unknown) with message, the current/last operation (phase
+      Running / Succeeded / Failed / Error, message, start/finish, initiator), automated sync
+      policy, last deployment, images, conditions and counts of OutOfSync / Degraded resources.
+      Filter app (exact name), project, repo, selector.
+    kind: entities
+    request: &app_list
+      method: GET
+      path: /api/v1/applications
+      query:
+        name: "{{ filters.app }}"
+        projects: "{{ filters.project }}"
+        repo: "{{ filters.repo }}"
+        selector: "{{ filters.selector }}"
+        appNamespace: "{{ filters.app_namespace or env.ARGOCD_APP_NAMESPACE }}"
+    filters:
+      - &f_app_opt {column: app, ops: ["=", "in"], description: "Application name (exact; query name=). IN fans out", examples: [flagd-values]}
+      - &f_project {column: project, ops: ["=", "in"], description: "Argo CD project (query projects=)", examples: [default]}
+      - &f_repo {column: repo, description: "Source repoURL (query repo=), e.g. https://github.com/org/platform-config.git", examples: ["https://github.com/example-org/platform-config.git"]}
+      - &f_selector {column: selector, description: "Application label selector (query selector=), e.g. team=shop", examples: ["team=shop"]}
+      - &f_app_namespace {column: app_namespace, description: "Application namespace (query appNamespace=) for apps-in-any-namespace; default ARGOCD_APP_NAMESPACE / all enabled namespaces", examples: [argocd]}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - &c_app {name: app, path: metadata.name, description: "Application name"}
+      - &c_app_namespace {name: app_namespace, path: metadata.namespace, description: "Namespace of the Application object (usually argocd)"}
+      - &c_project {name: project, path: spec.project}
+      - {name: repo_url, expr: "_.spec.source.repoURL or ((_.spec.sources or [{}])[0]).repoURL", description: "Git/Helm/OCI repository (first source for multi-source apps)"}
+      - {name: repo, filter_only: true, description: "repoURL filter value"}
+      - {name: path, expr: "_.spec.source.path or ((_.spec.sources or [{}])[0]).path", description: "Path inside the repository"}
+      - {name: target_revision, expr: "_.spec.source.targetRevision or ((_.spec.sources or [{}])[0]).targetRevision", description: "Branch / tag / commit / chart version tracked (HEAD when empty)"}
+      - {name: chart, expr: "_.spec.source.chart or ((_.spec.sources or [{}])[0]).chart", description: "Helm chart name (Helm repositories)"}
+      - {name: sources, type: JSON, path: spec.sources, description: "All sources of a multi-source application"}
+      - {name: dest_server, path: spec.destination.server}
+      - {name: dest_name, path: spec.destination.name, description: "Destination cluster name (in-cluster = the Argo CD cluster)"}
+      - {name: dest_namespace, path: spec.destination.namespace, description: "Target Kubernetes namespace"}
+      - {name: sync_status, path: status.sync.status, description: "Synced | OutOfSync | Unknown"}
+      - {name: sync_revision, expr: "_.status.sync.revision or ((_.status.sync.revisions or []) | join(','))", description: "Commit SHA (or chart version) the app is compared with / synced to"}
+      - {name: health_status, path: status.health.status, description: "Healthy | Progressing | Degraded | Suspended | Missing | Unknown"}
+      - {name: health_message, path: status.health.message}
+      - {name: health_since, type: TIMESTAMP, path: status.health.lastTransitionTime, description: "When the app health last changed"}
+      - {name: operation_phase, path: status.operationState.phase, description: "Running | Terminating | Succeeded | Failed | Error (last or current operation)"}
+      - {name: operation_message, path: status.operationState.message, description: "e.g. 'successfully synced (all tasks run)' or the sync error"}
+      - {name: operation_started_at, type: TIMESTAMP, path: status.operationState.startedAt}
+      - {name: operation_finished_at, type: TIMESTAMP, path: status.operationState.finishedAt}
+      - {name: operation_revision, expr: "_.status.operationState.syncResult.revision or _.status.operationState.operation.sync.revision", description: "Revision of the last sync operation"}
+      - {name: initiated_by, expr: "_.status.operationState.operation.initiatedBy.username or ('automated' if _.status.operationState.operation.initiatedBy.automated else none)", description: "User that started the last operation, or 'automated' (auto-sync / self-heal)"}
+      - {name: auto_sync, type: BOOLEAN, expr: "(_.spec.syncPolicy.automated is mapping) and (_.spec.syncPolicy.automated.enabled != false)", description: "Automated sync enabled"}
+      - {name: self_heal, type: BOOLEAN, path: spec.syncPolicy.automated.selfHeal, description: "Automated sync reverts manual cluster changes"}
+      - {name: prune, type: BOOLEAN, path: spec.syncPolicy.automated.prune}
+      - {name: sync_options, type: JSON, path: spec.syncPolicy.syncOptions}
+      - {name: reconciled_at, type: TIMESTAMP, path: status.reconciledAt, description: "Last time Argo CD compared Git with the cluster"}
+      - {name: last_deployed_at, type: TIMESTAMP, expr: "(_.status.history or []) | map(attribute='deployedAt') | select | max", description: "Newest status.history deployedAt"}
+      - {name: last_deployed_revision, expr: "((_.status.history or []) | sort(attribute='id') | last).revision", description: "Revision of the newest history entry"}
+      - {name: images, type: JSON, path: status.summary.images, description: "Container images deployed by the app"}
+      - {name: external_urls, type: JSON, path: status.summary.externalURLs}
+      - {name: out_of_sync_resources, type: BIGINT, expr: "(_.status.resources or []) | selectattr('status', 'equalto', 'OutOfSync') | list | length"}
+      - {name: degraded_resources, type: BIGINT, expr: "(_.status.resources or []) | selectattr('health.status', 'equalto', 'Degraded') | list | length", description: "0 when health is not persisted in the CR (Argo CD 3.x default)"}
+      - {name: resource_health_source, path: status.resourceHealthSource, description: "appTree = per-resource health only in the resource tree"}
+      - {name: conditions, type: JSON, path: status.conditions, description: "[{type: SyncError | ComparisonError | InvalidSpecError | OrphanedResourceWarning ..., message, lastTransitionTime}]"}
+      - {name: condition_types, type: JSON, expr: "(_.status.conditions or []) | map(attribute='type') | list"}
+      - &c_labels {name: labels, type: JSON, path: metadata.labels}
+      - &c_created {name: created, type: TIMESTAMP, path: metadata.creationTimestamp}
+      - &c_url {name: url, expr: "'/applications/' ~ _.metadata.namespace ~ '/' ~ _.metadata.name", description: "UI path relative to ARGOCD_URL"}
+      - &c_selector {name: selector, filter_only: true}
+    pitfalls:
+      - "out_of_sync_resources counts status.resources; degraded_resources is 0 when resource health is not persisted (resource_health_source = 'appTree')."
+    examples:
+      - sql: >-
+          SELECT app, sync_status, health_status, health_message, sync_revision, operation_phase, operation_message, last_deployed_at
+          FROM argocd_applications WHERE health_status <> 'Healthy' OR sync_status <> 'Synced' OR operation_phase IN ('Failed', 'Error')
+        description: Applications that are not Synced+Healthy or whose last sync failed.
+      - sql: >-
+          SELECT app, repo_url, path, target_revision, dest_namespace, auto_sync, self_heal, sync_revision
+          FROM argocd_applications WHERE app = 'flagd-values'
+        description: Where an application's desired state comes from and which commit is applied.
+    fixtures:
+      - file: applications_list.json
+        note: >-
+          Built strictly from the Argo CD v3.5.6 swagger schema (v1alpha1ApplicationList /
+          Application / ApplicationSpec / ApplicationStatus / RevisionHistory / OperationState), with
+          the status layout of the documented 'not persisting health' example
+          (operator-manual/upgrading/2.14-3.0.md) and Application specs as generated by the Arena's
+          bench/gitops.py (flagd-values, recommendation).
+        expect_rows: 2
+        expect_columns: {app: flagd-values, app_namespace: argocd, project: default, repo_url: "https://github.com/example-org/platform-config.git", path: arena-faults/flagd-values, target_revision: main, dest_name: in-cluster, dest_namespace: shop, sync_status: Synced, sync_revision: 4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3, health_status: Healthy, operation_phase: Succeeded, initiated_by: automated, auto_sync: true, self_heal: true, last_deployed_at: "2026-10-01T11:39:41Z", last_deployed_revision: 4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3, out_of_sync_resources: 0, resource_health_source: appTree, url: /applications/argocd/flagd-values}
+    ui_link: "{{ (env.ARGOCD_URL.rstrip('/') ~ '/applications/' ~ (filters.app_namespace or env.ARGOCD_APP_NAMESPACE or 'argocd') ~ '/' ~ filters.app) if filters.app else (env.ARGOCD_URL.rstrip('/') ~ '/applications') }}"
+    docs_url: https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+
+  - name: argocd_history
+    title: Deployment history (status.history)
+    description: >-
+      Successful syncs of each application from status.history (GET /api/v1/applications):
+      one row per deployment with ts = deployedAt, deploy_started_at, revision (commit SHA or
+      chart version), source repo/path/targetRevision at that time, and who initiated it
+      (username or automated). The GitOps change feed: "what was deployed right before the
+      incident". Get the commit author/message with argocd_revision_metadata.
+    kind: changes
+    request: *app_list
+    filters:
+      - *f_app_opt
+      - *f_project
+      - *f_repo
+      - *f_selector
+      - *f_app_namespace
+    time: {column: ts, default_lookback: 24h}
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: "status.history", as: h}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@h.deployedAt", description: "When the sync finished (deployedAt)"}
+      - {name: deploy_started_at, type: TIMESTAMP, path: "@h.deployStartedAt"}
+      - *c_app
+      - *c_app_namespace
+      - *c_project
+      - {name: id, type: BIGINT, path: "@h.id", description: "History id (increasing)"}
+      - {name: revision, expr: "h.revision or ((h.revisions or []) | join(','))", description: "Deployed commit SHA / chart version (comma-joined for multi-source)"}
+      - {name: repo_url, expr: "h.source.repoURL or ((h.sources or [{}])[0]).repoURL"}
+      - {name: repo, filter_only: true}
+      - {name: path, expr: "h.source.path or ((h.sources or [{}])[0]).path"}
+      - {name: target_revision, expr: "h.source.targetRevision or ((h.sources or [{}])[0]).targetRevision"}
+      - {name: initiated_by, expr: "h.initiatedBy.username or ('automated' if h.initiatedBy.automated else none)", description: "User, or 'automated' for auto-sync"}
+      - {name: automated, type: BOOLEAN, path: "@h.initiatedBy.automated"}
+      - {name: is_current, type: BOOLEAN, expr: "h.revision == _.status.sync.revision and h.id == ((_.status.history or []) | map(attribute='id') | max)", description: "Newest entry and equal to the currently synced revision"}
+      - {name: sync_status, path: status.sync.status, description: "Current app sync status (not at that time)"}
+      - {name: health_status, path: status.health.status, description: "Current app health (not at that time)"}
+      - {name: title, expr: "'Argo CD synced ' ~ _.metadata.name ~ ' to ' ~ ((h.revision or ((h.revisions or []) | join(',')))[:12]) ~ ' (' ~ (h.source.path or ((h.sources or [{}])[0]).path or '') ~ ')' ~ (' by ' ~ h.initiatedBy.username if h.initiatedBy.username else (' (auto-sync)' if h.initiatedBy.automated else ''))", description: "Change-feed title"}
+      - {name: url, expr: "'/applications/' ~ _.metadata.namespace ~ '/' ~ _.metadata.name ~ '?revision=' ~ (h.revision or '')", description: "UI path relative to ARGOCD_URL"}
+      - *c_selector
+    sort_hint: "per application oldest first (increasing id): ORDER BY ts DESC"
+    pitfalls:
+      - "Only successful syncs are recorded, capped at revisionHistoryLimit (default 10) per app; ts is the end of the sync. A sync that applied a bad change is still 'successful' here."
+      - "Several apps can deploy the same commit of a shared repository; the change that matters is the one whose path changed - compare path/repo_url and use argocd_revision_metadata for the message."
+      - "The ts window is applied locally; the API returns the full history of every listed app."
+    examples:
+      - sql: >-
+          SELECT ts, app, revision, path, initiated_by FROM argocd_history
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 10:00:00+00' AND TIMESTAMP '2026-10-01 12:05:00+00'
+          ORDER BY ts DESC
+        description: Everything Argo CD deployed in the two hours before the incident.
+      - sql: "SELECT id, ts, revision, initiated_by FROM argocd_history WHERE app = 'batch-jobs' ORDER BY id DESC LIMIT 5"
+        description: Last deployments of one application.
+    fixtures:
+      - file: applications_list.json
+        note: "Same schema-built ApplicationList (Argo CD v3.5.6 swagger, v1alpha1RevisionHistory entries)."
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T08:00:12Z", deploy_started_at: "2026-10-01T08:00:05Z", app: flagd-values, id: 0, revision: 9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b, path: arena-faults/flagd-values, initiated_by: automated, automated: true, is_current: false, title: "Argo CD synced flagd-values to 9a8b7c6d5e4f (arena-faults/flagd-values) (auto-sync)"}
+    docs_url: https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+
+  - name: argocd_app_resources
+    title: Application resources (sync status per resource)
+    description: >-
+      The resources an application manages, from status.resources (GET /api/v1/applications):
+      kind, namespace, name, per-resource sync status (Synced / OutOfSync), health when persisted
+      in the CR, requires_pruning (in the cluster but no longer in Git) and sync wave. Use it to
+      map an app to its Kubernetes objects and find OutOfSync ones.
+    kind: entities
+    request: *app_list
+    filters:
+      - *f_app_opt
+      - *f_project
+      - *f_repo
+      - *f_selector
+      - *f_app_namespace
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: "status.resources", as: r}
+    columns:
+      - *c_app
+      - *c_app_namespace
+      - *c_project
+      - {name: kind, path: "@r.kind"}
+      - {name: group, path: "@r.group"}
+      - {name: version, path: "@r.version"}
+      - {name: namespace, path: "@r.namespace", description: "Kubernetes namespace of the resource"}
+      - {name: name, path: "@r.name"}
+      - {name: sync_status, path: "@r.status", description: "Synced | OutOfSync | Unknown"}
+      - {name: health_status, path: "@r.health.status", description: "Null when resource health is stored in the tree (Argo CD 3.x default)"}
+      - {name: health_message, path: "@r.health.message"}
+      - {name: requires_pruning, type: BOOLEAN, path: "@r.requiresPruning"}
+      - {name: hook, type: BOOLEAN, path: "@r.hook"}
+      - {name: sync_wave, type: BIGINT, path: "@r.syncWave"}
+      - {name: repo, filter_only: true}
+      - *c_selector
+    examples:
+      - sql: "SELECT app, kind, namespace, name, sync_status FROM argocd_app_resources WHERE sync_status <> 'Synced'"
+        description: Resources whose live state differs from Git.
+      - sql: "SELECT kind, namespace, name FROM argocd_app_resources WHERE app = 'batch-jobs'"
+        description: What a GitOps application currently deploys.
+    fixtures:
+      - file: applications_list.json
+        note: "Same schema-built ApplicationList; status.resources as in the documented 'not persisting health' example (no health)."
+        expect_rows: 3
+        expect_columns: {app: flagd-values, kind: ConfigMap, namespace: shop, name: flagd-config, sync_status: Synced, health_status: null, version: v1}
+    docs_url: https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+
+  - name: argocd_sync_results
+    title: Last sync operation (per-resource results)
+    description: >-
+      The current or last operation of each application (status.operationState, GET
+      /api/v1/applications): phase, message, start/finish, revision, initiator and retry count,
+      with one row per resource result (Synced / SyncFailed / Pruned / PruneSkipped, message,
+      hook phase, sync phase). An app with no recorded resources still gives one row. Use it for
+      "did the last sync fail, and on which object".
+    kind: entities
+    request: *app_list
+    filters:
+      - *f_app_opt
+      - *f_project
+      - *f_repo
+      - *f_selector
+      - *f_app_namespace
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: "status.operationState.syncResult.resources", as: r, keep_empty: true}
+    columns:
+      - *c_app
+      - *c_app_namespace
+      - *c_project
+      - {name: operation_phase, path: status.operationState.phase, description: "Running | Terminating | Succeeded | Failed | Error"}
+      - {name: operation_message, path: status.operationState.message}
+      - {name: started_at, type: TIMESTAMP, path: status.operationState.startedAt}
+      - {name: finished_at, type: TIMESTAMP, path: status.operationState.finishedAt}
+      - {name: revision, expr: "_.status.operationState.syncResult.revision or _.status.operationState.operation.sync.revision or ((_.status.operationState.syncResult.revisions or []) | join(','))"}
+      - {name: initiated_by, expr: "_.status.operationState.operation.initiatedBy.username or ('automated' if _.status.operationState.operation.initiatedBy.automated else none)"}
+      - {name: retry_count, type: BIGINT, path: status.operationState.retryCount}
+      - {name: kind, path: "@r.kind"}
+      - {name: namespace, path: "@r.namespace"}
+      - {name: name, path: "@r.name"}
+      - {name: group, path: "@r.group"}
+      - {name: version, path: "@r.version"}
+      - {name: result_status, path: "@r.status", description: "Synced | SyncFailed | Pruned | PruneSkipped"}
+      - {name: result_message, path: "@r.message", description: "e.g. 'configmap/flagd-config configured' or the apply error"}
+      - {name: hook_phase, path: "@r.hookPhase"}
+      - {name: hook_type, path: "@r.hookType"}
+      - {name: sync_phase, path: "@r.syncPhase", description: "PreSync | Sync | PostSync | SyncFail"}
+      - {name: images, type: JSON, path: "@r.images"}
+      - {name: repo, filter_only: true}
+      - *c_selector
+    examples:
+      - sql: >-
+          SELECT app, operation_phase, finished_at, revision, kind, namespace, name, result_status, result_message
+          FROM argocd_sync_results WHERE app = 'flagd-values'
+        description: What the last sync of an application changed.
+      - sql: >-
+          SELECT app, finished_at, kind, name, result_message FROM argocd_sync_results
+          WHERE result_status = 'SyncFailed' OR operation_phase IN ('Failed', 'Error')
+        description: Failed syncs and the objects that failed to apply.
+    fixtures:
+      - file: applications_list.json
+        note: "Same schema-built ApplicationList (v1alpha1OperationState / SyncOperationResult / ResourceResult)."
+        expect_rows: 3
+        expect_columns: {app: flagd-values, operation_phase: Succeeded, finished_at: "2026-10-01T11:39:41Z", revision: 4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3, initiated_by: automated, kind: ConfigMap, name: flagd-config, result_status: Synced, result_message: configmap/flagd-config configured, sync_phase: Sync}
+    docs_url: https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+
+  - name: argocd_revision_metadata
+    title: Git revision metadata (author, date, message)
+    description: >-
+      Commit metadata of one revision as Argo CD's repo-server sees it, from GET
+      /api/v1/applications/{app}/revisions/{revision}/metadata: author, commit date, message,
+      tags, signature info and references. app and revision (commit SHA from argocd_history /
+      argocd_applications) are required; IN on revision fans out (max 10).
+    kind: changes
+    request:
+      method: GET
+      path: "/api/v1/applications/{{ filters.app }}/revisions/{{ filters.revision }}/metadata"
+      query:
+        appNamespace: "{{ filters.app_namespace or env.ARGOCD_APP_NAMESPACE }}"
+        project: "{{ filters.project }}"
+        sourceIndex: "{{ filters.source_index }}"
+        versionId: "{{ filters.version_id }}"
+    filters:
+      - {column: app, required: true, description: "Application name (exact)", examples: [flagd-values]}
+      - {column: revision, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Commit SHA (full or as returned by history)", examples: [4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3]}
+      - {column: project, description: "Project of the app (turns 'not found' into 404 instead of 403)"}
+      - *f_app_namespace
+      - {column: source_index, type: BIGINT, description: "Source index for multi-source apps (0-based)"}
+      - {column: version_id, type: BIGINT, description: "History id (multi-source apps)"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: date, description: "Commit date"}
+      - {name: app, filter_only: true}
+      - {name: revision, filter_only: true}
+      - {name: author, path: author, description: "Commit author (name <email>)"}
+      - {name: message, path: message, description: "Full commit message"}
+      - {name: title, expr: "(_.message or '').split('\\n')[0]", description: "First line of the commit message"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: signature_info, path: signatureInfo}
+      - {name: references, type: JSON, path: references}
+      - {name: project, filter_only: true}
+      - {name: app_namespace, filter_only: true}
+      - {name: source_index, type: BIGINT, filter_only: true}
+      - {name: version_id, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Git sources only: Helm chart revisions have no commit metadata (use the chart version). The repo-server must still be able to fetch the commit (a force-pushed-away SHA errors)."
+      - "The commit is whatever Argo CD synced; it may touch several apps' paths - read the message, then the repository diff (code_changes sources) for details."
+    examples:
+      - sql: >-
+          SELECT revision, author, ts, title FROM argocd_revision_metadata
+          WHERE app = 'flagd-values' AND revision = '4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3'
+        description: Who committed the change Argo CD deployed, and why.
+    fixtures:
+      - file: revision_metadata.json
+        filters: {app: flagd-values, revision: 4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3}
+        note: "Built strictly from the Argo CD v3.5.6 swagger schema v1alpha1RevisionMetadata {author, date, message, tags, signatureInfo, references} (no example body in the docs)."
+        expect_rows: 1
+        expect_columns: {ts: "2026-10-01T11:38:52Z", app: flagd-values, revision: 4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3, author: "Platform Bot <platform-bot@example.com>", title: Enable benchmark workload}
+    ui_link: "{{ env.ARGOCD_URL.rstrip('/') ~ '/applications/' ~ (filters.app_namespace or env.ARGOCD_APP_NAMESPACE or 'argocd') ~ '/' ~ filters.app ~ '?revision=' ~ filters.revision }}"
+    docs_url: https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+
+  - name: argocd_resource_tree
+    title: Live resource tree of an application
+    description: >-
+      Every live object of an application including children Argo CD does not manage directly
+      (ReplicaSets, Pods, EndpointSlices ...), from GET
+      /api/v1/applications/{app}/resource-tree: kind, namespace, name, health (status + message),
+      images, info items (pods: Status Reason e.g. CrashLoopBackOff, Containers 0/1, Restart
+      Count, Node), parent reference and creation time. app is required.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1/applications/{{ filters.app }}/resource-tree"
+      query:
+        appNamespace: "{{ filters.app_namespace or env.ARGOCD_APP_NAMESPACE }}"
+        project: "{{ filters.project }}"
+    filters:
+      - &f_app_req {column: app, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Application name (exact); IN fans out", examples: [recommendation]}
+      - {column: project, description: "Project of the app (404 instead of 403 when missing)"}
+      - *f_app_namespace
+    response:
+      rows_path: "$.nodes[*]"
+    columns:
+      - {name: app, filter_only: true}
+      - {name: kind, path: kind}
+      - {name: group, path: group}
+      - {name: version, path: version}
+      - {name: namespace, path: namespace}
+      - {name: name, path: name}
+      - {name: uid, path: uid, description: "Needed by argocd_app_events resource events"}
+      - {name: health_status, path: health.status, description: "Healthy | Progressing | Degraded | Suspended | Missing | Unknown (null for kinds without health)"}
+      - {name: health_message, path: health.message}
+      - {name: status_reason, expr: "(_.info or []) | selectattr('name', 'equalto', 'Status Reason') | map(attribute='value') | first", description: "Pod status reason (CrashLoopBackOff, ImagePullBackOff, OOMKilled, Completed ...)"}
+      - {name: restart_count, type: BIGINT, expr: "(_.info or []) | selectattr('name', 'equalto', 'Restart Count') | map(attribute='value') | first", description: "Pod restart count"}
+      - {name: info, type: JSON, path: info, description: "[{name, value}] (Revision for ReplicaSets, Node / Containers for Pods ...)"}
+      - {name: images, type: JSON, path: images}
+      - {name: parent_kind, path: "parentRefs[0].kind"}
+      - {name: parent_name, path: "parentRefs[0].name"}
+      - {name: parent_refs, type: JSON, path: parentRefs}
+      - {name: created, type: TIMESTAMP, path: createdAt}
+      - {name: resource_version, path: resourceVersion}
+      - {name: networking, type: JSON, path: networkingInfo}
+      - {name: project, filter_only: true}
+      - {name: app_namespace, filter_only: true}
+    pitfalls:
+      - "orphanedNodes (objects in the destination namespace not managed by any app) are not included; they are only computed when orphaned-resource monitoring is enabled on the project."
+      - "The tree is Argo CD's cache of the destination cluster: it can lag the API server by a few seconds; for authoritative pod state use the Kubernetes source."
+    examples:
+      - sql: >-
+          SELECT kind, namespace, name, health_status, health_message, status_reason, restart_count
+          FROM argocd_resource_tree WHERE app = 'recommendation' AND (health_status IS NULL OR health_status <> 'Healthy')
+        description: Unhealthy live objects of an application, down to pods.
+    fixtures:
+      - file: resource_tree.json
+        filters: {app: batch-jobs}
+        note: "Built strictly from the Argo CD v3.5.6 swagger schema v1alpha1ApplicationTree / ResourceNode (allOf ResourceRef) / InfoItem; info item names (Status Reason, Node, Containers, Restart Count, Revision) from controller/cache/info.go."
+        expect_rows: 3
+        expect_columns: {app: batch-jobs, kind: Deployment, namespace: batch, name: report-generator, health_status: Degraded, health_message: "Deployment \"report-generator\" exceeded its progress deadline", group: apps}
+      - file: resource_tree_pod_first.json
+        filters: {app: batch-jobs}
+        note: "Same schema; a CrashLoopBackOff Pod node first to check the info-derived columns."
+        expect_rows: 1
+        expect_columns: {kind: Pod, name: report-generator-5c6d7f8b9-qz4lm, status_reason: CrashLoopBackOff, restart_count: 6, parent_kind: ReplicaSet, parent_name: report-generator-5c6d7f8b9, health_status: Degraded}
+    docs_url: https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+
+  - name: argocd_managed_resources
+    title: Managed resources (drift between Git and cluster)
+    description: >-
+      Every resource an application manages, from GET
+      /api/v1/applications/{app}/managed-resources: whether the live object differs from Git
+      (modified), and for configuration kinds the Git target state and live state as JSON
+      (ConfigMap data, Service, NetworkPolicy, ResourceQuota, LimitRange, PVC, StorageClass,
+      Ingress, HPA, webhook configurations ...). Hooks are excluded by the API. Filter kind /
+      namespace / name (pushed as query parameters). app is required.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1/applications/{{ filters.app }}/managed-resources"
+      query:
+        appNamespace: "{{ filters.app_namespace or env.ARGOCD_APP_NAMESPACE }}"
+        project: "{{ filters.project }}"
+        kind: "{{ filters.kind }}"
+        namespace: "{{ filters.namespace }}"
+        name: "{{ filters.name }}"
+        group: "{{ filters.group }}"
+    filters:
+      - *f_app_req
+      - {column: kind, description: "Resource kind (exact), e.g. ConfigMap", examples: [ConfigMap]}
+      - {column: namespace, description: "Resource namespace (exact)", examples: [shop]}
+      - {column: name, description: "Resource name (exact)", examples: [flagd-config]}
+      - {column: group, description: "API group ('' for core)"}
+      - {column: project, description: "Project of the app"}
+      - *f_app_namespace
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: app, filter_only: true}
+      - {name: kind, path: kind}
+      - {name: group, path: group}
+      - {name: version, path: version}
+      - {name: namespace, path: namespace}
+      - {name: name, path: name}
+      - {name: modified, type: BOOLEAN, path: modified, description: "Live object differs from the Git target (OutOfSync)"}
+      - {name: hook, type: BOOLEAN, path: hook}
+      - {name: resource_version, path: resourceVersion}
+      - {name: target_state, type: JSON, expr: "_.targetState if _.kind in ['ConfigMap', 'Service', 'NetworkPolicy', 'ResourceQuota', 'LimitRange', 'PersistentVolumeClaim', 'PersistentVolume', 'StorageClass', 'Ingress', 'HorizontalPodAutoscaler', 'PodDisruptionBudget', 'ValidatingWebhookConfiguration', 'MutatingWebhookConfiguration', 'Namespace', 'ServiceAccount', 'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding', 'Application', 'AppProject'] else none", transform: from_json, description: "Desired manifest from Git (configuration kinds only; null for workloads and Secrets, whose env/data may hold credentials)"}
+      - {name: live_state, type: JSON, expr: "_.liveState if _.kind in ['ConfigMap', 'Service', 'NetworkPolicy', 'ResourceQuota', 'LimitRange', 'PersistentVolumeClaim', 'PersistentVolume', 'StorageClass', 'Ingress', 'HorizontalPodAutoscaler', 'PodDisruptionBudget', 'ValidatingWebhookConfiguration', 'MutatingWebhookConfiguration', 'Namespace', 'ServiceAccount', 'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding', 'Application', 'AppProject'] else none", transform: from_json, description: "Live manifest (same kinds)"}
+      - {name: project, filter_only: true}
+      - {name: app_namespace, filter_only: true}
+    pitfalls:
+      - "target_state / live_state are omitted for workloads (env may embed credentials) and Secrets; use the Kubernetes source (kubernetes_workload_containers, kubernetes_container_env) for those."
+      - "A JSON value inside a ConfigMap (flagd flags) is a string: json_extract(live_state->'data'->>'demo.flagd.json', '$.flags.paymentStrictTokenCheck.defaultVariant')."
+    examples:
+      - sql: "SELECT kind, namespace, name, modified FROM argocd_managed_resources WHERE app = 'recommendation' AND modified"
+        description: Resources that drifted from Git.
+      - sql: >-
+          SELECT name, target_state->'data' AS git_data, live_state->'data' AS live_data
+          FROM argocd_managed_resources WHERE app = 'flagd-values' AND kind = 'ConfigMap' AND name = 'flagd-config'
+        description: Compare a ConfigMap's Git and live data.
+    fixtures:
+      - file: managed_resources.json
+        filters: {app: flagd-values}
+        note: "Built strictly from the Argo CD v3.5.6 swagger schema applicationManagedResourcesResponse / v1alpha1ResourceDiff (targetState / liveState are JSON-encoded strings)."
+        expect_rows: 2
+        expect_columns: {app: flagd-values, kind: ConfigMap, namespace: shop, name: flagd-config, modified: false, target_state: '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"flagd-config","namespace":"shop"},"data":{"demo.flagd.json":"{\"flags\":{\"paymentStrictTokenCheck\":{\"defaultVariant\":\"on\"}}}"}}'}
+    docs_url: https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+
+  - name: argocd_app_events
+    title: Application events (sync / health timeline)
+    description: >-
+      Kubernetes events about an Application object, from GET
+      /api/v1/applications/{app}/events: OperationStarted ('Initiated automated sync to <sha>'),
+      OperationCompleted ('Sync operation to <sha> succeeded'), ResourceUpdated ('Updated sync
+      status: Synced -> OutOfSync', 'Updated health status: Healthy -> Degraded'), ... With
+      resource_name + resource_namespace + resource_uid (from argocd_resource_tree) it returns that
+      managed resource's events in the destination cluster instead. app is required.
+    kind: events
+    request:
+      method: GET
+      path: "/api/v1/applications/{{ filters.app }}/events"
+      query:
+        appNamespace: "{{ filters.app_namespace or env.ARGOCD_APP_NAMESPACE }}"
+        project: "{{ filters.project }}"
+        resourceName: "{{ filters.resource_name }}"
+        resourceNamespace: "{{ filters.resource_namespace }}"
+        resourceUID: "{{ filters.resource_uid }}"
+    filters:
+      - *f_app_req
+      - {column: resource_name, description: "Managed resource name (needs resource_namespace and resource_uid too)"}
+      - {column: resource_namespace, description: "Managed resource namespace"}
+      - {column: resource_uid, description: "Managed resource uid (argocd_resource_tree.uid)"}
+      - {column: project, description: "Project of the app"}
+      - *f_app_namespace
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.lastTimestamp or _.series.lastObservedTime or _.eventTime or _.firstTimestamp or _.metadata.creationTimestamp", description: "Last occurrence"}
+      - {name: first_seen, type: TIMESTAMP, expr: "_.firstTimestamp or _.eventTime or _.metadata.creationTimestamp"}
+      - {name: app, filter_only: true}
+      - {name: type, path: type, description: "Normal | Warning"}
+      - {name: reason, path: reason, description: "OperationStarted, OperationCompleted, ResourceUpdated, ResourceCreated, ..."}
+      - {name: message, path: message}
+      - {name: count, type: BIGINT, expr: "_['count'] or 1"}
+      - {name: object_kind, path: involvedObject.kind}
+      - {name: object_name, path: involvedObject.name}
+      - {name: source_component, expr: "_.source.component or _.reportingComponent", description: "argocd-application-controller, argocd-server ..."}
+      - {name: resource_name, filter_only: true}
+      - {name: resource_namespace, filter_only: true}
+      - {name: resource_uid, filter_only: true}
+      - {name: project, filter_only: true}
+      - {name: app_namespace, filter_only: true}
+    pitfalls:
+      - "Events expire with the cluster's event TTL (default 1 hour after the last occurrence); for older history use argocd_history."
+      - "Resource events need all three of resource_name, resource_namespace and resource_uid matching a node of the tree; otherwise HTTP 400 '<name> not found as part of application'."
+    examples:
+      - sql: "SELECT ts, reason, message FROM argocd_app_events WHERE app = 'flagd-values' ORDER BY ts DESC"
+        description: Sync and health transitions of an application.
+    fixtures:
+      - file: app_events.json
+        filters: {app: flagd-values}
+        note: "Built strictly from the Argo CD v3.5.6 swagger schema eventsEventList / eventsEvent (mirrors core/v1 Event); reasons/messages follow the application controller's audit events."
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:39:41Z", app: flagd-values, type: Normal, reason: OperationCompleted, message: "Sync operation to 4f1c2ab9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3 succeeded", object_kind: Application, source_component: argocd-application-controller}
+    docs_url: https://github.com/argoproj/argo-cd/blob/v3.5.6/assets/swagger.json
+
+roles:
+  change_events:
+    table: argocd_history
+    columns: {ts: ts, service: app, title: title, version: revision, author: initiated_by, url: url}
+    notes: "One row per successful Argo CD sync; get the commit author/message with argocd_revision_metadata (app, revision)."

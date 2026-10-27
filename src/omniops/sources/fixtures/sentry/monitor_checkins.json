@@ -1,0 +1,30 @@
+[
+ {
+  "id": "9c2b6a71-52b0-4f8e-8f0e-0d3f5a1b2c3d",
+  "environment": "production",
+  "status": "timeout",
+  "duration": 1800000,
+  "dateCreated": "2024-01-02T02:00:01Z",
+  "dateAdded": "2024-01-02T02:00:01Z",
+  "dateUpdated": "2024-01-02T02:31:00Z",
+  "dateInProgress": "2024-01-02T02:00:01Z",
+  "dateClock": "2024-01-02T02:00:00Z",
+  "expectedTime": "2024-01-02T02:00:00Z",
+  "monitorConfig": {"schedule_type": "crontab", "schedule": "0 2 * * *", "checkin_margin": 5, "max_runtime": 30, "timezone": "UTC", "failure_issue_threshold": 1, "recovery_threshold": 1, "alert_rule_id": null},
+  "groups": []
+ },
+ {
+  "id": "1a7e4c22-93d1-4b55-a7c4-8e2f1d0c9b8a",
+  "environment": "production",
+  "status": "ok",
+  "duration": 61000,
+  "dateCreated": "2024-01-01T02:00:02Z",
+  "dateAdded": "2024-01-01T02:00:02Z",
+  "dateUpdated": "2024-01-01T02:01:03Z",
+  "dateInProgress": "2024-01-01T02:00:02Z",
+  "dateClock": "2024-01-01T02:00:00Z",
+  "expectedTime": "2024-01-01T02:00:00Z",
+  "monitorConfig": {"schedule_type": "crontab", "schedule": "0 2 * * *", "checkin_margin": 5, "max_runtime": 30, "timezone": "UTC", "failure_issue_threshold": 1, "recovery_threshold": 1, "alert_rule_id": null},
+  "groups": []
+ }
+]

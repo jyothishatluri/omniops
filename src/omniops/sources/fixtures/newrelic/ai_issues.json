@@ -1,0 +1,52 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "aiIssues": {
+          "issues": {
+            "issues": [
+              {
+                "entityGuids": [
+                  "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+                  "MXxBUE18QVBQTElDQVRJT058MzIxNzY1NA"
+                ],
+                "entityNames": [
+                  "hour-timeslice-writer (eu-production)",
+                  "metric-timeslice-service (eu-production)"
+                ],
+                "entityTypes": [
+                  "Application"
+                ],
+                "issueId": "1a3a0581-aefc-4027-91a0-a941072101c0",
+                "priority": "CRITICAL",
+                "state": "CLOSED",
+                "title": [
+                  "'Custom/CassandraClient/hour_timeslice_cluster_main/percentile/95th' > 0.5 for at least 5 minutes on 'hour-timeslice-writer (eu-production)'",
+                  "'Custom/CassandraClient/hour_timeslice_cluster_main/percentile/95th' > 0.5 for at least 5 minutes on 'metric-timeslice-service (eu-production)'"
+                ]
+              },
+              {
+                "entityGuids": [
+                  "MXxBUE18QVBQTElDQVRJT058MzIxNzY1NA"
+                ],
+                "entityNames": [
+                  "metric-timeslice-service (eu-production)"
+                ],
+                "entityTypes": [
+                  "Application"
+                ],
+                "issueId": "fd5fda9e-6bfe-469a-8cf7-822986401033",
+                "priority": "CRITICAL",
+                "state": "CLOSED",
+                "title": [
+                  "'Custom/CassandraClient/hour_timeslice_cluster_main/percentile/95th' > 0.5 for at least 5 minutes on 'metric-timeslice-service (eu-production)'"
+                ]
+              }
+            ],
+            "nextCursor": null
+          }
+        }
+      }
+    }
+  }
+}

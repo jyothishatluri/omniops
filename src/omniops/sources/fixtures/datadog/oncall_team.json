@@ -1,0 +1,49 @@
+{
+  "data": {
+    "id": "111ee23r-aaaaa-aaaa-aaww-1234wertsd23",
+    "relationships": {
+      "escalations": {
+        "data": [
+          {
+            "id": "111ee23r-aaaaa-aaaa-aaww-1234wertsd23",
+            "type": "escalation_policy_steps"
+          }
+        ]
+      },
+      "responders": {
+        "data": [
+          {
+            "id": "111ee23r-aaaaa-aaaa-aaww-1234wertsd23",
+            "type": "users"
+          }
+        ]
+      }
+    },
+    "type": "team_oncall_responders"
+  },
+  "included": [
+    {
+      "attributes": {
+        "email": "test@test.com",
+        "name": "Test User",
+        "status": "active"
+      },
+      "id": "111ee23r-aaaaa-aaaa-aaww-1234wertsd23",
+      "type": "users"
+    },
+    {
+      "id": "111ee23r-aaaaa-aaaa-aaww-1234wertsd23",
+      "relationships": {
+        "responders": {
+          "data": [
+            {
+              "id": "111ee23r-aaaaa-aaaa-aaww-1234wertsd23",
+              "type": "users"
+            }
+          ]
+        }
+      },
+      "type": "escalation_policy_steps"
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+{
+ "maintenance_windows": [
+  {
+   "alert_condition_groups": [
+    {
+     "conditions": [
+      {
+       "operation": {
+        "label": "Lawrence Jones",
+        "value": "01FCQSP07Z74QMMYPDDGQB9FTG"
+       },
+       "param_bindings": [
+        {
+         "array_value": [
+          {
+           "label": "Lawrence Jones",
+           "literal": "SEV123",
+           "reference": "incident.severity"
+          }
+         ],
+         "value": {
+          "label": "Lawrence Jones",
+          "literal": "SEV123",
+          "reference": "incident.severity"
+         }
+        }
+       ],
+       "subject": {
+        "label": "Incident Severity",
+        "reference": "incident.severity"
+       }
+      }
+     ]
+    }
+   ],
+   "archived_at": "2021-08-17T13:28:57.801578Z",
+   "created_at": "2021-08-17T13:28:57.801578Z",
+   "end_at": "2021-08-17T14:28:57.801578Z",
+   "escalation_targets": [
+    {
+     "escalation_paths": {
+      "array_value": [
+       {
+        "label": "Lawrence Jones",
+        "literal": "SEV123",
+        "reference": "incident.severity"
+       }
+      ],
+      "value": {
+       "label": "Lawrence Jones",
+       "literal": "SEV123",
+       "reference": "incident.severity"
+      }
+     },
+     "users": {
+      "array_value": [
+       {
+        "label": "Lawrence Jones",
+        "literal": "SEV123",
+        "reference": "incident.severity"
+       }
+      ],
+      "value": {
+       "label": "Lawrence Jones",
+       "literal": "SEV123",
+       "reference": "incident.severity"
+      }
+     }
+    }
+   ],
+   "id": "01FCNDV6P870EA6S7TK1DSYDG0",
+   "incident_id": "01FCNDV6P870EA6S7TK1DSYDG0",
+   "lead": {
+    "alert": {
+     "id": "01GW2G3V0S59R238FAHPDS1R66",
+     "title": "*errors.withMessage: PG::Error failed to connect"
+    },
+    "api_key": {
+     "id": "01FCNDV6P870EA6S7TK1DSYDG0",
+     "name": "My test API key"
+    },
+    "user": {
+     "email": "lisa@incident.io",
+     "id": "01FCNDV6P870EA6S7TK1DSYDG0",
+     "name": "Lisa Karlin Curtis",
+     "role": "owner",
+     "slack_user_id": "U02AYNF2XJM"
+    },
+    "workflow": {
+     "id": "01FCNDV6P870EA6S7TK1DSYDG0",
+     "name": "My little workflow"
+    }
+   },
+   "name": "Planned database migration",
+   "notification_message": "Scheduled downtime for database migration",
+   "notify_channels": [
+    {
+     "channel_id": "C0ACTHQMHS8",
+     "channel_name": "general",
+     "channel_type": "public",
+     "is_private": false
+    }
+   ],
+   "notify_end_minutes_before": 5,
+   "notify_start_minutes_before": 15,
+   "owning_team_ids": [
+    "01G0J1EXE7AXZ2C93K61WBPYEH"
+   ],
+   "reroute_on_end": false,
+   "resolve_on_end": false,
+   "show_in_sidebar": true,
+   "start_at": "2021-08-17T13:28:57.801578Z",
+   "updated_at": "2021-08-17T13:28:57.801578Z"
+  }
+ ],
+ "pagination_meta": {
+  "after": "01FCNDV6P870EA6S7TK1DSYDG0",
+  "page_size": 25
+ }
+}

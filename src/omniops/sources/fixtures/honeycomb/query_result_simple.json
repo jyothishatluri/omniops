@@ -1,0 +1,33 @@
+{
+ "query": {
+  "calculations": [
+   {
+    "op": "COUNT"
+   }
+  ],
+  "orders": [
+   {
+    "op": "COUNT",
+    "order": "descending"
+   }
+  ],
+  "limit": 10000,
+  "time_range": 7200
+ },
+ "complete": true,
+ "id": "dfg456",
+ "data": {
+  "series": [],
+  "results": [
+   {
+    "data": {
+     "COUNT": 20769
+    }
+   }
+  ]
+ },
+ "links": {
+  "query_url": "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/dfg456",
+  "graph_image_url": "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/dfg456/snapshot"
+ }
+}

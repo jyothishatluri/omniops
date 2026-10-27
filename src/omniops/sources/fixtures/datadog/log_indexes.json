@@ -1,0 +1,34 @@
+{
+  "indexes": [
+    {
+      "daily_limit": 300000000,
+      "daily_limit_reset": {
+        "reset_time": "14:00",
+        "reset_utc_offset": "+02:00"
+      },
+      "daily_limit_warning_threshold_percentage": 70,
+      "exclusion_filters": [
+        {
+          "filter": {
+            "query": "*",
+            "sample_attribute": "@ci.job_id",
+            "sample_rate": 1
+          },
+          "is_enabled": false,
+          "name": "payment"
+        }
+      ],
+      "filter": {
+        "query": "source:python"
+      },
+      "is_rate_limited": false,
+      "name": "main",
+      "num_flex_logs_retention_days": 360,
+      "num_retention_days": 15,
+      "tags": [
+        "team:backend",
+        "env:production"
+      ]
+    }
+  ]
+}

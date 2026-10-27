@@ -1,0 +1,50 @@
+{
+ "events": [
+  {
+   "correlationId": "933613657e1c8fcf",
+   "endTime": 1564039524182,
+   "entityId": {
+    "entityId": {
+     "id": "string",
+     "type": "string"
+    },
+    "name": "string"
+   },
+   "entityTags": [
+    {
+     "context": "string",
+     "key": "string",
+     "stringRepresentation": "string",
+     "value": "string"
+    }
+   ],
+   "eventId": "4293884258445543163_1564039524182",
+   "eventType": "LOW_DISK_SPACE",
+   "frequentEvent": true,
+   "managementZones": [
+    {
+     "id": "string",
+     "name": "string"
+    }
+   ],
+   "properties": [
+    {
+     "key": "string",
+     "value": "string"
+    }
+   ],
+   "startTime": 1564039524182,
+   "status": "OPEN",
+   "suppressAlert": true,
+   "suppressProblem": true,
+   "title": "High CPU load on host X",
+   "underMaintenance": true
+  }
+ ],
+ "nextPageKey": "AQAAABQBAAAABQ==",
+ "pageSize": 1,
+ "totalCount": 1,
+ "warnings": [
+  "string"
+ ]
+}

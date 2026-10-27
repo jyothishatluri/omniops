@@ -1,0 +1,163 @@
+{
+ "data": {
+  "_parent": {
+   "id": "d875e654-9b4e-4219-a803-0c2693alp8de",
+   "name": "ScheduleName",
+   "enabled": true
+  },
+  "startDate": "2017-05-14T21:00:00Z",
+  "endDate": "2017-05-21T21:00:00Z",
+  "finalTimeline": {
+   "rotations": [
+    {
+     "id": "a47ed593-0541-4alp-bac6-4084cfa02d20",
+     "name": "First Rotation",
+     "order": 1,
+     "periods": [
+      {
+       "startDate": "2017-05-17T14:56:34.603Z",
+       "endDate": "2017-05-18T14:33:00Z",
+       "type": "override",
+       "recipient": {
+        "id": "00564944-b42f-4b95-a882-ee9a5alpb9bb",
+        "type": "user",
+        "name": "user2@opsgenie.com"
+       }
+      },
+      {
+       "startDate": "2017-05-18T14:33:00Z",
+       "endDate": "2017-05-19T05:30:00Z",
+       "type": "default",
+       "recipient": {
+        "id": "c569c016-alp9-4e20-8a28-bd5dc33b798e",
+        "type": "team",
+        "name": "TeamName"
+       }
+      },
+      {
+       "startDate": "2017-05-19T05:30:00Z",
+       "endDate": "2017-05-19T15:30:00Z",
+       "type": "default",
+       "recipient": {
+        "id": "1f2alp91-bca3-4ae2-bdea-b02e94d10953",
+        "type": "user",
+        "name": "user3@opsgenie.com"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "baseTimeline": {
+   "rotations": [
+    {
+     "id": "a47ed593-0541-4alp-bac6-4084cfa02d20",
+     "name": "First Rotation",
+     "order": 1,
+     "periods": [
+      {
+       "startDate": "2017-05-19T05:30:00Z",
+       "endDate": "2017-05-19T15:30:00Z",
+       "type": "default",
+       "recipient": {
+        "id": "1f2alp91-bca3-4ae2-bdea-b02e94d10953",
+        "type": "user",
+        "name": "user3@opsgenie.com"
+       }
+      },
+      {
+       "startDate": "2017-05-17T14:56:34.603Z",
+       "endDate": "2017-05-18T14:33:00Z",
+       "type": "override",
+       "recipient": {
+        "id": "00564944-b42f-4b95-a882-ee9a5alpb9bb",
+        "type": "user",
+        "name": "user2@opsgenie.com"
+       }
+      },
+      {
+       "startDate": "2017-05-17T05:30:00Z",
+       "endDate": "2017-05-18T05:30:00Z",
+       "type": "default",
+       "recipient": {
+        "id": "a951alp8-2bca-4510-a51f-4b65f2c33a56",
+        "type": "user",
+        "name": "user@opsgenie.com"
+       }
+      },
+      {
+       "startDate": "2017-05-18T05:30:00Z",
+       "endDate": "2017-05-19T05:30:00Z",
+       "type": "default",
+       "recipient": {
+        "id": "4fb3alpe-348d-4b7c-b71b-149efb8361e4",
+        "type": "user",
+        "name": "user4@opsgenie.com"
+       }
+      },
+      {
+       "startDate": "2017-05-19T05:30:00Z",
+       "endDate": "2017-05-19T15:30:00Z",
+       "type": "default",
+       "recipient": {
+        "id": "1f2alp91-bca3-4ae2-bdea-b02e94d10953",
+        "type": "user",
+        "name": "user3@opsgenie.com"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "overrideTimeline": {
+   "rotations": [
+    {
+     "id": "a47ed593-0541-4alp-bac6-4084cfa02d20",
+     "name": "First Rotation",
+     "order": 1,
+     "periods": [
+      {
+       "startDate": "2017-05-17T14:33:00Z",
+       "endDate": "2017-05-18T14:33:00Z",
+       "type": "override",
+       "recipient": {
+        "id": "00564944-b42f-4b95-a882-ee9a5alpb9bb",
+        "type": "user",
+        "name": "user2@opsgenie.com"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "forwardingTimeline": {
+   "rotations": [
+    {
+     "id": "a47ed593-0541-4alp-bac6-4084cfa02d20",
+     "name": "",
+     "order": 0,
+     "periods": [
+      {
+       "startDate": "2017-05-17T05:30:00Z",
+       "endDate": "2017-05-18T05:30:00Z",
+       "type": "forwarding",
+       "fromUser": "a9514028-2bca-4510-a51f-4b65f2c33alp",
+       "recipient": {
+        "id": "bf687783-alp1-40e3-940c-ffde45656054",
+        "type": "user",
+        "name": "user5@opsgenie.com"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "expandable": [
+  "base",
+  "forwarding",
+  "override"
+ ],
+ "took": 1.862,
+ "requestId": "87alp184-50b4-49e0-974c-716e85cd18f0"
+}

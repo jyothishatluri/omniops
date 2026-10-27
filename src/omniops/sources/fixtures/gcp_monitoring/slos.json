@@ -1,0 +1,33 @@
+{
+  "serviceLevelObjectives": [
+    {
+      "name": "projects/my-project/services/checkout/serviceLevelObjectives/availability",
+      "displayName": "99.9% of checkout requests succeed",
+      "serviceLevelIndicator": {
+        "requestBased": {
+          "goodTotalRatio": {
+            "goodServiceFilter": "metric.type=\"run.googleapis.com/request_count\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"checkout\" metric.label.\"response_code_class\"=\"2xx\"",
+            "totalServiceFilter": "metric.type=\"run.googleapis.com/request_count\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"checkout\""
+          }
+        }
+      },
+      "goal": 0.999,
+      "rollingPeriod": "2419200s",
+      "userLabels": {"tier": "1"}
+    },
+    {
+      "name": "projects/my-project/services/checkout/serviceLevelObjectives/latency",
+      "displayName": "95% of checkout requests under 500 ms",
+      "serviceLevelIndicator": {
+        "requestBased": {
+          "distributionCut": {
+            "distributionFilter": "metric.type=\"run.googleapis.com/request_latencies\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"checkout\"",
+            "range": {"max": 500}
+          }
+        }
+      },
+      "goal": 0.95,
+      "calendarPeriod": "WEEK"
+    }
+  ]
+}

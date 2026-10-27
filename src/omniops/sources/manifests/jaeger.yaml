@@ -1,0 +1,427 @@
+# Jaeger query service (Jaeger v2 "jaeger" binary with the jaeger_query extension, or Jaeger v1
+# jaeger-query), HTTP port 16686.
+# Docs: https://www.jaegertracing.io/docs/latest/architecture/apis/ ("Query JSON over HTTP",
+# stable) whose request/response contract is the OpenAPI file
+# https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
+# Verified against Jaeger v2.22.0 (released 2026-10-06): cmd/jaeger/internal/extension/
+# jaegerquery/internal/apiv3/{http_gateway,query_parser}.go - camelCase query parameters since
+# v2.19 with the snake_case names kept as deprecated aliases; trace bodies are OTLP/JSON
+# (hex ids, enum integers, int64 as strings) wrapped in {"result": ...}.
+# Service dependencies are only served by the internal /api/dependencies endpoint (the UI's
+# API, "intentionally undocumented"; contract from http_handler.go in v2.22.0).
+source: jaeger
+display_name: Jaeger
+vendor: CNCF Jaeger
+description: Jaeger query API v3 - services, operations, trace search (spans and summaries), trace by id, plus the service dependency graph.
+docs_url: https://www.jaegertracing.io/docs/latest/architecture/apis/
+categories: [traces]
+base_url: "{{ env.JAEGER_URL }}"
+env:
+  - {name: JAEGER_URL, description: "Jaeger query HTTP base URL incl. any base path, e.g. http://jaeger-query:16686 (no trailing /api)"}
+  - {name: JAEGER_TOKEN, description: "Optional bearer token (Jaeger has no built-in auth; for an OAuth/OIDC reverse proxy in front of it)", secret: true}
+  - {name: JAEGER_USERNAME, description: "Optional basic-auth user for a reverse proxy (JAEGER_TOKEN wins)"}
+  - {name: JAEGER_PASSWORD, description: "Optional basic-auth password", secret: true}
+  - {name: JAEGER_LEGACY_PARAMS, description: "Set to 'true' for Jaeger 2.0-2.18 (and 1.x), which only accept snake_case api_v3 parameters (query.service_name ...). Default: camelCase (current API).", default: "false"}
+required_env: [JAEGER_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Bearer ' ~ env.JAEGER_TOKEN) if env.JAEGER_TOKEN
+         else (('Basic ' ~ ((env.JAEGER_USERNAME ~ ':' ~ (env.JAEGER_PASSWORD or '')) | b64)) if env.JAEGER_USERNAME else None) }}
+rate_limit:
+  concurrency: 4
+  notes: "Jaeger has no API rate limit; cost is storage-side (Cassandra/Elasticsearch/OpenSearch/Badger/ClickHouse). Search depth (traces per search) is 50 here unless trace_limit / LIMIT says otherwise."
+retention: {}
+errors:
+  - {path: "$.error.message", non_empty: true, message: "$.error.message", hint: "Jaeger api_v3 error (GRPCGatewayError)"}
+  - {path: "$.errors", non_empty: true, message: "$.errors", hint: "Jaeger internal API reported errors"}
+ui_base_url: "{{ env.JAEGER_URL }}"
+pitfalls:
+  - "Trace search needs a service name (query.serviceName) on most storage backends - a search without one is refused (HTTP 400 'service name is required'). List services with jaeger_services first."
+  - "Search is per span: a trace is returned when ANY span matches all of service, operation, duration and attributes; jaeger_traces returns all spans of those traces, so filter rows again in SQL."
+  - "Service and operation names are exact and case-sensitive; an unknown one returns no traces (HTTP 404 'No traces found' -> 0 rows), not an error. Check jaeger_services / jaeger_operations."
+  - "Jaeger 2.0-2.18 (and some proxies) only understand snake_case api_v3 parameters: if every search returns HTTP 400 about missing service name / time range, set JAEGER_LEGACY_PARAMS=true. /api/v3/trace-summaries needs Jaeger 2.19+ (404 on older versions: use jaeger_traces)."
+  - "Retention depends on the storage backend (Elasticsearch/OpenSearch index rollover, Cassandra TTL default 2 days, Badger span_store_ttl 72h, memory store loses data on restart). An empty old window may be past retention."
+  - "Results are bounded by searchDepth (trace_limit, default 50 here): aggregates over jaeger_traces are samples, not totals."
+tables:
+  - name: jaeger_services
+    title: Services with traces
+    description: Every service name Jaeger has spans for, from GET /api/v3/services. Use it to find the exact service name before searching.
+    kind: entities
+    request: {method: GET, path: /api/v3/services}
+    response:
+      rows_path: "$.services[*]"
+    columns:
+      - {name: service, path: ".", description: "Service name (exact, case-sensitive)"}
+    examples:
+      - sql: "SELECT service FROM jaeger_services ORDER BY service"
+        description: All traced services.
+        verified: false
+    fixtures:
+      - file: services.json
+        note: "Built from the OpenAPI schema jaeger.api_v3.GetServicesResponse {services: [string]} (no example body in the docs)."
+        expect_rows: 4
+        expect_columns: {service: api-gateway}
+    docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
+
+  - name: jaeger_operations
+    title: Operations (span names) of a service
+    description: Operation names and span kinds recorded for a service, from GET /api/v3/operations?service=. Use to get exact operation names for jaeger_traces.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v3/operations
+      query:
+        service: "{{ filters.service }}"
+        "{{ 'span_kind' if env.JAEGER_LEGACY_PARAMS == 'true' else 'spanKind' }}": "{{ filters.span_kind }}"
+    filters:
+      - {column: service, required: true, ops: ["=", "in"], description: "Service name (exact)", examples: [order-service]}
+      - {column: span_kind, description: "server | client | producer | consumer | internal"}
+    response:
+      rows_path: "$.operations[*]"
+    columns:
+      - {name: operation, path: name, description: "Operation (span) name"}
+      - {name: span_kind, path: spanKind, description: "server | client | producer | consumer | internal"}
+      - {name: service, filter_only: true}
+    examples:
+      - sql: "SELECT operation, span_kind FROM jaeger_operations WHERE service = 'order-service' ORDER BY operation"
+        description: Operations of one service.
+        verified: false
+    fixtures:
+      - file: operations.json
+        filters: {service: order-service}
+        note: "Built from the OpenAPI schema jaeger.api_v3.GetOperationsResponse {operations: [{name, spanKind}]}."
+        expect_rows: 3
+        expect_columns: {operation: handle POST /api/orders, span_kind: server, service: order-service}
+    docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
+
+  - name: jaeger_traces
+    title: Trace search (all spans of matching traces)
+    description: >-
+      Traces of a service from GET /api/v3/traces, returned as OTLP spans: one row per span of
+      every matching trace (trace id, span/parent ids, service, operation name, kind, start,
+      duration, status, HTTP attributes, all attributes). service is required; narrow with
+      operation, duration_ms (>, >=, <, <=, between -> durationMin/durationMax), status =
+      'error' (attribute error=true) and http_status_code (attribute filter). A trace matches
+      when one span satisfies all filters; rows include all its spans.
+    kind: spans
+    request:
+      method: GET
+      path: /api/v3/traces
+      query:
+        "{{ 'query.service_name' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.serviceName' }}": "{{ filters.service }}"
+        "{{ 'query.operation_name' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.operationName' }}": "{{ filters.operation }}"
+        "{{ 'query.start_time_min' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.startTimeMin' }}": "{{ time.start | rfc3339 }}"
+        "{{ 'query.start_time_max' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.startTimeMax' }}": "{{ time.end | rfc3339 }}"
+        "{{ 'query.duration_min' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.durationMin' }}": >-
+          {{ (('%.6f' | format((filters.duration_ms[0] if filters.duration_ms__op == 'between' else filters.duration_ms) | float / 1000)) ~ 's')
+             if (filters.duration_ms is defined and filters.duration_ms is not none and (filters.duration_ms__op or '>=') in ['>', '>=', 'between']) else None }}
+        "{{ 'query.duration_max' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.durationMax' }}": >-
+          {{ (('%.6f' | format((filters.duration_ms[1] if filters.duration_ms__op == 'between' else filters.duration_ms) | float / 1000)) ~ 's')
+             if (filters.duration_ms is defined and filters.duration_ms is not none and filters.duration_ms__op in ['<', '<=', 'between']) else None }}
+        "{{ 'query.search_depth' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.searchDepth' }}": "{{ filters.trace_limit or limit or 50 }}"
+        query.attributes: |-
+          {%- set st = (filters.status or '') | lower -%}
+          {%- set hc = filters.http_status_code -%}
+          {%- if st == 'error' and hc -%}{{ {'error': 'true', 'http.status_code': hc | string} | tojson }}
+          {%- elif st == 'error' -%}{{ {'error': 'true'} | tojson }}
+          {%- elif hc -%}{{ {'http.status_code': hc | string} | tojson }}
+          {%- else -%}{{ filters.attributes_filter or '' }}{%- endif -%}
+      accept_status: [404]
+    filters:
+      - {column: service, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Service name (exact)", examples: [order-service]}
+      - {column: operation, ops: ["=", "in"], description: "Operation / span name (exact)", examples: ["handle POST /api/orders"]}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<=", "between"], description: "Span duration in ms (sent as durationMin / durationMax in seconds, e.g. 0.500000s)", examples: ["500"]}
+      - {column: status, description: "'error' sends the attribute filter error=true (Jaeger's error tag)", examples: [error]}
+      - {column: http_status_code, type: BIGINT, description: "Attribute filter http.status_code=<code>"}
+      - {column: attributes_filter, description: "Raw attribute filter as a JSON string map, e.g. {\"http.route\":\"/api/orders\"} (used when status/http_status_code are not given)"}
+      - {column: trace_limit, type: BIGINT, description: "Max traces (searchDepth; default 50, or the SQL LIMIT)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.result.resourceSpans[*]"
+      expand:
+        - {explode: scopeSpans, as: ss}
+        - {explode: "@ss.spans", as: s}
+    columns:
+      - {name: trace_id, expr: "s.traceId | lower", description: "Trace id (32 lowercase hex chars)"}
+      - {name: span_id, expr: "s.spanId | lower", description: "Span id (16 hex chars)"}
+      - {name: parent_span_id, expr: "(s.parentSpanId | lower) if s.parentSpanId else None", description: "Parent span id; NULL for the root"}
+      - {name: service, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'service.name') | map(attribute='value.stringValue') | first", description: "resource service.name"}
+      - {name: name, path: "@s.name", description: "Operation (span) name"}
+      - {name: kind, expr: "(s.kind | replace('SPAN_KIND_', '') | lower) if s.kind is string else (['unspecified', 'internal', 'server', 'client', 'producer', 'consumer'][s.kind] if s.kind is number else 'unspecified')", description: "server | client | internal | producer | consumer | unspecified"}
+      - {name: ts, type: TIMESTAMP, path: "@s.startTimeUnixNano", transform: epoch_ns, description: "Span start (UTC)"}
+      - {name: duration_ms, type: DOUBLE, expr: "((s.endTimeUnixNano or 0) | int - (s.startTimeUnixNano or 0) | int) / 1000000", description: "Span duration in ms (includes children)"}
+      - {name: status, expr: "((s.status.code | replace('STATUS_CODE_', '') | lower) if s.status.code is string else (['unset', 'ok', 'error'][s.status.code] if s.status.code is number else 'unset')) if not ((s.attributes or []) | selectattr('key', 'equalto', 'error') | map(attribute='value.boolValue') | select | list) else 'error'", description: "error | ok | unset (OTLP status, or the Jaeger error=true tag)"}
+      - {name: status_message, path: "@s.status.message"}
+      - {name: is_root, type: BOOLEAN, expr: "not s.parentSpanId"}
+      - {name: http_route, expr: "(s.attributes or []) | selectattr('key', 'equalto', 'http.route') | map(attribute='value.stringValue') | first"}
+      - {name: http_method, expr: "(s.attributes or []) | selectattr('key', 'in', ['http.request.method', 'http.method']) | map(attribute='value.stringValue') | first"}
+      - {name: http_status_code, type: BIGINT, expr: "(s.attributes or []) | selectattr('key', 'in', ['http.response.status_code', 'http.status_code']) | map(attribute='value') | map('dictsort') | map('first') | map('last') | first"}
+      - {name: peer_service, expr: "(s.attributes or []) | selectattr('key', 'in', ['peer.service', 'server.address', 'net.peer.name', 'db.system', 'messaging.system']) | map(attribute='value.stringValue') | first", description: "Called peer for client spans"}
+      - {name: db_statement, expr: "(s.attributes or []) | selectattr('key', 'in', ['db.query.text', 'db.statement']) | map(attribute='value.stringValue') | first"}
+      - {name: exception_message, expr: "((s.events or []) | selectattr('name', 'equalto', 'exception') | map(attribute='attributes') | first or []) | selectattr('key', 'equalto', 'exception.message') | map(attribute='value.stringValue') | first"}
+      - {name: host, expr: "(_.resource.attributes or []) | selectattr('key', 'in', ['host.name', 'k8s.node.name', 'hostname']) | map(attribute='value.stringValue') | first"}
+      - {name: pod, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'k8s.pod.name') | map(attribute='value.stringValue') | first"}
+      - {name: env, expr: "(_.resource.attributes or []) | selectattr('key', 'in', ['deployment.environment.name', 'deployment.environment']) | map(attribute='value.stringValue') | first"}
+      - {name: version, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'service.version') | map(attribute='value.stringValue') | first"}
+      - {name: scope_name, path: "@ss.scope.name"}
+      - {name: attributes, type: JSON, expr: "dict((s.attributes or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Span attributes as {key: {stringValue|intValue|doubleValue|boolValue: v}}; e.g. attributes->'http.route'->>'stringValue'"}
+      - {name: resource_attributes, type: JSON, expr: "dict((_.resource.attributes or []) | map('dictsort') | map('map', attribute='1') | map('list'))"}
+      - {name: events, type: JSON, path: "@s.events"}
+      - {name: operation, filter_only: true}
+      - {name: attributes_filter, filter_only: true}
+      - {name: trace_limit, type: BIGINT, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "Rows are ALL spans of each matching trace: re-filter in SQL (WHERE service = ... AND duration_ms > ...) for the spans themselves; the service/operation columns of other spans differ."
+      - "status = 'error' sends the attribute filter error=true, which Jaeger matches against OTLP status ERROR (native v2 stores) or the error=true tag (v1-model stores). Spans that only carry an HTTP 5xx code without error status are not matched: filter on http_status_code instead."
+    examples:
+      - sql: >-
+          SELECT trace_id, max(duration_ms) AS trace_ms,
+                 arg_max(service || ' / ' || name, duration_ms) AS slowest_span
+          FROM jaeger_traces
+          WHERE service = 'order-service' AND operation = 'handle POST /api/orders' AND duration_ms > 500
+            AND ts >= now() - INTERVAL 1 HOUR
+          GROUP BY trace_id ORDER BY trace_ms DESC LIMIT 10
+        description: Slow checkout traces handled by order-service.
+        verified: false
+      - sql: >-
+          SELECT service, name, http_status_code, status_message, count(*) AS error_spans, any_value(trace_id) AS example_trace
+          FROM jaeger_traces
+          WHERE service = 'payment-service' AND status = 'error' AND ts >= now() - INTERVAL 6 HOUR
+          GROUP BY service, name, http_status_code, status_message ORDER BY error_spans DESC
+        description: Error spans in traces through payment-service (status re-applied to the rows).
+        verified: false
+    fixtures:
+      - file: find_traces_otlp_example.json
+        filters: {service: my.service}
+        note: "The official OTLP/JSON trace example (opentelemetry-proto examples/trace.json, uppercase hex ids, kind 2) wrapped in {\"result\": ...} per the OpenAPI jaeger.api_v3.GRPCGatewayWrapper schema returned by GET /api/v3/traces."
+        expect_rows: 1
+        expect_columns: {trace_id: 5b8efff798038103d269b633813fc60c, span_id: eee19b7ec3c1b174, parent_span_id: eee19b7ec3c1b173, service: my.service, name: "I'm a server span", kind: server, ts: "2018-12-13T14:51:00Z", duration_ms: 1000.0, status: unset, scope_name: my.library}
+      - file: find_traces_checkout.json
+        filters: {service: order-service}
+        note: "Built strictly from the OTLP/JSON encoding (hex ids, SpanKind/StatusCode integers, int64 strings) inside the GRPCGatewayWrapper schema; a webapp -> api-gateway -> order-service -> payment-service checkout trace."
+        expect_rows: 5
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, parent_span_id: null, service: webapp, kind: server, status: unset, is_root: true, http_status_code: 500}
+    docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
+
+  - name: jaeger_trace_summaries
+    title: Trace search summaries (one row per trace, Jaeger 2.19+)
+    description: >-
+      Lightweight per-trace summaries from GET /api/v3/trace-summaries (what the Jaeger UI search
+      list shows): trace id, root service and operation, start, end-to-end duration, span and
+      error-span counts, orphan spans and per-service span/error counts. Same filters as
+      jaeger_traces (service required). Cheap way to rank slow or failing traces before opening
+      one with jaeger_trace.
+    kind: traces
+    request:
+      method: GET
+      path: /api/v3/trace-summaries
+      query:
+        "{{ 'query.service_name' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.serviceName' }}": "{{ filters.service }}"
+        "{{ 'query.operation_name' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.operationName' }}": "{{ filters.operation }}"
+        "{{ 'query.start_time_min' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.startTimeMin' }}": "{{ time.start | rfc3339 }}"
+        "{{ 'query.start_time_max' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.startTimeMax' }}": "{{ time.end | rfc3339 }}"
+        "{{ 'query.duration_min' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.durationMin' }}": >-
+          {{ (('%.6f' | format((filters.duration_ms[0] if filters.duration_ms__op == 'between' else filters.duration_ms) | float / 1000)) ~ 's')
+             if (filters.duration_ms is defined and filters.duration_ms is not none and (filters.duration_ms__op or '>=') in ['>', '>=', 'between']) else None }}
+        "{{ 'query.duration_max' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.durationMax' }}": >-
+          {{ (('%.6f' | format((filters.duration_ms[1] if filters.duration_ms__op == 'between' else filters.duration_ms) | float / 1000)) ~ 's')
+             if (filters.duration_ms is defined and filters.duration_ms is not none and filters.duration_ms__op in ['<', '<=', 'between']) else None }}
+        "{{ 'query.search_depth' if env.JAEGER_LEGACY_PARAMS == 'true' else 'query.searchDepth' }}": "{{ filters.trace_limit or limit or 50 }}"
+        query.attributes: |-
+          {%- set st = (filters.status or '') | lower -%}
+          {%- set hc = filters.http_status_code -%}
+          {%- if st == 'error' and hc -%}{{ {'error': 'true', 'http.status_code': hc | string} | tojson }}
+          {%- elif st == 'error' -%}{{ {'error': 'true'} | tojson }}
+          {%- elif hc -%}{{ {'http.status_code': hc | string} | tojson }}
+          {%- else -%}{{ filters.attributes_filter or '' }}{%- endif -%}
+    filters:
+      - {column: service, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Service name (exact)", examples: [order-service]}
+      - {column: operation, ops: ["=", "in"], description: "Operation / span name (exact)"}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<=", "between"], description: "A span's duration in ms (durationMin/durationMax match spans, not the trace)"}
+      - {column: status, description: "'error' -> attribute filter error=true"}
+      - {column: http_status_code, type: BIGINT, description: "Attribute filter http.status_code=<code>"}
+      - {column: attributes_filter, description: "Raw attribute filter as JSON string map"}
+      - {column: trace_limit, type: BIGINT, description: "Max traces (searchDepth; default 50, or the SQL LIMIT)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.summaries[*]"
+    columns:
+      - {name: trace_id, path: traceId, description: "Trace id (hex)"}
+      - {name: ts, type: TIMESTAMP, path: minStartTimeUnixNano, transform: epoch_ns, description: "Start of the earliest span"}
+      - {name: duration_ms, type: DOUBLE, expr: "((_.maxEndTimeUnixNano or 0) | int - (_.minStartTimeUnixNano or 0) | int) / 1000000", description: "End-to-end trace duration (ms)"}
+      - {name: root_service, path: rootServiceName}
+      - {name: root_name, path: rootOperationName}
+      - {name: span_count, type: BIGINT, expr: "_.spanCount or 0"}
+      - {name: error_count, type: BIGINT, expr: "_.errorSpanCount or 0", description: "Spans with OTEL status ERROR"}
+      - {name: orphan_span_count, type: BIGINT, expr: "_.orphanSpanCount or 0", description: "Spans whose parent is missing (incomplete trace)"}
+      - {name: services, expr: "(_.services or []) | map(attribute='name') | join(',')", description: "Services in the trace (sorted)"}
+      - {name: error_services, expr: "(_.services or []) | selectattr('errorSpanCount') | map(attribute='name') | join(',')", description: "Services owning error spans"}
+      - {name: service_stats, type: JSON, path: services}
+      - {name: service, filter_only: true}
+      - {name: operation, filter_only: true}
+      - {name: status, filter_only: true}
+      - {name: http_status_code, type: BIGINT, filter_only: true}
+      - {name: attributes_filter, filter_only: true}
+      - {name: trace_limit, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Needs Jaeger 2.19+; older versions answer 404 - use jaeger_traces and GROUP BY trace_id instead."
+      - "duration_ms is the whole trace; the duration_ms filter matches individual spans (a trace qualifies when one span is that slow)."
+    examples:
+      - sql: >-
+          SELECT trace_id, ts, duration_ms, root_name, error_services, span_count
+          FROM jaeger_trace_summaries
+          WHERE service = 'order-service' AND status = 'error' AND ts >= now() - INTERVAL 6 HOUR
+          ORDER BY ts DESC
+        description: Recent failing traces through order-service and which services own the errors.
+        verified: false
+    fixtures:
+      - file: trace_summaries.json
+        filters: {service: order-service}
+        note: "Built from the OpenAPI schema jaeger.api_v3.FindTraceSummariesResponse / TraceSummary / ServiceSummary (int64 nanos as strings)."
+        expect_rows: 2
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, ts: "2026-10-20T06:36:18Z", duration_ms: 1000.0, root_service: webapp, root_name: POST /api/orders, span_count: 5, error_count: 3, services: "api-gateway,order-service,payment-service,webapp", error_services: "order-service,payment-service"}
+    docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
+
+  - name: jaeger_trace
+    title: Trace by id (one row per span)
+    description: >-
+      All spans of one trace from GET /api/v3/traces/{trace_id} (OTLP JSON): ids, parent ids,
+      service, operation, kind, start, duration, status, HTTP/DB attributes, exception message
+      and all attributes. trace_id required (IN fans out). Walk the call chain with
+      parent_span_id -> span_id; find the error origin (deepest error span) and the span with
+      the most self time.
+    kind: traces
+    request:
+      method: GET
+      path: "/api/v3/traces/{{ filters.trace_id | trim | lower }}"
+      query:
+        "{{ 'raw_traces' if env.JAEGER_LEGACY_PARAMS == 'true' else 'rawTraces' }}": "{{ 'true' if filters.raw else None }}"
+      accept_status: [404]
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Trace id (hex, 16 or 32 chars)", examples: [4bf92f3577b34da6a3ce929d0e0e4736]}
+      - {column: raw, type: BOOLEAN, description: "true = no clock-skew adjustment (spans exactly as stored)"}
+    response:
+      rows_path: "$.result.resourceSpans[*]"
+      expand:
+        - {explode: scopeSpans, as: ss}
+        - {explode: "@ss.spans", as: s}
+    columns:
+      - {name: trace_id, filter_only: true, description: "Trace id as requested"}
+      - {name: span_id, expr: "s.spanId | lower"}
+      - {name: parent_span_id, expr: "(s.parentSpanId | lower) if s.parentSpanId else None"}
+      - {name: service, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'service.name') | map(attribute='value.stringValue') | first"}
+      - {name: name, path: "@s.name"}
+      - {name: kind, expr: "(s.kind | replace('SPAN_KIND_', '') | lower) if s.kind is string else (['unspecified', 'internal', 'server', 'client', 'producer', 'consumer'][s.kind] if s.kind is number else 'unspecified')"}
+      - {name: ts, type: TIMESTAMP, path: "@s.startTimeUnixNano", transform: epoch_ns}
+      - {name: duration_ms, type: DOUBLE, expr: "((s.endTimeUnixNano or 0) | int - (s.startTimeUnixNano or 0) | int) / 1000000"}
+      - {name: status, expr: "((s.status.code | replace('STATUS_CODE_', '') | lower) if s.status.code is string else (['unset', 'ok', 'error'][s.status.code] if s.status.code is number else 'unset')) if not ((s.attributes or []) | selectattr('key', 'equalto', 'error') | map(attribute='value.boolValue') | select | list) else 'error'"}
+      - {name: status_message, path: "@s.status.message"}
+      - {name: is_root, type: BOOLEAN, expr: "not s.parentSpanId"}
+      - {name: http_route, expr: "(s.attributes or []) | selectattr('key', 'equalto', 'http.route') | map(attribute='value.stringValue') | first"}
+      - {name: http_method, expr: "(s.attributes or []) | selectattr('key', 'in', ['http.request.method', 'http.method']) | map(attribute='value.stringValue') | first"}
+      - {name: http_status_code, type: BIGINT, expr: "(s.attributes or []) | selectattr('key', 'in', ['http.response.status_code', 'http.status_code']) | map(attribute='value') | map('dictsort') | map('first') | map('last') | first"}
+      - {name: peer_service, expr: "(s.attributes or []) | selectattr('key', 'in', ['peer.service', 'server.address', 'net.peer.name', 'db.system', 'messaging.system']) | map(attribute='value.stringValue') | first"}
+      - {name: db_statement, expr: "(s.attributes or []) | selectattr('key', 'in', ['db.query.text', 'db.statement']) | map(attribute='value.stringValue') | first"}
+      - {name: exception_message, expr: "((s.events or []) | selectattr('name', 'equalto', 'exception') | map(attribute='attributes') | first or []) | selectattr('key', 'equalto', 'exception.message') | map(attribute='value.stringValue') | first"}
+      - {name: host, expr: "(_.resource.attributes or []) | selectattr('key', 'in', ['host.name', 'k8s.node.name', 'hostname']) | map(attribute='value.stringValue') | first"}
+      - {name: pod, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'k8s.pod.name') | map(attribute='value.stringValue') | first"}
+      - {name: env, expr: "(_.resource.attributes or []) | selectattr('key', 'in', ['deployment.environment.name', 'deployment.environment']) | map(attribute='value.stringValue') | first"}
+      - {name: version, expr: "(_.resource.attributes or []) | selectattr('key', 'equalto', 'service.version') | map(attribute='value.stringValue') | first"}
+      - {name: attributes, type: JSON, expr: "dict((s.attributes or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Span attributes {key: {stringValue|intValue|...: v}}"}
+      - {name: resource_attributes, type: JSON, expr: "dict((_.resource.attributes or []) | map('dictsort') | map('map', attribute='1') | map('list'))"}
+      - {name: events, type: JSON, path: "@s.events"}
+      - {name: raw, type: BOOLEAN, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "A missing trace returns 0 rows (HTTP 404 'No traces found'): check the id and the storage retention."
+      - "duration_ms includes children: self time = duration_ms - sum(children's duration_ms)."
+      - "Jaeger adjusts clock skew between hosts by default; set raw = true to see stored timestamps."
+    examples:
+      - sql: >-
+          WITH s AS (SELECT * FROM jaeger_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736')
+          SELECT p.service, p.name, p.duration_ms, p.duration_ms - coalesce(sum(c.duration_ms), 0) AS self_ms, p.status
+          FROM s p LEFT JOIN s c ON c.parent_span_id = p.span_id
+          GROUP BY p.service, p.name, p.duration_ms, p.status, p.span_id ORDER BY self_ms DESC
+        description: Span with the most self time (the hotspot).
+        verified: false
+      - sql: >-
+          WITH s AS (SELECT * FROM jaeger_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736')
+          SELECT e.service, e.name, e.http_status_code, e.status_message, e.exception_message
+          FROM s e WHERE e.status = 'error'
+            AND NOT EXISTS (SELECT 1 FROM s c WHERE c.parent_span_id = e.span_id AND c.status = 'error')
+        description: Error origin - the deepest failing span(s).
+        verified: false
+    fixtures:
+      - file: find_traces_checkout.json
+        filters: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736}
+        note: "GET /api/v3/traces/{trace_id} returns the same GRPCGatewayWrapper {result: TracesData} shape as FindTraces; OTLP/JSON encoding, schema-built."
+        expect_rows: 5
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, service: webapp, name: POST /api/orders, duration_ms: 1000.0, is_root: true, http_route: /api/orders, env: prod}
+      - file: find_traces_otlp_example.json
+        filters: {trace_id: 5b8efff798038103d269b633813fc60c}
+        note: "Official OTLP/JSON example (opentelemetry-proto examples/trace.json) in the GRPCGatewayWrapper."
+        expect_rows: 1
+        expect_columns: {span_id: eee19b7ec3c1b174, kind: server, service: my.service}
+    docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
+
+  - name: jaeger_dependencies
+    title: Service dependency graph
+    description: >-
+      Parent -> child service call counts aggregated over the window, from the Jaeger UI's GET
+      /api/dependencies?endTs=<ms>&lookback=<ms> (optionally only links touching service).
+      Use for "who calls whom" / blast radius. Links are computed by the storage backend
+      (in-memory/Badger on the fly; Cassandra/Elasticsearch need the spark-dependencies job).
+    kind: entities
+    request:
+      method: GET
+      path: /api/dependencies
+      query:
+        endTs: "{{ time.end | epoch_ms }}"
+        lookback: "{{ time.range_s * 1000 }}"
+        service: "{{ filters.service }}"
+    filters:
+      - {column: service, description: "Keep only links where this service is parent or child", examples: [order-service]}
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: parent, path: parent, description: "Calling service"}
+      - {name: child, path: child, description: "Called service"}
+      - {name: call_count, type: BIGINT, path: callCount, description: "Calls in the window"}
+      - {name: service, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Internal, undocumented API (the UI uses it) - stable in practice but not versioned."
+      - "Cassandra / Elasticsearch / OpenSearch deployments return nothing unless the spark-dependencies job runs; empty is then not proof of no calls."
+    examples:
+      - sql: "SELECT parent, child, call_count FROM jaeger_dependencies WHERE service = 'order-service' ORDER BY call_count DESC"
+        description: Who order-service calls and who calls it.
+        verified: false
+    fixtures:
+      - file: dependencies.json
+        filters: {service: order-service}
+        note: "Built from the v2.22.0 source (http_handler.go structuredResponse {data,total,limit,offset,errors} with ui.DependencyLink {parent, child, callCount}); the endpoint is internal and has no documented example."
+        expect_rows: 2
+        expect_columns: {parent: api-gateway, child: order-service, call_count: 1520, service: order-service}
+    docs_url: https://www.jaegertracing.io/docs/latest/architecture/apis/#service-dependencies-graph
+
+roles:
+  traces:
+    table: jaeger_traces
+    filters:
+      service: "{{ service }}"
+      status: "{{ 'error' if error_only else '' }}"
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, resource: name, duration_ms: duration_ms, status: status, status_code: http_status_code}
+  trace_detail:
+    table: jaeger_trace
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, parent_span_id: parent_span_id, resource: name, duration_ms: duration_ms, status: status, message: status_message}
+  services:
+    table: jaeger_services
+    columns: {service: service}
+  service_map:
+    table: jaeger_dependencies
+    filters: {service: "{{ service }}"}
+    columns: {parent: parent, child: child, value: call_count}

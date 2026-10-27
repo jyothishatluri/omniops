@@ -1,0 +1,22 @@
+{
+ "data": [
+  {
+   "eventId": "e801dc7d-f483-46e9-bcc9-410f08f96497",
+   "eventName": "InstalledCollectorOffline",
+   "details": {
+    "trackerId": "InstalledCollectorOffline",
+    "error": "Access denied to Amazon S3 bucket",
+    "description": "S3 collection is not working as expected because of access issues."
+   },
+   "resourceIdentity": {
+    "id": "C03E086C137F38B4",
+    "name": "prod-collector-1",
+    "type": "Collector"
+   },
+   "eventTime": "2018-10-16T09:10:00Z",
+   "subsystem": "Collection",
+   "severityLevel": "Error"
+  }
+ ],
+ "next": ""
+}

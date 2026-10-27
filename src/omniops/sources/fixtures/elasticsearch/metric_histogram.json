@@ -1,0 +1,32 @@
+{
+  "aggregations": {
+    "h": {
+      "buckets": [
+        {
+          "key_as_string": "2015-01-01",
+          "key": 1420070400000,
+          "doc_count": 3,
+          "m": {
+            "value": 75.0
+          }
+        },
+        {
+          "key_as_string": "2015-02-01",
+          "key": 1422748800000,
+          "doc_count": 2,
+          "m": {
+            "value": 128.33333333333334
+          }
+        },
+        {
+          "key_as_string": "2015-03-01",
+          "key": 1425168000000,
+          "doc_count": 2,
+          "m": {
+            "value": null
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "data_view": [
+    {
+      "id": "ff959d40-b880-11e8-a6d9-e546fe2bba5f",
+      "name": "Kibana Sample Data eCommerce",
+      "namespaces": [
+        "default"
+      ],
+      "title": "kibana_sample_data_ecommerce",
+      "typeMeta": {}
+    },
+    {
+      "id": "d3d7af60-4c81-11e8-b3d7-01146121b73d",
+      "name": "Kibana Sample Data Flights",
+      "namespaces": [
+        "default"
+      ],
+      "title": "kibana_sample_data_flights"
+    },
+    {
+      "id": "90943e30-9a47-11e8-b64d-95841ca0b247",
+      "name": "Kibana Sample Data Logs",
+      "namespaces": [
+        "default"
+      ],
+      "title": "kibana_sample_data_logs"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+ "kind": "PersistentVolumeList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "index-store",
+    "uid": "7d3d0e1f-0000-4000-8000-000000000023",
+    "creationTimestamp": "2026-10-01T11:40:30Z",
+    "labels": {
+     "app": "index-store"
+    }
+   },
+   "spec": {
+    "capacity": {
+     "storage": "1Gi"
+    },
+    "local": {
+     "path": "/mnt/nvme-archive/index"
+    },
+    "accessModes": [
+     "ReadWriteOnce"
+    ],
+    "claimRef": {
+     "kind": "PersistentVolumeClaim",
+     "namespace": "batch",
+     "name": "index-store",
+     "uid": "6c2c9d0e-0000-4000-8000-000000000022",
+     "apiVersion": "v1"
+    },
+    "persistentVolumeReclaimPolicy": "Retain",
+    "storageClassName": "local-archive",
+    "volumeMode": "Filesystem",
+    "nodeAffinity": {
+     "required": {
+      "nodeSelectorTerms": [
+       {
+        "matchExpressions": [
+         {
+          "key": "storage-tier",
+          "operator": "In",
+          "values": [
+           "nvme-archive"
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   "status": {
+    "phase": "Bound",
+    "lastPhaseTransitionTime": "2026-10-01T11:40:31Z"
+   }
+  }
+ ]
+}

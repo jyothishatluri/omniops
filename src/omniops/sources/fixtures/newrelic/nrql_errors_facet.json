@@ -1,0 +1,34 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {
+              "appName": "checkout-service",
+              "error.class": "java.net.SocketTimeoutException",
+              "transactionName": "WebTransaction/SpringController/checkout (POST)",
+              "occurrences": 412,
+              "message": "Read timed out",
+              "first_seen": 1759321815000,
+              "last_seen": 1759323590000,
+              "sample_trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "hosts": 3
+            },
+            {
+              "appName": "checkout-service",
+              "error.class": "org.springframework.dao.QueryTimeoutException",
+              "transactionName": "WebTransaction/SpringController/cart (GET)",
+              "occurrences": 17,
+              "message": "statement timeout",
+              "first_seen": 1759322800000,
+              "last_seen": 1759323100000,
+              "sample_trace_id": "0af7651916cd43dd8448eb211c80319c",
+              "hosts": 1
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+ "historical_anomalies": [
+  {
+   "id": "0f8d0f3a-3f8b-5f2b-8f2b-1f2b3f4b5f6b",
+   "started_at": 1741089600,
+   "ended_at": 1741093200,
+   "measurement": 0.42,
+   "normal_range": {"lower": 0.01, "upper": 0.08}
+  }
+ ],
+ "links": {"next": null}
+}

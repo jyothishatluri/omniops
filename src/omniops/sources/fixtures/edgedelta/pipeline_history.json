@@ -1,0 +1,20 @@
+[
+  {
+    "config_id": "3c5b2f8e-1a4d-4b6e-9f70-8e9d0a1b2c3d",
+    "org_id": "00000000-0000-0000-0000-000000000000",
+    "author": "alice@example.com",
+    "description": "drop debug logs from checkout",
+    "status": "Deployed",
+    "timestamp": 1790851931000,
+    "content": "version: v3\nsettings:\n  tag: prod-k8s\n"
+  },
+  {
+    "config_id": "3c5b2f8e-1a4d-4b6e-9f70-8e9d0a1b2c3d",
+    "org_id": "00000000-0000-0000-0000-000000000000",
+    "author": "bob@example.com",
+    "description": "add mask processor for card numbers",
+    "status": "Not Deployed",
+    "timestamp": 1790765531000,
+    "content": "version: v3\nsettings:\n  tag: prod-k8s\n"
+  }
+]

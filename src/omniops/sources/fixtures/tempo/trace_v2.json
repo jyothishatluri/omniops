@@ -1,0 +1,374 @@
+{
+  "trace": {
+    "resourceSpans": [
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "webapp"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "prod"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "1.4.2"
+              }
+            },
+            {
+              "key": "k8s.pod.name",
+              "value": {
+                "stringValue": "webapp-7d9f8c6b5-x2x4q"
+              }
+            },
+            {
+              "key": "k8s.namespace.name",
+              "value": {
+                "stringValue": "shop"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "io.opentelemetry.http",
+              "version": "1.30.0"
+            },
+            "spans": [
+              {
+                "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+                "spanId": "qqqqqqqqqqo=",
+                "name": "POST /api/orders",
+                "kind": "SPAN_KIND_SERVER",
+                "startTimeUnixNano": "1792478178000000000",
+                "endTimeUnixNano": "1792478179000000000",
+                "attributes": [
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/api/orders"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "500"
+                    }
+                  }
+                ],
+                "status": {}
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "api-gateway"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "prod"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "1.4.2"
+              }
+            },
+            {
+              "key": "k8s.pod.name",
+              "value": {
+                "stringValue": "api-gateway-7d9f8c6b5-x2x4q"
+              }
+            },
+            {
+              "key": "k8s.namespace.name",
+              "value": {
+                "stringValue": "shop"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "io.opentelemetry.http",
+              "version": "1.30.0"
+            },
+            "spans": [
+              {
+                "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+                "spanId": "u7u7u7u7u7s=",
+                "name": "POST /api/orders",
+                "kind": "SPAN_KIND_SERVER",
+                "startTimeUnixNano": "1792478178005000000",
+                "endTimeUnixNano": "1792478178995000000",
+                "attributes": [
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/api/orders"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "500"
+                    }
+                  }
+                ],
+                "status": {},
+                "parentSpanId": "qqqqqqqqqqo="
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "order-service"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "prod"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "1.4.2"
+              }
+            },
+            {
+              "key": "k8s.pod.name",
+              "value": {
+                "stringValue": "order-service-7d9f8c6b5-x2x4q"
+              }
+            },
+            {
+              "key": "k8s.namespace.name",
+              "value": {
+                "stringValue": "shop"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "io.opentelemetry.http",
+              "version": "1.30.0"
+            },
+            "spans": [
+              {
+                "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+                "spanId": "zMzMzMzMzMw=",
+                "name": "handle POST /api/orders",
+                "kind": "SPAN_KIND_SERVER",
+                "startTimeUnixNano": "1792478178010000000",
+                "endTimeUnixNano": "1792478178910000000",
+                "attributes": [
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/api/orders"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "500"
+                    }
+                  }
+                ],
+                "status": {
+                  "code": "STATUS_CODE_ERROR",
+                  "message": "payment failed"
+                },
+                "parentSpanId": "u7u7u7u7u7s="
+              },
+              {
+                "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+                "spanId": "3d3d3d3d3d0=",
+                "name": "call payment-service",
+                "kind": "SPAN_KIND_CLIENT",
+                "startTimeUnixNano": "1792478178020000000",
+                "endTimeUnixNano": "1792478178870000000",
+                "attributes": [
+                  {
+                    "key": "peer.service",
+                    "value": {
+                      "stringValue": "payment-service"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "502"
+                    }
+                  }
+                ],
+                "status": {
+                  "code": "STATUS_CODE_ERROR",
+                  "message": "502 Bad Gateway"
+                },
+                "parentSpanId": "zMzMzMzMzMw="
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "payment-service"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "prod"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "2.0.1"
+              }
+            },
+            {
+              "key": "k8s.pod.name",
+              "value": {
+                "stringValue": "payment-service-7d9f8c6b5-x2x4q"
+              }
+            },
+            {
+              "key": "k8s.namespace.name",
+              "value": {
+                "stringValue": "shop"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "io.opentelemetry.http",
+              "version": "1.30.0"
+            },
+            "spans": [
+              {
+                "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+                "spanId": "7u7u7u7u7u4=",
+                "name": "handle POST /api/payments",
+                "kind": "SPAN_KIND_SERVER",
+                "startTimeUnixNano": "1792478178025000000",
+                "endTimeUnixNano": "1792478178855000000",
+                "attributes": [
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/api/payments"
+                    }
+                  },
+                  {
+                    "key": "http.request.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.response.status_code",
+                    "value": {
+                      "intValue": "502"
+                    }
+                  },
+                  {
+                    "key": "error.type",
+                    "value": {
+                      "stringValue": "TimeoutError"
+                    }
+                  }
+                ],
+                "status": {
+                  "code": "STATUS_CODE_ERROR",
+                  "message": "card processor timeout"
+                },
+                "parentSpanId": "3d3d3d3d3d0=",
+                "events": [
+                  {
+                    "timeUnixNano": "1792478178850000000",
+                    "name": "exception",
+                    "attributes": [
+                      {
+                        "key": "exception.type",
+                        "value": {
+                          "stringValue": "TimeoutError"
+                        }
+                      },
+                      {
+                        "key": "exception.message",
+                        "value": {
+                          "stringValue": "card processor did not answer within 800ms"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

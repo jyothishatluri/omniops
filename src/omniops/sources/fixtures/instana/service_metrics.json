@@ -1,0 +1,33 @@
+{
+  "items": [
+    {
+      "service": {
+        "id": "c467ca0fa21477fee3cde75a140b2963307388a7",
+        "label": "discount",
+        "types": [
+          "HTTP"
+        ],
+        "technologies": [
+          "springbootApplicationContainer"
+        ],
+        "snapshotIds": [],
+        "entityType": "SERVICE"
+      },
+      "metrics": {
+        "endpoints.distinct_count": [
+          [
+            1669190580000,
+            4
+          ]
+        ]
+      }
+    }
+  ],
+  "page": 1,
+  "pageSize": 1,
+  "totalHits": 1,
+  "adjustedTimeframe": {
+    "windowSize": 3600000,
+    "to": 1669190580000
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "data": {
+    "actor": {
+      "entitySearch": {
+        "count": 2,
+        "results": {
+          "nextCursor": null,
+          "entities": [
+            {
+              "guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "name": "checkout-service",
+              "entityType": "APM_APPLICATION_ENTITY",
+              "domain": "APM",
+              "type": "APPLICATION",
+              "accountId": 1,
+              "reporting": true,
+              "permalink": "https://one.newrelic.com/redirect/entity/MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "lastReportingChangeAt": 1759300000000,
+              "alertSeverity": "CRITICAL",
+              "tags": [
+                {"key": "environment", "values": ["production"]},
+                {"key": "language", "values": ["java"]},
+                {"key": "team", "values": ["payments"]}
+              ],
+              "applicationId": 3216664,
+              "language": "java",
+              "apmSummary": {
+                "apdexScore": 0.82,
+                "errorRate": 0.043,
+                "hostCount": 3,
+                "instanceCount": 6,
+                "responseTimeAverage": 0.412,
+                "throughput": 1830.5,
+                "webResponseTimeAverage": 0.398,
+                "webThroughput": 1790.0
+              }
+            },
+            {
+              "guid": "MXxJTkZSQXxOQXwyNzQ4NzYxMTIzNDU2Nzg5",
+              "name": "ip-10-0-3-17.ec2.internal",
+              "entityType": "INFRASTRUCTURE_HOST_ENTITY",
+              "domain": "INFRA",
+              "type": "HOST",
+              "accountId": 1,
+              "reporting": true,
+              "permalink": "https://one.newrelic.com/redirect/entity/MXxJTkZSQXxOQXwyNzQ4NzYxMTIzNDU2Nzg5",
+              "lastReportingChangeAt": 1759200000000,
+              "alertSeverity": "NOT_ALERTING",
+              "tags": [
+                {"key": "aws.awsRegion", "values": ["us-east-1"]},
+                {"key": "env", "values": ["production"]}
+              ],
+              "hostSummary": {
+                "cpuUtilizationPercent": 91.4,
+                "diskUsedPercent": 55.2,
+                "memoryUsedPercent": 78.9,
+                "networkReceiveRate": 1048576.0,
+                "networkTransmitRate": 524288.0,
+                "servicesCount": 12
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

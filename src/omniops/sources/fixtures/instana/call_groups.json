@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "name": "ratings",
+      "timestamp": 1688366520000,
+      "cursor": {
+        "@class": ".IngestionOffsetCursor",
+        "ingestionTime": 1688980829000,
+        "offset": 1
+      },
+      "metrics": {
+        "latency.p75.360": [
+          [
+            1688366520000,
+            1
+          ]
+        ]
+      }
+    }
+  ],
+  "canLoadMore": false,
+  "totalHits": 1,
+  "totalRepresentedItemCount": 1,
+  "totalRetainedItemCount": 1,
+  "adjustedTimeframe": {
+    "windowSize": 360000,
+    "to": 1688366880000
+  }
+}

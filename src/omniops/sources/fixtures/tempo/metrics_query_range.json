@@ -1,0 +1,104 @@
+{
+  "series": [
+    {
+      "labels": [
+        {
+          "key": "resource.service.name",
+          "value": {
+            "stringValue": "order-service"
+          }
+        },
+        {
+          "key": "p",
+          "value": {
+            "doubleValue": 0.99
+          }
+        }
+      ],
+      "samples": [
+        {
+          "timestampMs": "1790852400000",
+          "value": 1.296
+        },
+        {
+          "timestampMs": "1790852460000",
+          "value": 1.41
+        },
+        {
+          "timestampMs": "1790852520000"
+        }
+      ],
+      "exemplars": [
+        {
+          "labels": [
+            {
+              "key": "trace:id",
+              "value": {
+                "stringValue": "4bf92f3577b34da6a3ce929d0e0e4736"
+              }
+            },
+            {
+              "key": "span:id",
+              "value": {
+                "stringValue": "00f067aa0ba902b7"
+              }
+            }
+          ],
+          "value": 1.41,
+          "timestampMs": "1790852460000"
+        },
+        {
+          "labels": [
+            {
+              "key": "trace:id",
+              "value": {
+                "stringValue": "b7ad6b7169203331"
+              }
+            },
+            {
+              "key": "span:id",
+              "value": {
+                "stringValue": "0af7651916cd43dd"
+              }
+            }
+          ],
+          "value": 1.296,
+          "timestampMs": "1790852400000"
+        }
+      ]
+    },
+    {
+      "labels": [
+        {
+          "key": "resource.service.name",
+          "value": {
+            "stringValue": "payment-service"
+          }
+        },
+        {
+          "key": "p",
+          "value": {
+            "doubleValue": 0.99
+          }
+        }
+      ],
+      "samples": [
+        {
+          "timestampMs": "1790852400000",
+          "value": 0.83
+        },
+        {
+          "timestampMs": "1790852460000",
+          "value": 0.9
+        }
+      ]
+    }
+  ],
+  "metrics": {
+    "inspectedBytes": "1048576",
+    "inspectedSpans": "1200",
+    "totalBlocks": 4,
+    "completedJobs": 4,
+    "totalJobs": 4
+  }
+}

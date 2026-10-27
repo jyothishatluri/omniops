@@ -1,0 +1,11 @@
+{
+  "data": {
+    "id": "0",
+    "type": "timeseries_response",
+    "attributes": {
+      "series": [],
+      "times": [],
+      "values": []
+    }
+  }
+}

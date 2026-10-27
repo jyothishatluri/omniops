@@ -1,0 +1,14 @@
+{
+  "metrics": {
+    "latency.mean": [
+      [
+        1669190580000,
+        106.85055708882756
+      ]
+    ]
+  },
+  "adjustedTimeframe": {
+    "windowSize": 3600000,
+    "to": 1669190580000
+  }
+}

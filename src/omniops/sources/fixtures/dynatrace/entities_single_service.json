@@ -1,0 +1,128 @@
+{
+ "totalCount": 1,
+ "pageSize": 50,
+ "nextPageKey": null,
+ "entities": [
+  {
+   "entityId": "SERVICE-1125C375A187D27A",
+   "displayName": "dotNetBackend_easyTravel_x64",
+   "firstSeenTms": 1424310498896,
+   "lastSeenTms": 1590609632865,
+   "properties": {
+    "serviceType": "WEB_REQUEST_SERVICE",
+    "internalName": "dotNetBackend_easyTravel_x64",
+    "webServerName": "dotNetBackend_easyTravel_x64",
+    "softwareTechnologies": [
+     {
+      "edition": "FullCLR",
+      "version": "2.0.50727"
+     },
+     {
+      "type": "DOTNET",
+      "edition": ".NET Framework",
+      "version": "3.5.1.0"
+     },
+     {
+      "type": "ADO_NET",
+      "edition": "System.Data",
+      "version": "2.0.50727.8751"
+     },
+     {
+      "type": "ASP_DOTNET",
+      "version": "3.5.1.0"
+     },
+     {
+      "type": "IIS_APP_POOL",
+      "version": "10.0.14393.0"
+     },
+     {
+      "type": "DOTNET_REMOTING",
+      "version": "2.0.50727.8771"
+     }
+    ],
+    "serviceTechnologyTypes": [
+     "IIS app pool",
+     "ASP.NET",
+     "DotNet"
+    ],
+    "mainServiceSoftwareTech": {
+     "type": "ASP_DOTNET"
+    },
+    "contextRoot": "/",
+    "agentTechnologyType": "DOTNET"
+   },
+   "tags": [
+    {
+     "context": "CONTEXTLESS",
+     "key": "customService",
+     "stringRepresentation": "customService"
+    },
+    {
+     "context": "CONTEXTLESS",
+     "key": "easytravel",
+     "value": "backend",
+     "stringRepresentation": "easytravel:backend",
+     "source": "Auto tags",
+     "sourceSetting": "api/v2/settings/objects/vu9U3hXa3q0AAAABABlidWlsdGluOnRhZ3MuYXV0by10YWdnaW5nAAZ0ZW5hbnQABnRlbmFudAAkNGQ5YTFhMTUtZmY1ZS0zNDE5LWE2MDUtOTlmOWJkZTFhODNmvu9U3hXa3q0"
+    }
+   ],
+   "mangementZones": [
+    {
+     "id": "2827032493241090264",
+     "name": "allServices"
+    },
+    {
+     "id": "9130632296508575249",
+     "name": "Easytravel",
+     "sourceSetting": "api/v2/settings/objects/vu9U3hXa3q0AAAABABhidWlsdGluOm1hbmFnZW1lbnQtem9uZXMABnRlbmFudAAGdGVuYW50ACQ1MTNkNWNkMC0zZjEyLTNiOTUtODZlMi05YjU4ODk0ODM4MWO-71TeFdrerQ"
+    }
+   ],
+   "fromRelationships": {
+    "calls": [
+     {
+      "id": "SERVICE-775060208AAA1058",
+      "type": "SERVICE"
+     },
+     {
+      "id": "SERVICE-6737CDED8F9BF969",
+      "type": "SERVICE"
+     }
+    ],
+    "runsOn": [
+     {
+      "id": "PROCESS_GROUP-0A9A52EA262BC039",
+      "type": "PROCESS_GROUP"
+     }
+    ],
+    "runsOnHost": [
+     {
+      "id": "HOST-B64B6B9CB11E2244",
+      "type": "HOST"
+     },
+     {
+      "id": "HOST-CF61BC45E6282234",
+      "type": "HOST"
+     }
+    ],
+    "runsOnProcessGroupInstance": [
+     {
+      "id": "PROCESS_GROUP_INSTANCE-DE765F657721AF59",
+      "type": "PROCESS_GROUP_INSTANCE"
+     }
+    ]
+   },
+   "toRelationships": {
+    "calls": [
+     {
+      "id": "SERVICE-D20E300A0A6814EF",
+      "type": "SERVICE"
+     },
+     {
+      "id": "SERVICE-7675DAA7464128F8",
+      "type": "SERVICE"
+     }
+    ]
+   }
+  }
+ ]
+}

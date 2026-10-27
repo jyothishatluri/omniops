@@ -1,0 +1,110 @@
+{
+ "results": [
+  {
+   "content": {
+    "id": "123456",
+    "type": "page",
+    "status": "current",
+    "title": "Checkout service runbook",
+    "space": {
+     "id": 98305,
+     "key": "OPS",
+     "name": "Operations",
+     "type": "global",
+     "status": "current",
+     "_expandable": {},
+     "_links": {
+      "webui": "/spaces/OPS"
+     }
+    },
+    "version": {
+     "by": {
+      "type": "known",
+      "accountId": "5b10a2844c20165700ede21g",
+      "accountType": "atlassian",
+      "email": "",
+      "publicName": "Mia Krystof",
+      "displayName": "Mia Krystof",
+      "isGuest": false,
+      "_expandable": {},
+      "_links": {}
+     },
+     "when": "2026-09-28T14:03:11.000Z",
+     "friendlyWhen": "Sep 28, 2026",
+     "message": "",
+     "number": 17,
+     "minorEdit": false,
+     "_expandable": {},
+     "_links": {}
+    },
+    "_expandable": {},
+    "_links": {
+     "webui": "/spaces/OPS/pages/123456/Checkout+service+runbook",
+     "self": "https://your-domain.atlassian.net/wiki/rest/api/content/123456",
+     "tinyui": "/x/QAAB"
+    }
+   },
+   "title": "@@@hl@@@Checkout@@@endhl@@@ service runbook",
+   "excerpt": "If the @@@hl@@@checkout@@@endhl@@@ API returns 502, check the payments-db connection pool first...",
+   "url": "/spaces/OPS/pages/123456/Checkout+service+runbook",
+   "resultGlobalContainer": {
+    "title": "Operations",
+    "displayUrl": "/spaces/OPS"
+   },
+   "breadcrumbs": [],
+   "entityType": "content",
+   "iconCssClass": "aui-icon content-type-page",
+   "lastModified": "2026-09-28T14:03:11.000Z",
+   "friendlyLastModified": "Sep 28, 2026",
+   "score": 1.0
+  },
+  {
+   "content": {
+    "id": "229377",
+    "type": "blogpost",
+    "status": "current",
+    "title": "Postmortem: checkout outage 2026-08-14",
+    "space": {
+     "id": 98305,
+     "key": "OPS",
+     "name": "Operations",
+     "type": "global",
+     "status": "current",
+     "_expandable": {},
+     "_links": {
+      "webui": "/spaces/OPS"
+     }
+    },
+    "_expandable": {},
+    "_links": {
+     "webui": "/spaces/OPS/blog/2026/08/15/229377/Postmortem+checkout+outage+2026-08-14"
+    }
+   },
+   "title": "Postmortem: @@@hl@@@checkout@@@endhl@@@ outage 2026-08-14",
+   "excerpt": "Root cause: connection pool exhaustion after the 4.12 deploy...",
+   "url": "/spaces/OPS/blog/2026/08/15/229377/Postmortem+checkout+outage+2026-08-14",
+   "resultGlobalContainer": {
+    "title": "Operations",
+    "displayUrl": "/spaces/OPS"
+   },
+   "breadcrumbs": [],
+   "entityType": "content",
+   "iconCssClass": "aui-icon content-type-blogpost",
+   "lastModified": "2026-08-15T09:12:40.000Z",
+   "friendlyLastModified": "Aug 15, 2026",
+   "score": 0.83
+  }
+ ],
+ "start": 0,
+ "limit": 50,
+ "size": 2,
+ "totalSize": 2,
+ "cqlQuery": "text ~ \"checkout\"",
+ "searchDuration": 38,
+ "archivedResultCount": 0,
+ "_links": {
+  "base": "https://your-domain.atlassian.net/wiki",
+  "context": "/wiki",
+  "self": "https://your-domain.atlassian.net/wiki/rest/api/search?cql=text+~+%22checkout%22"
+ }
+}

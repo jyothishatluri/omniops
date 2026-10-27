@@ -1,0 +1,160 @@
+// OmniOps Arena telemetry: Kubernetes metrics, pod logs and events into the in-cluster LGTM stack.
+// observability.sh renders this file (plus postgres.alloy once the monitoring credential is verified)
+// into ConfigMap alloy-config. Application traces/metrics/logs reach LGTM through the shop's own
+// OpenTelemetry collector (collector.yaml), not through Alloy.
+
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+// ------------------------------------------------------------------------------------- metrics
+
+prometheus.remote_write "lgtm" {
+  endpoint {
+    url = "http://lgtm.observability.svc.cluster.local:9090/api/v1/write"
+  }
+  external_labels = {
+    cluster = "kind-incident-bench",
+  }
+}
+
+prometheus.scrape "kube_state_metrics" {
+  targets         = [{"__address__" = "kube-state-metrics.observability.svc.cluster.local:8080"}]
+  job_name        = "kube-state-metrics"
+  honor_labels    = true
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.lgtm.receiver]
+}
+
+discovery.kubernetes "nodes" {
+  role = "node"
+}
+
+// kubelet cAdvisor through the API server proxy (no node ports or host access needed)
+discovery.relabel "cadvisor" {
+  targets = discovery.kubernetes.nodes.targets
+
+  rule {
+    target_label = "__address__"
+    replacement  = "kubernetes.default.svc:443"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_node_name"]
+    regex         = "(.+)"
+    target_label  = "__metrics_path__"
+    replacement   = "/api/v1/nodes/$1/proxy/metrics/cadvisor"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_node_name"]
+    target_label  = "node"
+  }
+}
+
+prometheus.scrape "cadvisor" {
+  targets           = discovery.relabel.cadvisor.output
+  job_name          = "cadvisor"
+  scheme            = "https"
+  bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  scrape_interval   = "30s"
+  forward_to        = [prometheus.relabel.cadvisor.receiver]
+
+  tls_config {
+    ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+  }
+}
+
+// keep the container series investigations use; drop the rest to keep the laptop TSDB small
+prometheus.relabel "cadvisor" {
+  forward_to = [prometheus.remote_write.lgtm.receiver]
+
+  rule {
+    source_labels = ["__name__"]
+    regex         = "container_(cpu_usage_seconds_total|cpu_cfs_periods_total|cpu_cfs_throttled_periods_total|memory_working_set_bytes|memory_rss|memory_usage_bytes|spec_memory_limit_bytes|oom_events_total|fs_reads_bytes_total|fs_writes_bytes_total|network_receive_bytes_total|network_transmit_bytes_total|network_receive_errors_total|network_transmit_errors_total)"
+    action        = "keep"
+  }
+}
+
+prometheus.exporter.redis "datastore" {
+  redis_addr = "redis.datastore.svc.cluster.local:6379"
+}
+
+prometheus.scrape "redis" {
+  targets         = prometheus.exporter.redis.datastore.targets
+  job_name        = "redis"
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.lgtm.receiver]
+}
+
+// ---------------------------------------------------------------------------------------- logs
+
+loki.write "lgtm" {
+  endpoint {
+    url = "http://lgtm.observability.svc.cluster.local:3100/loki/api/v1/push"
+  }
+  external_labels = {
+    cluster = "kind-incident-bench",
+  }
+}
+
+discovery.kubernetes "pods" {
+  role = "pod"
+}
+
+discovery.relabel "pod_logs" {
+  targets = discovery.kubernetes.pods.targets
+
+  // the observability stack itself is not part of the system under investigation
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    regex         = "observability"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "pod"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_node_name"]
+    target_label  = "node"
+  }
+
+  // app = first non-empty of app.kubernetes.io/name, app, app.kubernetes.io/component
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name", "__meta_kubernetes_pod_label_app", "__meta_kubernetes_pod_label_app_kubernetes_io_component"]
+    separator     = ";"
+    regex         = ";*([^;]+).*"
+    target_label  = "app"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_container_name"]
+    separator     = "/"
+    target_label  = "job"
+  }
+}
+
+loki.source.kubernetes "pods" {
+  targets    = discovery.relabel.pod_logs.output
+  forward_to = [loki.write.lgtm.receiver]
+}
+
+loki.source.kubernetes_events "events" {
+  job_name   = "integrations/kubernetes/eventhandler"
+  log_format = "logfmt"
+  forward_to = [loki.write.lgtm.receiver]
+}

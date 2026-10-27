@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "application": {
+        "id": "Jv83WpUmSKiiCWIpi-reSQ",
+        "label": "demoApp",
+        "boundaryScope": "ALL",
+        "entityType": "APPLICATION"
+      },
+      "metrics": {
+        "latency.mean": [
+          [
+            1669190580000,
+            4
+          ]
+        ]
+      }
+    }
+  ],
+  "page": 1,
+  "pageSize": 1,
+  "totalHits": 1616,
+  "adjustedTimeframe": {
+    "windowSize": 3600000,
+    "to": 1646037120000
+  }
+}

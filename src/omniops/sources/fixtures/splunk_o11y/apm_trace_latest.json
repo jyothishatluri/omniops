@@ -1,0 +1,17 @@
+[
+ {
+  "durationMicros": 0,
+  "logs": [
+   {
+    "timestamp": "string"
+   }
+  ],
+  "objectType": "string",
+  "operationName": "string",
+  "parentId": "string",
+  "serviceName": "string",
+  "spanId": "string",
+  "startTime": "string",
+  "traceId": "string"
+ }
+]

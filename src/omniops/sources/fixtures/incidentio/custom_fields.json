@@ -1,0 +1,26 @@
+{
+ "custom_fields": [
+  {
+   "catalog_type_id": "01FCNDV6P870EA6S7TK1DSYDG0",
+   "created_at": "2021-08-17T13:28:57.801578Z",
+   "description": "Which team is impacted by this issue",
+   "field_type": "single_select",
+   "filter_by": {
+    "catalog_attribute_id": "01H2FW182TAH0NHEVBY34SCAK0",
+    "custom_field_id": "01H2FW182TAH0NHEVBY34SCAK0"
+   },
+   "fixed_filter": {
+    "catalog_attribute_id": "01H2FW182TAH0NHEVBY34SCAK0",
+    "values": [
+     "01H2FW182TAH0NHEVBY34SCAK0",
+     "01H2FW182TAH0NHEVBY34SCAK1"
+    ]
+   },
+   "group_by_catalog_attribute_id": "01FCNDV6P870EA6S7TK1DSYDG0",
+   "helptext_catalog_attribute_id": "01H2FW182TAH0NHEVBY34SCAK0",
+   "id": "01FCNDV6P870EA6S7TK1DSYDG0",
+   "name": "Affected Team",
+   "updated_at": "2021-08-17T13:28:57.801578Z"
+  }
+ ]
+}

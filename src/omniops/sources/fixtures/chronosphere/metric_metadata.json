@@ -1,0 +1,8 @@
+{
+ "metadata": {
+  "name": "http_requests_total",
+  "type": "CUMULATIVE_COUNTER",
+  "description": "Total number of HTTP requests by status code and route.",
+  "source": "PROMETHEUS"
+ }
+}

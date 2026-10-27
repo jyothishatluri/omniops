@@ -1,0 +1,59 @@
+{
+ "TraceSummaries": [
+  {
+   "HasError": false,
+   "Http": {
+    "HttpStatus": 200,
+    "ClientIp": "205.255.255.183",
+    "HttpURL": "http://scorekeep.elasticbeanstalk.com/api/session",
+    "UserAgent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36",
+    "HttpMethod": "POST"
+   },
+   "Users": [],
+   "HasFault": false,
+   "Annotations": {},
+   "ResponseTime": 0.084,
+   "Duration": 0.084,
+   "Id": "1-59602606-a43a1ac52fc7ee0eea12a82c",
+   "HasThrottle": false
+  },
+  {
+   "HasError": false,
+   "Http": {
+    "HttpStatus": 200,
+    "ClientIp": "205.255.255.183",
+    "HttpURL": "http://scorekeep.elasticbeanstalk.com/api/user",
+    "UserAgent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36",
+    "HttpMethod": "POST"
+   },
+   "Users": [
+    {
+     "UserName": "5M388M1E"
+    }
+   ],
+   "HasFault": false,
+   "Annotations": {
+    "UserID": [
+     {
+      "AnnotationValue": {
+       "StringValue": "5M388M1E"
+      }
+     }
+    ],
+    "Name": [
+     {
+      "AnnotationValue": {
+       "StringValue": "Ola"
+      }
+     }
+    ]
+   },
+   "ResponseTime": 3.232,
+   "Duration": 3.232,
+   "Id": "1-59602603-23fc5b688855d396af79b496",
+   "HasThrottle": false
+  }
+ ],
+ "ApproximateTime": 1499473304.0,
+ "TracesProcessedCount": 2
+}

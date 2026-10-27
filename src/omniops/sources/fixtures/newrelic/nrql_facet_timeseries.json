@@ -1,0 +1,33 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {
+              "beginTimeSeconds": 1548946238,
+              "endTimeSeconds": 1548948038,
+              "facet": "Origami Portal",
+              "appName": "Origami Portal",
+              "count": 601
+            },
+            {
+              "beginTimeSeconds": 1548948038,
+              "endTimeSeconds": 1548949838,
+              "facet": "Origami Portal",
+              "appName": "Origami Portal",
+              "count": 595
+            },
+            {
+              "beginTimeSeconds": 1548949838,
+              "endTimeSeconds": 1548951638,
+              "facet": "Origami Portal",
+              "appName": "Origami Portal",
+              "count": 550
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+[
+  {
+    "ip": "10.11.1.225",
+    "heap.percent": "31",
+    "ram.percent": "32",
+    "cpu": "0",
+    "load_5m": "0.00",
+    "load_15m": "0.00",
+    "node.role": "di",
+    "node.roles": "data,ingest,ml",
+    "cluster_manager": "-",
+    "name": "data-e5b89ad7"
+  }
+]

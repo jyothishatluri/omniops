@@ -1,0 +1,15 @@
+{
+ "inbound": [
+  "inbound_service"
+ ],
+ "outbound": [
+  "outbound_service"
+ ],
+ "services": [
+  {
+   "inferred": false,
+   "serviceName": "service_five",
+   "type": "database"
+  }
+ ]
+}

@@ -1,0 +1,16 @@
+{
+  "metricDescriptors": [
+    {
+      "name": "projects/PROJECT_ID/metricDescriptors/compute.googleapis.com/firewall/dropped_bytes_count",
+      "type": "compute.googleapis.com/firewall/dropped_bytes_count",
+      "description": "Count of incoming bytes dropped by the firewall.",
+      "displayName": "Dropped bytes"
+    },
+    {
+      "name": "projects/PROJECT_ID/metricDescriptors/compute.googleapis.com/firewall/dropped_packets_count",
+      "type": "compute.googleapis.com/firewall/dropped_packets_count",
+      "description": "Count of incoming packets dropped by the firewall.",
+      "displayName": "Dropped packets"
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "dashboard": {
+    "id": 7,
+    "editable": true,
+    "schemaVersion": 41,
+    "version": 1,
+    "refresh": "",
+    "timezone": "browser",
+    "tags": [],
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Deployments",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "enable": true,
+          "titleFormat": "{{ service }} {{ version }}",
+          "textFormat": "{{ message }}",
+          "expr": "{job=\"payment-service\"} | json | event=\"deployment\""
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "User P95 Latency",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"user-service\"}[5m])) by (le))",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Cache Lag",
+        "type": "stat",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "targets": [
+          {
+            "expr": "max_over_time(service_retry_queue_depth{job=\"payment-service\"}[$__range])",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Warning Logs",
+        "type": "logs",
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 8
+        },
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "targets": [
+          {
+            "expr": "{job=\"payment-service\",level=\"warn\"} | json",
+            "refId": "A"
+          }
+        ]
+      }
+    ],
+    "uid": "user-access-cache-review",
+    "title": "User Access Cache Review"
+  },
+  "meta": {
+    "isStarred": false,
+    "url": "/d/user-access-cache-review/user-access-cache-review",
+    "folderId": 0,
+    "folderUid": "",
+    "slug": "user-access-cache-review"
+  }
+}

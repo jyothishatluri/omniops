@@ -1,0 +1,105 @@
+{
+ "count": 1,
+ "results": [
+  {
+   "created": 1556825430000,
+   "creator": "AAXYAAAAAZ3",
+   "description": "My SLO test",
+   "id": "FrvcMakAAAA",
+   "inputs": {
+    "goodEventsLabel": "A",
+    "programText": "A = data('spans.count', filter('sf_error', 'false'))\nB = data('spans.count')\n",
+    "totalEventsLabel": "B"
+   },
+   "lastUpdated": 1556825430000,
+   "lastUpdatedBy": "AAXYAAAAAZ3",
+   "metadata": [
+    "sf_sloMetricName:spans.count",
+    "sf_service:*"
+   ],
+   "name": "Test SLO",
+   "targets": [
+    {
+     "compliancePeriod": "30d",
+     "slo": 99.99,
+     "sloAlertRules": [
+      {
+       "rules": [
+        {
+         "description": "Breach alert rule",
+         "detectLabel": "label",
+         "disabled": false,
+         "notifications": [
+          {
+           "email": "user@gmail.com",
+           "type": "Email"
+          },
+          {
+           "channel": "slack_channel",
+           "credentialId": "AAAAAAAABLw",
+           "type": "Slack"
+          }
+         ],
+         "parameters": {
+          "fireLasting": "3m"
+         },
+         "severity": "Major"
+        }
+       ],
+       "type": "BREACH"
+      },
+      {
+       "rules": [
+        {
+         "description": "Error budget rule",
+         "detectLabel": "label",
+         "disabled": false,
+         "notifications": [
+          {
+           "email": "test@gmail.com",
+           "type": "Email"
+          }
+         ],
+         "parameters": {
+          "fireLasting": "1m",
+          "percentageErrorBudgetConsumed": 0.8
+         },
+         "severity": "Critical",
+         "tip": "tip"
+        }
+       ],
+       "type": "ERROR_BUDGET_LEFT"
+      },
+      {
+       "rules": [
+        {
+         "description": "Burn rate alert rule",
+         "detectLabel": "label",
+         "disabled": false,
+         "notifications": [
+          {
+           "email": "user@gmail.com",
+           "type": "Email"
+          }
+         ],
+         "parameterizedBody": "body",
+         "parameterizedSubject": "subject",
+         "parameters": {
+          "burnRateThreshold_1": 14.4,
+          "burnRateThreshold_2": 6
+         },
+         "runbookUrl": "example.com",
+         "severity": "Critical",
+         "tip": "tip"
+        }
+       ],
+       "type": "BURN_RATE"
+      }
+     ],
+     "type": "RollingWindow"
+    }
+   ],
+   "type": "RequestBased"
+  }
+ ]
+}

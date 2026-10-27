@@ -1,0 +1,711 @@
+# Generic symptom alert rules for the Arena cluster (Grafana-managed, folder "Platform alerts").
+# They describe what an SRE team would alert on for any Kubernetes service: error ratio, latency,
+# request-rate surge, restarts, containers stuck waiting, OOM kills, Pending pods, unavailable
+# replicas, Redis memory/rejections, Postgres lock waits/long transactions and error-log bursts.
+# Nothing here encodes a scenario, an answer key or a fault manifest: titles and expressions name
+# symptoms, never causes. Every rule carries omniops=arena (the runner polls on that label).
+# Expressions and annotations are passed to Grafana raw (no env interpolation). Each rule links to its
+# panel on the provisioned overview dashboard (arena-overview.json, generated from these expressions).
+apiVersion: 1
+groups:
+- orgId: 1
+  name: service-health
+  folder: Platform alerts
+  interval: 30s
+  rules:
+  - uid: omniops-svc-error-ratio
+    title: Service error ratio above 5%
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: |-
+          sum by (service_name) (rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER", status_code="STATUS_CODE_ERROR"}[5m]))
+          / (sum by (service_name) (rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER"}[5m])) > 0.05)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0.05
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: critical
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '1'
+      summary: '{{ $labels.service_name }}: {{ humanizePercentage $values.A.Value }} of server requests fail'
+      description: Share of server spans with an error status over 5 minutes, per service (threshold 5%, services with at least 0.05 requests/s).
+  - uid: omniops-svc-latency-p95
+    title: Service p95 latency above 1.5 s
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: |-
+          histogram_quantile(0.95, sum by (le, service_name) (rate(traces_span_metrics_duration_milliseconds_bucket{span_kind="SPAN_KIND_SERVER"}[5m])))
+          and on (service_name) (sum by (service_name) (rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER"}[5m])) > 0.05)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 1500
+    noDataState: OK
+    execErrState: Error
+    for: 3m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: warning
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '2'
+      summary: '{{ $labels.service_name }}: p95 server latency {{ humanize $values.A.Value }} ms'
+      description: 95th percentile duration of server spans over 5 minutes, per service (threshold 1500 ms).
+  - uid: omniops-svc-request-surge
+    title: Service request rate surge
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: |-
+          sum by (service_name) (rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER"}[5m]))
+          / (sum by (service_name) (rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER"}[5m] offset 30m)) > 0.2)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 3
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: warning
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '3'
+      summary: '{{ $labels.service_name }}: request rate is {{ humanize $values.A.Value }}x what it was 30 minutes ago'
+      description: Server request rate over the last 5 minutes divided by the same window 30 minutes earlier (threshold 3x; baseline at least 0.2 requests/s).
+- orgId: 1
+  name: kubernetes-workloads
+  folder: Platform alerts
+  interval: 30s
+  rules:
+  - uid: omniops-k8s-restarts
+    title: Container restarts increasing
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: sum by (namespace, pod, container) (increase(kube_pod_container_status_restarts_total[10m]))
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 2
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: warning
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '4'
+      summary: '{{ $labels.namespace }}/{{ $labels.pod }} container {{ $labels.container }} restarted {{ humanize $values.A.Value }} times in 10 minutes'
+      description: 'Container restart count increase over 10 minutes (threshold: more than 2).'
+  - uid: omniops-k8s-waiting
+    title: Containers stuck waiting to start
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: max by (namespace, pod, container, reason) (kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError|CreateContainerError|InvalidImageName"})
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: critical
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '5'
+      summary: '{{ $labels.namespace }}/{{ $labels.pod }} container {{ $labels.container }} is waiting: {{ $labels.reason }}'
+      description: A container has been in a waiting state that does not resolve by itself for at least 1 minute.
+  - uid: omniops-k8s-oomkilled
+    title: Container OOMKilled
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: |-
+          (max by (namespace, pod, container) (kube_pod_container_status_last_terminated_reason{reason="OOMKilled"})
+           and on (namespace, pod, container)
+           (sum by (namespace, pod, container) (increase(kube_pod_container_status_restarts_total[15m])) > 0))
+          or (sum by (namespace, pod, container) (increase(container_oom_events_total{container!=""}[15m])) > 0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: critical
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '6'
+      summary: '{{ $labels.namespace }}/{{ $labels.pod }} container {{ $labels.container }} was OOMKilled'
+      description: A container was terminated by the out-of-memory killer in the last 15 minutes.
+  - uid: omniops-k8s-pending
+    title: Pod Pending for more than 2 minutes
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: max by (namespace, pod) (kube_pod_status_phase{phase="Pending"})
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: warning
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '7'
+      summary: '{{ $labels.namespace }}/{{ $labels.pod }} has been Pending for more than 2 minutes'
+      description: The pod has not been scheduled or started for at least 2 minutes.
+  - uid: omniops-k8s-deploy-unavailable
+    title: Deployment has unavailable replicas
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: max by (namespace, deployment) (kube_deployment_status_replicas_unavailable)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: critical
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '8'
+      summary: '{{ $labels.namespace }}/{{ $labels.deployment }}: {{ humanize $values.A.Value }} replica(s) unavailable'
+      description: Desired replicas that are not available, for at least 2 minutes.
+  - uid: omniops-k8s-sts-unready
+    title: StatefulSet replicas not ready
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: max by (namespace, statefulset) (kube_statefulset_replicas - kube_statefulset_status_replicas_ready)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: critical
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '9'
+      summary: '{{ $labels.namespace }}/{{ $labels.statefulset }}: {{ humanize $values.A.Value }} replica(s) not ready'
+      description: Desired StatefulSet replicas that are not ready, for at least 2 minutes.
+- orgId: 1
+  name: datastores
+  folder: Platform alerts
+  interval: 30s
+  rules:
+  - uid: omniops-redis-memory
+    title: Redis memory near maxmemory
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: max by (instance) (redis_memory_used_bytes) / max by (instance) (redis_memory_max_bytes > 0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0.9
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: warning
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '10'
+      summary: Redis {{ $labels.instance }} uses {{ humanizePercentage $values.A.Value }} of maxmemory
+      description: Used memory divided by the configured maxmemory (threshold 90%).
+  - uid: omniops-redis-rejects
+    title: Redis evicting keys or rejecting writes
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: |-
+          (sum by (instance) (increase(redis_errors_total{err="OOM"}[5m])) > 0)
+          or (sum by (instance) (increase(redis_evicted_keys_total[5m])) > 0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: critical
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '11'
+      summary: 'Redis {{ $labels.instance }}: {{ humanize $values.A.Value }} out-of-memory rejections or evictions in 5 minutes'
+      description: Commands rejected with out-of-memory errors, or keys evicted, over the last 5 minutes.
+  - uid: omniops-pg-lock-waits
+    title: PostgreSQL sessions waiting on locks
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: max by (datname) (pg_lock_waiters_backends)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: warning
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '12'
+      summary: 'PostgreSQL {{ $labels.datname }}: {{ humanize $values.A.Value }} session(s) waiting on locks'
+      description: Backends whose wait event type is Lock, for at least 2 minutes.
+  - uid: omniops-pg-long-tx
+    title: PostgreSQL long-running transaction
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: prometheus
+      model:
+        refId: A
+        expr: max by (datname) (pg_oldest_transaction_age_seconds)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+        datasource:
+          type: prometheus
+          uid: prometheus
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 180
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: warning
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '13'
+      summary: 'PostgreSQL {{ $labels.datname }}: a transaction has been open for {{ humanizeDuration $values.A.Value }}'
+      description: Age of the oldest non-idle client transaction (threshold 3 minutes).
+- orgId: 1
+  name: logs
+  folder: Platform alerts
+  interval: 30s
+  rules:
+  - uid: omniops-log-error-burst
+    title: Error log burst
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: loki
+      model:
+        refId: A
+        expr: sum by (namespace, app) (count_over_time({namespace=~".+", namespace!~"kube-system|observability|argocd|local-path-storage"} |~ "(?i)\\b(error|fatal|panic|exception)\\b" [5m]))
+        queryType: instant
+        datasource:
+          type: loki
+          uid: loki
+    - refId: C
+      relativeTimeRange:
+        from: 0
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 50
+    noDataState: OK
+    execErrState: Error
+    for: 2m
+    isPaused: false
+    labels:
+      omniops: arena
+      severity: warning
+    annotations:
+      __dashboardUid__: omniops-arena
+      __panelId__: '14'
+      summary: '{{ $labels.namespace }}/{{ $labels.app }}: {{ humanize $values.A.Value }} error lines in 5 minutes'
+      description: Container log lines containing error, fatal, panic or exception over 5 minutes (threshold 50).

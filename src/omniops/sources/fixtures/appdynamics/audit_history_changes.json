@@ -1,0 +1,46 @@
+[
+  {
+    "timeStamp": 1450569821811,
+    "auditDateTime": "2015-12-20T00:03:41.811+0000",
+    "accountName": "customer1",
+    "securityProviderType": "INTERNAL",
+    "userName": "user1",
+    "action": "LOGIN"
+  },
+  {
+    "timeStamp": 1450570234518,
+    "auditDateTime": "2015-12-20T00:10:34.518+0000",
+    "accountName": "customer1",
+    "securityProviderType": "INTERNAL",
+    "userName": "user1",
+    "action": "LOGIN"
+  },
+  {
+    "timeStamp": 1450570273841,
+    "auditDateTime": "2015-12-20T00:11:13.841+0000",
+    "accountName": "customer1",
+    "securityProviderType": "INTERNAL",
+    "userName": "user1",
+    "action": "OBJECT_CREATED",
+    "objectType": "AGENT_CONFIGURATION"
+  },
+  {
+    "timeStamp": 1450570675345,
+    "auditDateTime": "2015-12-20T00:17:55.345+0000",
+    "accountName": "customer1",
+    "securityProviderType": "INTERNAL",
+    "userName": "user1",
+    "action": "OBJECT_DELETED",
+    "objectType": "BUSINESS_TRANSACTION"
+  },
+  {
+    "timeStamp": 1450570719240,
+    "auditDateTime": "2015-12-20T00:18:39.240+0000",
+    "accountName": "customer1",
+    "securityProviderType": "INTERNAL",
+    "userName": "user1",
+    "action": "APP_CONFIGURATION",
+    "objectType": "APPLICATION",
+    "objectName": "ACME Book Store Application"
+  }
+]

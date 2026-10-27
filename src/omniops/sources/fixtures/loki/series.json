@@ -1,0 +1,46 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "container_name": "loki",
+      "app": "loki",
+      "stream": "stderr",
+      "filename": "/var/log/pods/default_loki-stack-0_50835643-1df0-11ea-ba79-025000000001/loki/0.log",
+      "name": "loki",
+      "job": "default/loki",
+      "controller_revision_hash": "loki-stack-757479754d",
+      "statefulset_kubernetes_io_pod_name": "loki-stack-0",
+      "release": "loki-stack",
+      "namespace": "default",
+      "instance": "loki-stack-0"
+    },
+    {
+      "chart": "prometheus-9.3.3",
+      "container_name": "prometheus-server-configmap-reload",
+      "filename": "/var/log/pods/default_loki-stack-prometheus-server-696cc9ddff-87lmq_507b1db4-1df0-11ea-ba79-025000000001/prometheus-server-configmap-reload/0.log",
+      "instance": "loki-stack-prometheus-server-696cc9ddff-87lmq",
+      "pod_template_hash": "696cc9ddff",
+      "app": "prometheus",
+      "component": "server",
+      "heritage": "Tiller",
+      "job": "default/prometheus",
+      "namespace": "default",
+      "release": "loki-stack",
+      "stream": "stderr"
+    },
+    {
+      "app": "prometheus",
+      "component": "server",
+      "filename": "/var/log/pods/default_loki-stack-prometheus-server-696cc9ddff-87lmq_507b1db4-1df0-11ea-ba79-025000000001/prometheus-server/0.log",
+      "release": "loki-stack",
+      "namespace": "default",
+      "pod_template_hash": "696cc9ddff",
+      "stream": "stderr",
+      "chart": "prometheus-9.3.3",
+      "container_name": "prometheus-server",
+      "heritage": "Tiller",
+      "instance": "loki-stack-prometheus-server-696cc9ddff-87lmq",
+      "job": "default/prometheus"
+    }
+  ]
+}

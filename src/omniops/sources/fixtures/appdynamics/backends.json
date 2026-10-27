@@ -1,0 +1,15 @@
+[
+  {"id": 10, "name": "INVENTORY-MySQL DB-DB", "exitPointType": "JDBC", "properties": [
+    {"id": 0, "name": "HOST", "value": "DB"},
+    {"id": 0, "name": "MAJOR_VERSION", "value": "5.5.44-0ubuntu0.14.04.1"},
+    {"id": 0, "name": "PORT", "value": "3306"},
+    {"id": 0, "name": "SCHEMA", "value": "INVENTORY"},
+    {"id": 0, "name": "URL", "value": "jdbc:mysql://db:3306/inventory?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true"},
+    {"id": 0, "name": "VENDOR", "value": "MySQL DB"}
+  ], "applicationComponentNodeId": 0, "tierId": 0},
+  {"id": 14, "name": "Active MQ-OrderQueue", "exitPointType": "JMS", "properties": [
+    {"id": 0, "name": "DESTINATION_NAME", "value": "OrderQueue"},
+    {"id": 0, "name": "DESTINATION_TYPE", "value": "QUEUE"},
+    {"id": 0, "name": "VENDOR", "value": "Active MQ"}
+  ], "applicationComponentNodeId": 0, "tierId": 0}
+]

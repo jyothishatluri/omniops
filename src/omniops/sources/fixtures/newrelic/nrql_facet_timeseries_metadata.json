@@ -1,0 +1,74 @@
+{
+ "data": {
+  "actor": {
+   "account": {
+    "nrql": {
+     "currentResults": null,
+     "metadata": {
+      "eventTypes": [
+       "Transaction"
+      ],
+      "facets": [
+       "appName"
+      ],
+      "messages": [],
+      "timeWindow": {
+       "begin": 1709442593550,
+       "compareWith": null,
+       "end": 1709446193550,
+       "since": "1 day AGO",
+       "until": "NOW"
+      }
+     },
+     "nrql": "SELECT count(*) FROM Transaction FACET appName TIMESERIES 1 hour SINCE 1 day ago LIMIT 3",
+     "otherResult": [
+      {
+       "beginTimeSeconds": 1748910826,
+       "endTimeSeconds": 1748914426,
+       "count": 42
+      },
+      {
+       "beginTimeSeconds": 1748914426,
+       "endTimeSeconds": 1748918026,
+       "count": 36
+      }
+     ],
+     "previousResults": null,
+     "queryProgress": {
+      "completed": true,
+      "queryId": null,
+      "resultExpiration": null,
+      "retryAfter": null,
+      "retryDeadline": null
+     },
+     "results": [
+      {
+       "appName": "App1",
+       "beginTimeSeconds": 1748910826,
+       "count": 100,
+       "endTimeSeconds": 1748914426
+      },
+      {
+       "appName": "App2",
+       "beginTimeSeconds": 1748910826,
+       "count": 50,
+       "endTimeSeconds": 1748914426
+      }
+     ],
+     "totalResult": [
+      {
+       "beginTimeSeconds": 1748910826,
+       "endTimeSeconds": 1748914426,
+       "count": 142
+      },
+      {
+       "beginTimeSeconds": 1748914426,
+       "endTimeSeconds": 1748918026,
+       "count": 136
+      }
+     ]
+    }
+   }
+  }
+ }
+}

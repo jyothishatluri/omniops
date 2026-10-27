@@ -1,0 +1,27 @@
+{
+ "items": [
+  {
+   "kind": "ConfigMap",
+   "namespace": "shop",
+   "name": "flagd-config",
+   "version": "v1",
+   "targetState": "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"flagd-config\",\"namespace\":\"shop\"},\"data\":{\"demo.flagd.json\":\"{\\\"flags\\\":{\\\"paymentStrictTokenCheck\\\":{\\\"defaultVariant\\\":\\\"on\\\"}}}\"}}",
+   "liveState": "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"flagd-config\",\"namespace\":\"shop\",\"resourceVersion\":\"51001\"},\"data\":{\"demo.flagd.json\":\"{\\\"flags\\\":{\\\"paymentStrictTokenCheck\\\":{\\\"defaultVariant\\\":\\\"on\\\"}}}\"}}",
+   "normalizedLiveState": "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"flagd-config\",\"namespace\":\"shop\",\"resourceVersion\":\"51001\"},\"data\":{\"demo.flagd.json\":\"{\\\"flags\\\":{\\\"paymentStrictTokenCheck\\\":{\\\"defaultVariant\\\":\\\"on\\\"}}}\"}}",
+   "predictedLiveState": "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"flagd-config\",\"namespace\":\"shop\"},\"data\":{\"demo.flagd.json\":\"{\\\"flags\\\":{\\\"paymentStrictTokenCheck\\\":{\\\"defaultVariant\\\":\\\"on\\\"}}}\"}}",
+   "modified": false,
+   "resourceVersion": "51001"
+  },
+  {
+   "group": "apps",
+   "kind": "Deployment",
+   "namespace": "shop",
+   "name": "flagd",
+   "version": "v1",
+   "targetState": "{\"kind\":\"Deployment\"}",
+   "liveState": "{\"kind\":\"Deployment\"}",
+   "modified": true,
+   "resourceVersion": "50990"
+  }
+ ]
+}

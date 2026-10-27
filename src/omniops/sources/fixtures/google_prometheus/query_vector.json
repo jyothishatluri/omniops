@@ -1,0 +1,22 @@
+{
+ "status": "success",
+ "data": {
+  "resultType": "vector",
+  "result": [
+   {
+    "metric": {
+     "__name__": "up",
+     "cluster": "gmp-test",
+     "instance": "prom-example-84c6f547f5-g4ljn:web",
+     "job": "prometheus",
+     "location": "us-central1-a",
+     "project_id": "a-gcp-project"
+    },
+    "value": [
+     1634873239.971,
+     "1"
+    ]
+   }
+  ]
+ }
+}

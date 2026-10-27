@@ -1,0 +1,12 @@
+{
+  "A": {
+    "from": "2026-10-01T11:00:00Z",
+    "to": "2026-10-01T12:00:00Z",
+    "window": "1h0m0s",
+    "keys": ["service.name"],
+    "records": [
+      {"values": ["checkout"], "aggregate": {"value": 231}},
+      {"values": ["api"], "aggregate": {"value": 5}}
+    ]
+  }
+}

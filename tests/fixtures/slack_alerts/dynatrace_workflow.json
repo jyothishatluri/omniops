@@ -1,0 +1,38 @@
+{
+  "platform": "dynatrace",
+  "description": "Dynatrace Workflows Slack Connector 'Send message' with the Block Kit template from the official problem-notification tutorial (problem trigger, active or closed).",
+  "provenance": "Dynatrace docs, Workflows tutorial 'Send Slack notifications for problems': header \"{{ ':white_check_mark:' if CLOSED else ':warning:' }} {{ 'RESOLVED' if CLOSED else 'OPEN' }} - {{ event()['event.name'] }}\", a section with '- *Problem link*: <{{ environment().url }}/ui/intent/dynatrace.davis.problems/view-problem#{\"event.id\":...,\"event.kind\":...}|{{ display_id }}>', '- *Impacted Entities:* `{{ affected_entity_ids }}`', '- *Problem duration:*', a quoted event.description section and a workflow link. Problem ids end with the start time in epoch ms.",
+  "event": {
+    "type": "message",
+    "user": "U04DTAPP01",
+    "bot_id": "B04DYNATRC",
+    "app_id": "A04DTWORKF",
+    "bot_profile": {"id": "B04DYNATRC", "app_id": "A04DTWORKF", "name": "Dynatrace", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "blocks": [
+      {"type": "header", "block_id": "h1", "text": {"type": "plain_text", "text": ":warning: OPEN - Response time degradation", "emoji": true}},
+      {"type": "section", "block_id": "s1", "text": {"type": "mrkdwn", "text": "- *Problem link*: <https://abc12345.apps.dynatrace.com/ui/intent/dynatrace.davis.problems/view-problem#%7B%22event.id%22%3A%22-5147385846571529315_1792504920000V2%22,%22event.kind%22%3A%22DAVIS_PROBLEM%22%7D|P-26101234> \n- *Impacted Entities:* `['SERVICE-8F3C2A1B9D0E4F56']`\n- *Problem duration:* `0.0 minutes`"}},
+      {"type": "section", "block_id": "s2", "text": {"type": "mrkdwn", "text": ">The current response time (2.41 s) exceeds the auto-detected baseline (312 ms) by 672 %\n>Service method: POST /api/checkout"}},
+      {"type": "divider", "block_id": "d1"},
+      {"type": "section", "block_id": "s3", "text": {"type": "mrkdwn", "text": "*Workflow link*: <https://abc12345.apps.dynatrace.com/ui/apps/dynatrace.automations/workflows/7c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f|Workflow>"}}
+    ],
+    "ts": "1792505001.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792505001.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "dynatrace",
+    "title": "OPEN - Response time degradation",
+    "rule_name": "Response time degradation",
+    "status": "firing",
+    "raw_status": "OPEN",
+    "incident_id": "-5147385846571529315_1792504920000V2",
+    "service": "SERVICE-8F3C2A1B9D0E4F56",
+    "group": "SERVICE-8F3C2A1B9D0E4F56",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "url": "https://abc12345.apps.dynatrace.com/ui/intent/dynatrace.davis.problems/view-problem#%7B%22event.id%22%3A%22-5147385846571529315_1792504920000V2%22,%22event.kind%22%3A%22DAVIS_PROBLEM%22%7D",
+    "tags": {"problem_id": "P-26101234"},
+    "anchor": {"source": "trigger", "window_start": "2026-10-20T13:47:00Z", "window_end": "2026-10-20T14:07:00Z"}
+  }
+}

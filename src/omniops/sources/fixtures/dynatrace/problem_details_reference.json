@@ -1,0 +1,92 @@
+{
+ "affectedEntities": [
+  {
+   "entityId": {
+    "id": "string",
+    "type": "string"
+   },
+   "name": "string"
+  }
+ ],
+ "displayId": "string",
+ "endTime": 1,
+ "entityTags": [
+  {
+   "context": "string",
+   "key": "string",
+   "stringRepresentation": "string",
+   "value": "string"
+  }
+ ],
+ "evidenceDetails": {
+  "details": [
+   {
+    "displayName": "string",
+    "entity": {},
+    "evidenceType": "AVAILABILITY_EVIDENCE",
+    "groupingEntity": {},
+    "rootCauseRelevant": true,
+    "startTime": 1
+   }
+  ],
+  "totalCount": 1
+ },
+ "impactAnalysis": {
+  "impacts": [
+   {
+    "estimatedAffectedUsers": 1,
+    "impactType": "APPLICATION",
+    "impactedEntity": {}
+   }
+  ]
+ },
+ "impactLevel": "APPLICATION",
+ "impactedEntities": [
+  {}
+ ],
+ "k8s.cluster.name": [
+  "string"
+ ],
+ "k8s.cluster.uid": [
+  "string"
+ ],
+ "k8s.namespace.name": [
+  "string"
+ ],
+ "linkedProblemInfo": {
+  "displayId": "string",
+  "problemId": "string"
+ },
+ "managementZones": [
+  {
+   "id": "string",
+   "name": "string"
+  }
+ ],
+ "problemFilters": [
+  {
+   "id": "string",
+   "name": "string"
+  }
+ ],
+ "problemId": "string",
+ "recentComments": {
+  "comments": [
+   {
+    "authorName": "string",
+    "content": "string",
+    "context": "string",
+    "createdAtTimestamp": 1,
+    "id": "string"
+   }
+  ],
+  "nextPageKey": "AQAAABQBAAAABQ==",
+  "pageSize": 1,
+  "totalCount": 1
+ },
+ "rootCauseEntity": {},
+ "severityLevel": "AVAILABILITY",
+ "startTime": 1,
+ "status": "CLOSED",
+ "title": "string"
+}

@@ -1,0 +1,20 @@
+[
+ {
+  "name": "my dataset!",
+  "description": "my dataset described!",
+  "slug": "my-dataset-",
+  "expand_json_depth": 2,
+  "created_at": "2022-07-21T18:39:23Z",
+  "last_written_at": "2022-07-22T19:52:00Z",
+  "regular_columns_count": 12
+ },
+ {
+  "name": "another dataset",
+  "description": "",
+  "slug": "another-dataset",
+  "expand_json_depth": 0,
+  "created_at": "2022-07-21T18:39:23Z",
+  "last_written_at": "2022-07-22T19:52:00Z",
+  "regular_columns_count": 98
+ }
+]

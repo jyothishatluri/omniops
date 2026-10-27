@@ -1,0 +1,81 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "ProblemId",
+          "type": "string"
+        },
+        {
+          "name": "ExceptionType",
+          "type": "string"
+        },
+        {
+          "name": "AppRoleName",
+          "type": "string"
+        },
+        {
+          "name": "Occurrences",
+          "type": "long"
+        },
+        {
+          "name": "FirstSeen",
+          "type": "datetime"
+        },
+        {
+          "name": "LastSeen",
+          "type": "datetime"
+        },
+        {
+          "name": "Instances",
+          "type": "long"
+        },
+        {
+          "name": "SampleMessage",
+          "type": "string"
+        },
+        {
+          "name": "SampleInnermost",
+          "type": "string"
+        },
+        {
+          "name": "SampleOperation",
+          "type": "string"
+        },
+        {
+          "name": "SampleTraceId",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "System.Net.Http.HttpRequestException at Contoso.Checkout.PaymentClient+<ChargeAsync>d__4.MoveNext",
+          "System.Net.Http.HttpRequestException",
+          "checkout-api",
+          212,
+          "2026-10-01T11:40:12.004Z",
+          "2026-10-01T11:59:40.218Z",
+          3,
+          "Response status code does not indicate success: 503 (Service Unavailable).",
+          "System.Net.Sockets.SocketException: Connection refused",
+          "POST /api/orders",
+          "0af7651916cd43dd8448eb211c80319c"
+        ],
+        [
+          "System.Threading.Tasks.TaskCanceledException at Contoso.Checkout.OrdersController+<Create>d__7.MoveNext",
+          "System.Threading.Tasks.TaskCanceledException",
+          "checkout-api",
+          57,
+          "2026-10-01T11:40:55.002Z",
+          "2026-10-01T11:58:03.771Z",
+          2,
+          "The operation was canceled.",
+          "System.TimeoutException: The operation was canceled.",
+          "POST /api/orders",
+          "7c3a1b2d4e5f60718293a4b5c6d7e8f9"
+        ]
+      ]
+    }
+  ]
+}

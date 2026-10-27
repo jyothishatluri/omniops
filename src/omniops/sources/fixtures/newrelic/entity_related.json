@@ -1,0 +1,43 @@
+{
+  "data": {
+    "actor": {
+      "entity": {
+        "guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+        "name": "checkout-service",
+        "relatedEntities": {
+          "nextCursor": null,
+          "results": [
+            {
+              "type": "CALLS",
+              "createdAt": 1759300000000,
+              "source": {
+                "guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+                "accountId": 1,
+                "entity": {"guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA", "name": "checkout-service", "entityType": "APM_APPLICATION_ENTITY"}
+              },
+              "target": {
+                "guid": "MXxBUE18QVBQTElDQVRJT058MzIxNzY1NA",
+                "accountId": 1,
+                "entity": {"guid": "MXxBUE18QVBQTElDQVRJT058MzIxNzY1NA", "name": "payments-api", "entityType": "APM_APPLICATION_ENTITY"}
+              }
+            },
+            {
+              "type": "CALLS",
+              "createdAt": 1759300000000,
+              "source": {
+                "guid": "MXxCUk9XU0VSfEFQUExJQ0FUSU9OfDEyMzQ1",
+                "accountId": 1,
+                "entity": {"guid": "MXxCUk9XU0VSfEFQUExJQ0FUSU9OfDEyMzQ1", "name": "storefront-web", "entityType": "BROWSER_APPLICATION_ENTITY"}
+              },
+              "target": {
+                "guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+                "accountId": 1,
+                "entity": {"guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA", "name": "checkout-service", "entityType": "APM_APPLICATION_ENTITY"}
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

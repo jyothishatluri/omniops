@@ -1,0 +1,14 @@
+[
+  {"id": 44658, "type": "DIAGNOSTIC_SESSION", "subType": "ERROR_DIAGNOSTIC_SESSION", "eventTime": 1451343453085, "severity": "WARN",
+   "summary": "Starting Diagnostic Session after series of errors for a Business Transaction 18% (2/11) of requests had errors in the last minute starting 12/28/15 10: 57 PM local time",
+   "affectedEntities": [
+     {"entityType": "APPLICATION", "entityId": 6, "name": "ECommerce"},
+     {"entityType": "APPLICATION_COMPONENT", "entityId": 11, "name": "ECommerce-Services"},
+     {"entityType": "APPLICATION_COMPONENT_NODE", "entityId": 19, "name": "ECommerce_WEB2"},
+     {"entityType": "BUSINESS_TRANSACTION", "entityId": 35, "name": "/items/all.GET"},
+     {"entityType": "MACHINE_INSTANCE", "entityId": 8, "name": "ECommerce-web1"}
+   ],
+   "triggeredEntity": {"entityType": "APPLICATION_COMPONENT_NODE", "entityId": 19, "name": "ECommerce_WEB2"},
+   "markedAsRead": false, "markedAsResolved": false, "archived": false,
+   "deepLinkUrl": "http://demo.appdynamics.com:8090/controller/#location=APP_EVENT_VIEWER_MODAL&eventSummary=44658"}
+]

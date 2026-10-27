@@ -1,0 +1,688 @@
+# Sumo Logic REST APIs, direct HTTPS (no MCP, no SDK).
+#
+# Log search is the asynchronous Search Job flow. This manifest uses the OpenAPI-based
+# "Search Job Management API" (v2), which Sumo recommends for new integrations because every
+# request is addressed by jobId alone (the legacy /v1/search/jobs flow needs session cookies):
+#   POST /api/v2/search/jobs                       body {query, from, to, timezone, ...} -> 202 {"id": ...}
+#   GET  /api/v2/search/jobs/{jobId}               poll until state == "DONE GATHERING RESULTS"
+#   GET  /api/v2/search/jobs/{jobId}/messages?offset=&limit=   raw messages (limit <= 10000)
+#   GET  /api/v2/search/jobs/{jobId}/records?offset=&limit=    aggregate rows (limit <= 10000)
+# Message/record maps are string->string (epoch-ms strings for _messagetime/_receipttime/_timeslice).
+# Metrics: POST /api/v1/metricsQueries (epoch-ms EpochTimeRangeBoundary, quantization in ms).
+# Monitors: GET /api/v1/monitors/search, GET /api/v1/monitors/{id}; data-collection health:
+# GET /api/v1/healthEvents. Alert history comes from the documented System Event Index
+# (_index=sumologic_system_events _sourceCategory=alerts) through the search job flow.
+# Deployment-specific API host: https://api.<pod>.sumologic.com/api (US1: https://api.sumologic.com/api).
+# Research notes and doc links: docs/sources/sumologic.md
+source: sumologic
+display_name: Sumo Logic
+vendor: Sumo Logic, Inc.
+description: >-
+  Sumo Logic log search (Search Job API: raw messages and aggregate records), triggered-alert
+  history from the System Event Index, metrics queries, monitor definitions and their current
+  status, and collector/source health events.
+docs_url: https://www.sumologic.com/help/docs/api/
+categories: [logs, metrics, alerts, events]
+base_url: >-
+  {{ (env.SUMOLOGIC_API_URL | trim('/')) if env.SUMOLOGIC_API_URL else
+     ('https://api.sumologic.com/api' if (env.SUMOLOGIC_DEPLOYMENT or 'us1') | lower == 'us1'
+      else 'https://api.' ~ (env.SUMOLOGIC_DEPLOYMENT | lower) ~ '.sumologic.com/api') }}
+ui_base_url: >-
+  {{ (env.SUMOLOGIC_UI_URL | trim('/')) if env.SUMOLOGIC_UI_URL else
+     ('https://service.sumologic.com' if (env.SUMOLOGIC_DEPLOYMENT or 'us1') | lower == 'us1'
+      else 'https://service.' ~ (env.SUMOLOGIC_DEPLOYMENT | lower) ~ '.sumologic.com') }}
+env:
+  - {name: SUMOLOGIC_ACCESS_ID, description: "Access ID of a personal or service-account access key (Administration > Security > Access Keys). Keys with a custom scope need 'Run Log Search' (search jobs), Metrics and Alerting (monitors) read scopes.", secret: true}
+  - {name: SUMOLOGIC_ACCESS_KEY, description: "Access key secret paired with SUMOLOGIC_ACCESS_ID (HTTP basic auth)", secret: true}
+  - {name: SUMOLOGIC_DEPLOYMENT, default: us1, description: "Deployment (pod) of the account: us1, us2, eu, de, au, ca, ch, jp, kr, fed, esc. Read it from the browser URL: service.<pod>.sumologic.com (US1 is service.sumologic.com). A wrong pod answers HTTP 301."}
+  - {name: SUMOLOGIC_API_URL, default: "", description: "Optional explicit API base including /api, e.g. https://api.eu.sumologic.com/api (overrides SUMOLOGIC_DEPLOYMENT)"}
+  - {name: SUMOLOGIC_UI_URL, default: "", description: "Optional explicit web UI base for deep links, e.g. https://service.eu.sumologic.com"}
+required_env: [SUMOLOGIC_ACCESS_ID, SUMOLOGIC_ACCESS_KEY]
+auth:
+  type: basic
+  username: "{{ env.SUMOLOGIC_ACCESS_ID }}"
+  password: "{{ env.SUMOLOGIC_ACCESS_KEY }}"
+headers:
+  Accept: application/json
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 200
+  notes: >-
+    4 API requests per second (240/min) per user across all APIs, 10 concurrent requests per
+    access key per endpoint, and at most 200 active concurrent Search Job API jobs per organization
+    (UI, scheduled and dashboard searches are not counted). Every limit answers HTTP 429. Each log
+    table costs 1 create + N status polls + result pages, so the engine caps the source at 200
+    requests/min. Jobs that are not polled for ~20-30 s are cancelled (later calls answer 404).
+retention:
+  logs: "per partition (account-specific; Default Continuous partition commonly 30d)"
+  search_jobs: "a job lives while it is polled/read (cancelled after ~20-30 s idle) and at most 8h"
+  system_events: "same as the Default Partition unless the sumologic_system_events partition is edited"
+  metrics: "account-specific (commonly 13 months at 1h rollup, shorter for raw resolution)"
+pitfalls:
+  - "The API host is deployment specific (https://api.<pod>.sumologic.com/api, US1 https://api.sumologic.com/api). An HTTP 301 means the wrong pod: set SUMOLOGIC_DEPLOYMENT from the service.<pod>.sumologic.com browser URL."
+  - "The Search Job API is only available to Enterprise-level accounts (Enterprise Operations/Security/Suite, Trial, Cloud Flex Legacy Enterprise); other plans answer 403."
+  - "Search results are limited by the access key's role: a partition, index or _sourceCategory the role cannot see returns 0 rows, not an error. Confirm a scope exists with sumologic_search_records WHERE query = '_sourceCategory=* | count by _sourceCategory' first."
+  - "Metadata (_sourceCategory, _sourceHost, _collector, _source, _sourceName) naming is a per-deployment convention (e.g. prod/checkout/app vs k8s/prod/checkout). Wildcards work: _sourceCategory=*checkout*. Look at a few raw messages before filtering on a guessed value."
+  - "JSON log fields are only extracted when the query references them and parsing_mode is AutoParse (the default here) or the query uses | json; otherwise level/service/trace_id columns stay null."
+  - "Raw-message searches return at most 100,000 messages per job (state FORCE PAUSED); aggregate in the query (count by, timeslice) instead of pulling raw messages into SQL."
+  - "Search jobs count against a 200-concurrent-jobs-per-org limit until they finish or expire; the engine cannot DELETE a job after reading it, so keep windows narrow and avoid fan-outs of many searches."
+query_languages:
+  sumo_logs: >-
+    Sumo Logic search query language. Start with a scope of keywords and built-in metadata:
+    _sourceCategory=prod/checkout* _sourceHost=web-1 _collector=k8s error (AND implicit; OR, NOT,
+    parentheses; * wildcards; keywords are case-insensitive, metadata values are not). Then pipe
+    operators: | json auto | json field=_raw "level" | parse "status=* " as status |
+    where status >= 500 | count by _sourceCategory | sort by _count | top 10 x by _count |
+    timeslice 1m | count by _timeslice | fillmissing timeslice(1m) (zero-fills empty buckets) |
+    avg(latency) as value by _timeslice | fields _messagetime, _raw | limit 100. Aggregate
+    queries (count/sum/avg/top/timeslice) produce records (sumologic_search_records); everything
+    else produces raw messages (sumologic_search_messages). Never set the time range inside the
+    query; the ts window is sent as from/to.
+  sumo_metrics: >-
+    Sumo Logic metrics query: metric=<name> plus dimension filters and operators, e.g.
+    metric=CPU_Total _sourceCategory=prod/web | avg by _sourceHost ; metric=http_requests_total
+    service=checkout | rate | sum by status_code ; Prometheus-style names work with metric=.
+    fillmissing, outlier, quantize and timeshift are NOT allowed in the API query string
+    (quantize = the quantization_ms filter, timeshift = timeshift_ms).
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: sumologic_search_messages
+    title: Log search - raw messages (Search Job API)
+    description: >-
+      Run a Sumo Logic log search over the ts window and return the raw messages (one row per log
+      message, newest first): ts (_messagetime), receipt_ts, message (_raw), source_category,
+      host (_sourceHost), source_name, collector, source, parsed level/service/trace_id when the
+      fields exist, and every field of the message in the `fields` JSON column (plus flattened
+      dynamic columns). Filter on query (required, Sumo search syntax) and ts. Use it to read
+      error lines, stack traces and request logs. Aggregates belong in sumologic_search_records.
+      Implemented as create job -> poll status -> page /messages.
+    kind: logs
+    steps:
+      - name: create
+        method: POST
+        path: /v2/search/jobs
+        body:
+          query: "{{ filters.query }}"
+          from: "{{ time.start | strftime('%Y-%m-%dT%H:%M:%S') }}"
+          to: "{{ time.end | strftime('%Y-%m-%dT%H:%M:%S') }}"
+          timezone: UTC
+          autoParsingMode: "{{ filters.parsing_mode or 'AutoParse' }}"
+          intervalTimeType: "{{ filters.time_type or 'messageTime' }}"
+        capture: {job_id: "$.id"}
+        timeout_s: 60
+      - name: wait
+        method: GET
+        path: "/v2/search/jobs/{{ captures.job_id }}"
+        poll:
+          until: "(response.state or '') | upper in ('DONE GATHERING RESULTS', 'FORCE PAUSED', 'DONE GATHERING PARTIAL RESULTS')"
+          fail_if: "(response.state or '') | upper == 'CANCELLED' or (response.pendingErrors or []) | length > 0"
+          interval_s: 2.0
+          timeout_s: 180
+      - name: messages
+        method: GET
+        path: "/v2/search/jobs/{{ captures.job_id }}/messages"
+        query: {offset: 0, limit: 1000}
+    filters:
+      - column: query
+        required: true
+        description: "Sumo Logic search query (keywords + metadata scope, optional | operators that do not aggregate)."
+        examples: ['_sourceCategory=prod/checkout* (error OR exception) | json auto']
+      - column: parsing_mode
+        description: "autoParsingMode: AutoParse (default here; extracts JSON fields referenced by the query) or Manual"
+        examples: [AutoParse]
+      - column: time_type
+        description: "intervalTimeType: messageTime (default; time parsed from the log), receiptTime (arrival time - use when log clocks are skewed) or searchableTime"
+        examples: [messageTime]
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 6h}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$.messages[*]"
+      dynamic: "map"
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.map._messagetime or _.map._messageTime", transform: epoch_ms, description: "_messagetime: time parsed from the message (epoch ms in the API)"}
+      - {name: receipt_ts, type: TIMESTAMP, expr: "_.map._receipttime or _.map._receiptTime", transform: epoch_ms, description: "_receipttime: arrival time at Sumo Logic (a large ts/receipt_ts gap = ingestion lag or clock skew)"}
+      - {name: message, path: "map._raw", description: "The raw log line (_raw)"}
+      - {name: source_category, expr: "_.map._sourceCategory or _.map._sourcecategory", description: "_sourceCategory metadata (the usual service/environment scope)"}
+      - {name: host, expr: "_.map._sourceHost or _.map._sourcehost", description: "_sourceHost metadata"}
+      - {name: source_name, expr: "_.map._sourceName or _.map._sourcename", description: "_sourceName (file path, container or stream name)"}
+      - {name: collector, expr: "_.map._collector", description: "_collector name"}
+      - {name: source, expr: "_.map._source", description: "_source name"}
+      - {name: level, expr: "_.map['level'] or _.map['log_level'] or _.map['severity'] or _.map['loglevel']", description: "First of level / log_level / severity / loglevel when the field is parsed (AutoParse or | json)"}
+      - {name: service, expr: "_.map['service'] or _.map['service.name'] or _.map['service_name'] or _.map['app']", description: "First of service / service.name / service_name / app when parsed (null otherwise; use source_category)"}
+      - {name: trace_id, expr: "_.map['trace_id'] or _.map['traceid'] or _.map['traceId'] or _.map['trace.id']", description: "Trace id when parsed"}
+      - {name: message_id, expr: "_.map._messageid or _.map._messageId", description: "_messageid"}
+      - {name: fields, type: JSON, path: "map", description: "Every field of the message (string values), e.g. fields->>'_sourcecategory', fields->>'status'"}
+      - {name: query, filter_only: true, description: "The Sumo Logic search query"}
+      - {name: parsing_mode, filter_only: true}
+      - {name: time_type, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Messages are returned newest first (ordered by _messagetime descending)."
+    pitfalls:
+      - "Do not put a time range in the query; the ts window is sent as from/to (ISO 8601 in UTC)."
+      - "At most 5000 messages are fetched (1000 per page, 5 pages) and a job stops at 100,000 messages; count in sumologic_search_records instead of counting raw rows here."
+      - "A query that matches nothing returns 0 rows without an error: before concluding 'no errors', run the same scope without the error keywords as a positive control."
+      - "Message map keys come back lower-cased for most fields (_messagetime, _receipttime, _messageid) but metadata may keep camelCase (_sourceCategory); query fields->> with the lower-case key first."
+      - "If the poll times out the search is too expensive: add _sourceCategory/_index scope terms, narrow the window, or aggregate."
+    examples:
+      - sql: >-
+          SELECT ts, host, source_category, message FROM sumologic_search_messages
+          WHERE query = '_sourceCategory=prod/checkout* (error OR exception OR timeout)'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Error lines from one service's logs during the incident window.
+      - sql: >-
+          SELECT ts, level, service, trace_id, message FROM sumologic_search_messages
+          WHERE query = '_sourceCategory=k8s/prod/* | json auto | where level = "ERROR"'
+            AND ts >= TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY ts DESC
+        description: Structured JSON logs with level/service/trace_id extracted.
+      - sql: >-
+          SELECT ts, receipt_ts, date_diff('second', ts, receipt_ts) AS lag_s, host
+          FROM sumologic_search_messages
+          WHERE query = '_sourceCategory=prod/payments*' AND time_type = 'receiptTime'
+          ORDER BY lag_s DESC LIMIT 20
+        description: Check ingestion lag / clock skew (searched by receipt time).
+    fixtures:
+      - file: search_messages.json
+        filters: {query: '_sourceCategory=service'}
+        expect_rows: 2
+        expect_columns: {ts: "2013-01-28T21:09:10.333Z", receipt_ts: "2013-01-28T21:09:10.899Z", host: Chiapet.local, source_category: service, collector: local, source: service, message_id: "-9223372036854773763", level: null}
+        note: >-
+          Verbatim result document of 'Paging through the messages found by a search job'
+          (GET /v1/search/jobs/{id}/messages, Sumo Logic Search Job APIs page); the elided middle
+          messages ('...') are dropped. The v2 Search Job Management API returns the same
+          SearchQueryPaginatedMessages schema (warning/fields/messages[].map) per the OpenAPI spec.
+    ui_link: "{{ (env.SUMOLOGIC_UI_URL or (source.base_url | replace('://api.', '://service.') | replace('/api', ''))) | trim('/') }}/log-search/create?query={{ filters.query | urlencode }}&startTime={{ time.start | epoch_ms }}&endTime={{ time.end | epoch_ms }}"
+    docs_url: https://www.sumologic.com/help/docs/api/search-job/
+
+  # ------------------------------------------------------------------------------------------
+  - name: sumologic_search_records
+    title: Log search - aggregate records (Search Job API)
+    description: >-
+      Run an aggregating Sumo Logic search (count/sum/avg/top/timeslice ...) over the ts window
+      and return the aggregate records: one row per result row with ts (_timeslice when the
+      query timeslices), value (the field named value, else _count), count (_count), every
+      output field in `fields` JSON and as dynamic columns. Filter on query (required; must
+      contain an aggregation operator) and ts. Use it for error counts per minute, top-N
+      breakdowns by _sourceCategory/host/status, and latency percentiles.
+    kind: timeseries
+    steps:
+      - name: create
+        method: POST
+        path: /v2/search/jobs
+        body:
+          query: "{{ filters.query }}"
+          from: "{{ time.start | strftime('%Y-%m-%dT%H:%M:%S') }}"
+          to: "{{ time.end | strftime('%Y-%m-%dT%H:%M:%S') }}"
+          timezone: UTC
+          autoParsingMode: "{{ filters.parsing_mode or 'AutoParse' }}"
+          intervalTimeType: "{{ filters.time_type or 'messageTime' }}"
+          requiresRawMessages: "false"
+        capture: {job_id: "$.id"}
+        timeout_s: 60
+      - name: wait
+        method: GET
+        path: "/v2/search/jobs/{{ captures.job_id }}"
+        poll:
+          until: "(response.state or '') | upper in ('DONE GATHERING RESULTS', 'FORCE PAUSED', 'DONE GATHERING PARTIAL RESULTS')"
+          fail_if: "(response.state or '') | upper == 'CANCELLED' or (response.pendingErrors or []) | length > 0"
+          interval_s: 2.0
+          timeout_s: 240
+      - name: records
+        method: GET
+        path: "/v2/search/jobs/{{ captures.job_id }}/records"
+        query: {offset: 0, limit: 1000}
+    filters:
+      - column: query
+        required: true
+        description: "Aggregating Sumo Logic query. Alias the number you want as value, e.g. ... | count as value by _timeslice."
+        examples: ['_sourceCategory=prod/checkout* error | timeslice 1m | count by _timeslice | fillmissing timeslice(1m)']
+      - column: parsing_mode
+        description: "autoParsingMode: AutoParse (default here) or Manual"
+        examples: [AutoParse]
+      - column: time_type
+        description: "intervalTimeType: messageTime (default), receiptTime or searchableTime"
+        examples: [messageTime]
+    time: {column: ts, default_lookback: 1h, max_window: 31d, control_lookback: 6h}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$.records[*]"
+      dynamic: "map"
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.map._timeslice", transform: epoch_ms, description: "_timeslice bucket start (epoch ms) when the query timeslices; null otherwise"}
+      - {name: value, type: DOUBLE, expr: "_.map.get('value') if _.map.get('value') is not none else _.map.get('_count')", description: "The output field named value, else _count"}
+      - {name: count, type: BIGINT, expr: "_.map._count", description: "_count produced by count"}
+      - {name: source_category, expr: "_.map._sourceCategory or _.map._sourcecategory", description: "_sourceCategory when grouped by it"}
+      - {name: host, expr: "_.map._sourceHost or _.map._sourcehost", description: "_sourceHost when grouped by it"}
+      - {name: fields, type: JSON, path: "map", description: "All output fields of the record (string values), e.g. fields->>'status_code'"}
+      - {name: query, filter_only: true, description: "The aggregating Sumo Logic query"}
+      - {name: parsing_mode, filter_only: true}
+      - {name: time_type, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Records come back in the order the query produces; add | sort by _count or | sort by _timeslice asc."
+    pitfalls:
+      - "A query without an aggregation operator answers HTTP 400 no.records.not.an.aggregation.query: use sumologic_search_messages for raw lines."
+      - "timeslice + count only returns non-empty buckets: append | fillmissing timeslice(1m) so quiet minutes are 0 and a burst does not look like it ended at its peak."
+      - "Record values are strings in the API; value/count are cast here, other fields stay strings inside fields JSON (cast in SQL: (fields->>'p95')::DOUBLE)."
+      - "Group-by output is capped (10,000 groups for group-by and fillmissing generators); high-cardinality group-bys silently drop groups with a warning."
+      - "Field names in records follow the query's aliases; unaliased aggregates are _count, _sum, _avg, _max, _min, _pct_95 ... (lower case)."
+    examples:
+      - sql: >-
+          SELECT ts, value FROM sumologic_search_records
+          WHERE query = '_sourceCategory=prod/checkout* (error OR exception) | timeslice 1m | count as value by _timeslice | fillmissing timeslice(1m)'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Error log lines per minute (zero-filled) to find onset and peak.
+      - sql: >-
+          SELECT source_category, count FROM sumologic_search_records
+          WHERE query = '_sourceCategory=prod/* (error OR exception) | count by _sourceCategory | sort by _count | limit 20'
+          ORDER BY count DESC
+        description: Which services (source categories) produce the errors.
+      - sql: >-
+          SELECT fields->>'status' AS status, count FROM sumologic_search_records
+          WHERE query = '_sourceCategory=prod/nginx | json auto | where status >= 500 | count by status'
+          ORDER BY count DESC
+        description: HTTP 5xx breakdown by status code from JSON access logs.
+    fixtures:
+      - file: search_records.json
+        filters: {query: '| count _sourceCategory'}
+        expect_rows: 1
+        expect_columns: {count: 90, value: 90.0, source_category: service, ts: null}
+        note: >-
+          Verbatim result document of 'Page through the records found by a Search Job'
+          (GET /v1/search/jobs/{id}/records, Sumo Logic Search Job APIs page). The v2 records
+          endpoint returns the same SearchQueryPaginatedRecords schema per the OpenAPI spec.
+      - file: search_records_timeslice.json
+        filters: {query: '* | timeslice 5m | count by _timeslice'}
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:00:00Z", count: 12, value: 12.0}
+        note: >-
+          Built strictly from the documented records envelope (warning/fields/records[].map) and the
+          timeslice operator docs ('| timeslice 5m | count by _timeslice' outputs _count and
+          _timeslice, _timeslice = bucket start in milliseconds); values are illustrative.
+    ui_link: "{{ (env.SUMOLOGIC_UI_URL or (source.base_url | replace('://api.', '://service.') | replace('/api', ''))) | trim('/') }}/log-search/create?query={{ filters.query | urlencode }}&startTime={{ time.start | epoch_ms }}&endTime={{ time.end | epoch_ms }}"
+    docs_url: https://www.sumologic.com/help/docs/api/search-job/
+
+  # ------------------------------------------------------------------------------------------
+  - name: sumologic_alert_events
+    title: Monitor alert history (System Event Index)
+    description: >-
+      Alert lifecycle events written by Sumo Logic monitors to the System Event Index
+      (_index=sumologic_system_events _sourceCategory=alerts), one row per event: ts (eventTime),
+      event_name (e.g. AlertUpdated), monitor_id, title (monitor name), monitor_path, state
+      (alertingGroup.currentState: Normal/Warning/Critical/MissingData), previous_state,
+      trigger_value, time_series_key, alert_id, severity_level, query window, and the full event
+      in `event` JSON. Filter on ts, optionally monitor_id and query (extra search terms).
+      Use it to see when a monitor fired and resolved during the incident window.
+    kind: alerts
+    steps:
+      - name: create
+        method: POST
+        path: /v2/search/jobs
+        body:
+          query: "_index=sumologic_system_events _sourceCategory=alerts{{ (' \"' ~ filters.monitor_id ~ '\"') if filters.monitor_id else '' }}{{ (' ' ~ filters.query) if filters.query else '' }}"
+          from: "{{ time.start | strftime('%Y-%m-%dT%H:%M:%S') }}"
+          to: "{{ time.end | strftime('%Y-%m-%dT%H:%M:%S') }}"
+          timezone: UTC
+          autoParsingMode: Manual
+        capture: {job_id: "$.id"}
+        timeout_s: 60
+      - name: wait
+        method: GET
+        path: "/v2/search/jobs/{{ captures.job_id }}"
+        poll:
+          until: "(response.state or '') | upper in ('DONE GATHERING RESULTS', 'FORCE PAUSED', 'DONE GATHERING PARTIAL RESULTS')"
+          fail_if: "(response.state or '') | upper == 'CANCELLED' or (response.pendingErrors or []) | length > 0"
+          interval_s: 2.0
+          timeout_s: 180
+      - name: messages
+        method: GET
+        path: "/v2/search/jobs/{{ captures.job_id }}/messages"
+        query: {offset: 0, limit: 1000}
+    filters:
+      - column: monitor_id
+        description: "Monitor id (16 hex chars, from sumologic_monitors.id); pushed down as a keyword search on the raw event"
+        examples: ['0000000000574434']
+      - column: query
+        description: "Extra search terms ANDed to the System Event Index scope, e.g. a monitor name in quotes or '| where ...' operators"
+        examples: ['"Kubernetes - Container Waiting"']
+    time: {column: ts, default_lookback: 24h, max_window: 31d, control_lookback: 7d}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 1000, max_pages: 5}
+    response:
+      rows_path: "$.messages[*]"
+      expand:
+        - {explode: "map._raw", parse: true, as: ev, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "(ev.eventTime if ev is mapping else none) or _.map._messagetime", transform: auto_time, description: "eventTime of the alert event (ISO 8601), else _messagetime"}
+      - {name: event_name, expr: "ev.details.name if ev is mapping else none", description: "details.name, e.g. AlertCreated / AlertUpdated / AlertResolved"}
+      - {name: event_type, expr: "ev.eventName if ev is mapping else none", description: "eventName (e.g. AlertSystemInfo)"}
+      - {name: monitor_id, expr: "ev.details.monitorInfo.monitorId if ev is mapping else none", description: "Monitor id"}
+      - {name: title, expr: "ev.details.monitorInfo.monitorName if ev is mapping else none", description: "Monitor name"}
+      - {name: monitor_path, expr: "ev.details.monitorInfo.monitorPath if ev is mapping else none", description: "Monitor library path"}
+      - {name: state, expr: "ev.details.alertingGroup.currentState if ev is mapping else none", description: "Current state after the event: Normal, Warning, Critical, MissingData"}
+      - {name: previous_state, expr: "ev.details.alertingGroup.previousState if ev is mapping else none"}
+      - {name: trigger_value, type: DOUBLE, expr: "ev.details.alertingGroup.triggerValue if ev is mapping else none", description: "Value that crossed (or left) the threshold"}
+      - {name: time_series_key, expr: "ev.details.alertingGroup.timeSeriesKey if ev is mapping else none", description: "Which time series / group the alert is about (dimensions)"}
+      - {name: alert_id, expr: "ev.resourceIdentity.id if ev is mapping else none", description: "Alert id (resourceIdentity.id)"}
+      - {name: severity_level, expr: "ev.severityLevel if ev is mapping else none", description: "Event severityLevel (Info/Warning/Error) - not the alert's trigger severity; use state"}
+      - {name: query_start, type: TIMESTAMP, expr: "ev.details.queryStartTime if ev is mapping else none", transform: auto_time}
+      - {name: query_end, type: TIMESTAMP, expr: "ev.details.queryEndTime if ev is mapping else none", transform: auto_time}
+      - {name: is_muted, type: BOOLEAN, expr: "ev.details.isMuted if ev is mapping else none"}
+      - {name: event, type: JSON, expr: "ev if ev is mapping else none", description: "The full system event JSON"}
+      - {name: message, path: "map._raw", description: "Raw event text"}
+      - {name: query, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Newest events first."
+    pitfalls:
+      - "The System Event Index is enabled by default only on Enterprise accounts; without it this table is empty (check with sumologic_search_records WHERE query = '_index=sumologic_system_events | count by _sourceCategory')."
+      - "Creation, update and resolution are separate events: pair them per monitor_id + time_series_key to get a firing interval."
+      - "A monitor with triggerGranularity OnePerMonitor emits one alert for all time series; time_series_key then describes the triggering series only."
+    examples:
+      - sql: >-
+          SELECT ts, title, previous_state, state, trigger_value, time_series_key
+          FROM sumologic_alert_events
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Every monitor state transition around the incident.
+      - sql: >-
+          SELECT ts, state, trigger_value FROM sumologic_alert_events
+          WHERE monitor_id = '0000000000574434' AND ts >= TIMESTAMP '2026-09-24 00:00:00'
+          ORDER BY ts
+        description: History of one monitor (did it flap before today?).
+    fixtures:
+      - file: alert_events_messages.json
+        expect_rows: 1
+        expect_columns: {ts: "2024-07-16T14:46:57.739Z", event_name: AlertUpdated, monitor_id: "0000000000574434", title: "Kubernetes - Container Waiting (Crashloopbackoff)", state: Normal, previous_state: Warning, trigger_value: 1.0, alert_id: "0000000000A74A83", is_muted: false}
+        note: >-
+          Built from documented shapes: the messages envelope of the Search Job APIs page with one
+          message whose _raw is the alert system event documented on the 'System Event Index' page
+          (Audited events example), rewritten as strict JSON (the doc shows unquoted keys).
+    docs_url: https://www.sumologic.com/help/docs/manage/security/audit-indexes/system-event-index/
+
+  # ------------------------------------------------------------------------------------------
+  - name: sumologic_metrics_query
+    title: Metrics query
+    description: >-
+      Run a Sumo Logic metrics query over the ts window (POST /v1/metricsQueries). One row per
+      (time series, data point): ts, value, metric, labels (dimensions JSON), host
+      (_sourceHost), source_category, unit. Filter on query (required) and ts; optional
+      quantization_ms (bucket width, default ~300 points), rollup (Avg/Sum/Min/Max/Count) and
+      timeshift_ms (compare with an earlier period).
+    kind: timeseries
+    request:
+      method: POST
+      path: /v1/metricsQueries
+      body:
+        queries:
+          - rowId: A
+            query: "{{ filters.query }}"
+            quantization: "{{ (filters.quantization_ms | int) if filters.quantization_ms else time.step_s * 1000 }}"
+            rollup: "{{ filters.rollup }}"
+            timeshift: "{{ (filters.timeshift_ms | int) if filters.timeshift_ms else none }}"
+        timeRange:
+          type: BeginBoundedTimeRange
+          from: {type: EpochTimeRangeBoundary, epochMillis: "{{ time.start | epoch_ms }}"}
+          to: {type: EpochTimeRangeBoundary, epochMillis: "{{ time.end | epoch_ms }}"}
+      timeout_s: 90
+    filters:
+      - column: query
+        required: true
+        description: "Metrics query, e.g. metric=CPU_Total _sourceCategory=prod/web | avg by _sourceHost"
+        examples: ['metric=CPU_Total _sourceCategory=prod/web | avg by _sourceHost']
+      - {column: quantization_ms, type: BIGINT, description: "Bucket width in milliseconds (default: auto, ~300 points)"}
+      - {column: rollup, description: "Rollup used when quantizing: Avg, Sum, Min, Max, Count or None (server default when omitted)", examples: [Avg]}
+      - {column: timeshift_ms, type: BIGINT, description: "Signed shift in ms, e.g. -86400000 = same window yesterday"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    response:
+      rows_path: "$.queryResult[*]"
+      expand:
+        - {explode: "timeSeriesList.timeSeries", as: s}
+        - {zip: {t: "@s.points.timestamps", v: "@s.points.values"}, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.t", transform: epoch_ms, description: "Data point time (epoch ms in the API)"}
+      - {name: value, type: DOUBLE, path: "@p.v"}
+      - {name: metric, path: "@s.metricDefinition.metric"}
+      - {name: labels, type: JSON, path: "@s.metricDefinition.dimensions", description: "Dimensions of the series, e.g. labels->>'_sourceHost'"}
+      - {name: host, path: "@s.metricDefinition.dimensions._sourceHost"}
+      - {name: source_category, path: "@s.metricDefinition.dimensions._sourceCategory"}
+      - {name: unit, path: "timeSeriesList.unit"}
+      - {name: row_id, path: rowId}
+      - {name: warnings, type: JSON, path: "$.errors.errors", description: "Errors/warnings logged for the query (e.g. metrics:incomplete_results)"}
+      - {name: query, filter_only: true}
+      - {name: quantization_ms, type: BIGINT, filter_only: true}
+      - {name: rollup, filter_only: true}
+      - {name: timeshift_ms, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "fillmissing, outlier, quantize and timeshift operators are rejected inside the API query string: use quantization_ms / rollup / timeshift_ms."
+      - "An unknown metric name or dimension value returns 0 series, not an error; discover names with a broad query like metric=* _sourceCategory=prod/web | count by metric over a short window."
+      - "Partial results are reported in the body's errors object (metrics:incomplete_results) while the call still succeeds; check the warnings column."
+      - "Aggregate in the query (| avg by _sourceHost, | sum, | topk) rather than pulling every raw series into SQL."
+    examples:
+      - sql: >-
+          SELECT host, max(value) AS peak, arg_max(ts, value) AS peak_at FROM sumologic_metrics_query
+          WHERE query = 'metric=CPU_Total _sourceCategory=prod/web | avg by _sourceHost'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY host ORDER BY peak DESC
+        description: Peak CPU per host in the incident hour and when it peaked.
+      - sql: >-
+          SELECT ts, value FROM sumologic_metrics_query
+          WHERE query = 'metric=http_requests_total service=checkout status_code=5* | rate | sum'
+            AND quantization_ms = 60000 AND rollup = 'Sum'
+          ORDER BY ts
+        description: 5xx request rate for one service at 1-minute resolution.
+    fixtures:
+      - file: metrics_query.json
+        filters: {query: 'metric=CPU_Total'}
+        expect_rows: 3
+        expect_columns: {ts: "2021-06-09T17:11:50Z", value: 1.5, metric: CPU_Total, host: us2-alert-1, source_category: alert, unit: 1/second, row_id: A}
+        note: >-
+          Built strictly from the MetricsQueryResponse schema of the Sumo Logic OpenAPI spec
+          (POST /v1/metricsQueries): queryResult[].rowId/timeSeriesList{timeSeries[].metricDefinition
+          {metric,dimensions}, points{timestamps(ms),values}, unit}, errors{id,errors[{code,message}]},
+          using the schema's own example values (A, CPU_Total, us2-alert-1, 1623258710000, 1.5, 1/second).
+    docs_url: https://www.sumologic.com/help/docs/api/metrics-query/
+
+  # ------------------------------------------------------------------------------------------
+  - name: sumologic_monitors
+    title: Monitors (search, with current status)
+    description: >-
+      Search the monitors library (GET /v1/monitors/search). One row per monitor or folder: id,
+      name/title, path, monitor_type (Logs/Metrics/Slo), status (comma list: Normal, Critical,
+      Warning, MissingData, Disabled), is_disabled, query (first query), queries/triggers/
+      notifications JSON, playbook, created/modified times. Filter on status (pushed down as
+      monitorStatus:<value>; AllTriggered = currently firing) and/or text (free-text name match);
+      without filters every monitor is listed. Use it to find which monitors are firing now and
+      what they evaluate.
+    kind: alerts
+    request:
+      method: GET
+      path: /v1/monitors/search
+      query:
+        query: >-
+          {{ ((('monitorStatus:' ~ filters.monitor_status) if filters.monitor_status else '') ~ ((' ' ~ filters.text) if filters.text else '')) | trim or 'type:MonitorsLibraryMonitor' }}
+    filters:
+      - column: monitor_status
+        ops: ["="]
+        description: "Pushed down as monitorStatus:<value>: Normal, Critical, Warning, MissingData, Disabled or AllTriggered (any triggered state). The status column keeps each monitor's actual status list."
+        examples: [AllTriggered]
+      - {column: text, description: "Free-text term matched against monitor names/descriptions (Sumo content search)", examples: [checkout]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 500, max_pages: 4}
+    response:
+      rows_path: "$[*]"
+    columns:
+      - {name: id, path: "item.id"}
+      - {name: name, path: "item.name"}
+      - {name: title, path: "item.name"}
+      - {name: path, path: "path", description: "Library path, e.g. /Monitors/SampleFolder/TestMonitor"}
+      - {name: type, path: "item.type", description: "MonitorsLibraryMonitor or MonitorsLibraryFolder"}
+      - {name: content_type, path: "item.contentType", description: "Monitor or Folder"}
+      - {name: monitor_type, path: "item.monitorType", description: "Logs, Metrics or Slo"}
+      - {name: status, path: "item.status", transform: join, transform_arg: ",", description: "Current status values (Normal, Critical, Warning, MissingData, Disabled), comma separated"}
+      - {name: state, expr: "(_.item.status | join(',')) if _.item.status else none", description: "Same as status (canonical name)"}
+      - {name: is_disabled, type: BOOLEAN, path: "item.isDisabled"}
+      - {name: description, path: "item.description"}
+      - {name: alert_name, path: "item.alertName"}
+      - {name: query, path: "item.queries[0].query", description: "First query of the monitor (row A)"}
+      - {name: queries, type: JSON, path: "item.queries"}
+      - {name: triggers, type: JSON, path: "item.triggers", description: "Trigger conditions: triggerType (Critical/Warning/MissingData/Resolved*), threshold, thresholdType, timeRange, detectionMethod"}
+      - {name: notifications, type: JSON, path: "item.notifications"}
+      - {name: evaluation_delay, path: "item.evaluationDelay"}
+      - {name: playbook, path: "item.playbook"}
+      - {name: slo_id, path: "item.sloId"}
+      - {name: created_at, type: TIMESTAMP, path: "item.createdAt"}
+      - {name: modified_at, type: TIMESTAMP, path: "item.modifiedAt"}
+      - {name: created_by, path: "item.createdBy"}
+      - {name: modified_by, path: "item.modifiedBy"}
+      - {name: version, type: BIGINT, path: "item.version"}
+      - {name: monitor_status, filter_only: true, description: "monitorStatus search filter (Normal, Critical, Warning, MissingData, Disabled, AllTriggered)"}
+      - {name: text, filter_only: true}
+    pitfalls:
+      - "monitorStatus:AllTriggered returns monitors with any triggered condition; a monitor can be Critical for one time series and Normal for others - status is the monitor-level summary."
+      - "Folders are returned too (content_type = 'Folder'); filter content_type = 'Monitor' in SQL."
+      - "status is derived from the last evaluation; MissingData means the query returned nothing (often an ingestion problem, not health)."
+    examples:
+      - sql: >-
+          SELECT name, monitor_type, status, query, triggers FROM sumologic_monitors
+          WHERE monitor_status = 'AllTriggered'
+        description: Monitors that are firing right now and what they evaluate.
+      - sql: >-
+          SELECT id, name, path, modified_at, modified_by FROM sumologic_monitors
+          WHERE text = 'checkout' AND content_type = 'Monitor' ORDER BY modified_at DESC
+        description: Monitors for a service, most recently changed first (was a threshold edited?).
+    fixtures:
+      - file: monitors_search.json
+        expect_rows: 2
+        expect_columns: {id: "0000000000000003", name: "Search errors", path: /Monitors/SampleFolder/TestMonitor, monitor_type: Logs, status: Critical, query: "_sourceCategory=search error", is_disabled: false, content_type: Monitor}
+        note: >-
+          Built strictly from the ListMonitorsLibraryItemWithPath / MonitorsLibraryMonitorResponse
+          schema of the Sumo Logic OpenAPI spec (GET /v1/monitors/search), using the schema's
+          example values for path, queries, triggers, notifications, evaluationDelay and status; ids,
+          names and timestamps are illustrative.
+    docs_url: https://www.sumologic.com/help/docs/api/monitors-management/
+
+  # ------------------------------------------------------------------------------------------
+  - name: sumologic_monitor
+    title: Monitor by id
+    description: >-
+      One monitor (or folder) by id (GET /v1/monitors/{id}) with its queries, trigger thresholds,
+      notifications, playbook and current status. Filter on id (required). Use it to read the
+      exact condition behind an alert.
+    kind: entities
+    request:
+      method: GET
+      path: "/v1/monitors/{{ filters.id | urlencode }}"
+      accept_status: [404]
+    filters:
+      - {column: id, required: true, description: "Monitor id (16 hex characters)", examples: ['0000000000000003']}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: type, path: type}
+      - {name: content_type, path: contentType}
+      - {name: monitor_type, path: monitorType}
+      - {name: status, path: status, transform: join, transform_arg: ","}
+      - {name: is_disabled, type: BOOLEAN, path: isDisabled}
+      - {name: description, path: description}
+      - {name: query, path: "queries[0].query"}
+      - {name: queries, type: JSON, path: queries}
+      - {name: triggers, type: JSON, path: triggers}
+      - {name: notifications, type: JSON, path: notifications}
+      - {name: evaluation_delay, path: evaluationDelay}
+      - {name: group_notifications, type: BOOLEAN, path: groupNotifications}
+      - {name: playbook, path: playbook}
+      - {name: modified_at, type: TIMESTAMP, path: modifiedAt}
+      - {name: modified_by, path: modifiedBy}
+    examples:
+      - sql: "SELECT name, query, triggers, status, playbook FROM sumologic_monitor WHERE id = '0000000000000003'"
+        description: The condition and playbook of the monitor that fired.
+    fixtures:
+      - file: monitor.json
+        filters: {id: '0000000000000003'}
+        expect_rows: 1
+        expect_columns: {id: "0000000000000003", monitor_type: Logs, status: Critical, query: "_sourceCategory=search error", evaluation_delay: 5m}
+        note: "Built strictly from the MonitorsLibraryMonitorResponse schema (GET /v1/monitors/{id}, Sumo Logic OpenAPI spec) with the schema's example values; ids/names illustrative."
+    docs_url: https://www.sumologic.com/help/docs/api/monitors-management/
+
+  # ------------------------------------------------------------------------------------------
+  - name: sumologic_health_events
+    title: Collector / source health events
+    description: >-
+      Unresolved health events of collectors, sources, ingest budgets and the organisation
+      (GET /v1/healthEvents): ts (eventTime), event_name (e.g. InstalledCollectorOffline),
+      severity (Error/Warning), subsystem, resource id/name/type, tracker_id, error, description.
+      No filters. Use it to tell a data gap (collector offline, S3 access denied, ingest budget
+      exceeded) from a real absence of errors.
+    kind: events
+    request:
+      method: GET
+      path: /v1/healthEvents
+      query: {limit: 1000}
+    pagination: {type: cursor, cursor_path: "$.next", cursor_param: query.token, max_pages: 5}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: eventTime}
+      - {name: id, path: eventId}
+      - {name: event_name, path: eventName}
+      - {name: title, path: eventName}
+      - {name: severity, path: severityLevel, description: "Error or Warning"}
+      - {name: subsystem, path: subsystem}
+      - {name: resource_id, path: "resourceIdentity.id"}
+      - {name: resource_name, path: "resourceIdentity.name"}
+      - {name: resource_type, path: "resourceIdentity.type", description: "Collector, Source, IngestBudget, Organisation, LogsToMetricsRule, ScheduledView ..."}
+      - {name: tracker_id, path: "details.trackerId"}
+      - {name: error, path: "details.error"}
+      - {name: description, path: "details.description"}
+    pitfalls:
+      - "Only unresolved events are listed; a collector that recovered before now does not appear - check message gaps with sumologic_search_records (| timeslice 1m | count by _timeslice | fillmissing timeslice(1m))."
+    examples:
+      - sql: >-
+          SELECT ts, severity, resource_type, resource_name, event_name, error FROM sumologic_health_events
+          ORDER BY ts DESC
+        description: Is any collector or source broken (possible data gap)?
+    fixtures:
+      - file: health_events.json
+        expect_rows: 1
+        expect_columns: {ts: "2018-10-16T09:10:00Z", event_name: InstalledCollectorOffline, severity: Error, resource_id: C03E086C137F38B4, resource_type: Collector, error: "Access denied to Amazon S3 bucket"}
+        note: "Built strictly from the ListHealthEventResponse / HealthEvent schema of the Sumo Logic OpenAPI spec (GET /v1/healthEvents) with the schema's example values."
+    docs_url: https://www.sumologic.com/help/docs/api/health-events/
+
+roles:
+  logs:
+    table: sumologic_search_messages
+    query_language: sumo_logs
+    filters:
+      query: >-
+        {{ ('_sourceCategory=*' ~ service ~ '*') if service else '*' }}{{ (' _sourceHost=' ~ host) if host else '' }}{{ ' (error OR exception OR fatal OR fail*)' if error_only else '' }}
+    columns: {ts: ts, service: source_category, message: message, level: level, host: host, trace_id: trace_id}
+    notes: "Generic default: _sourceCategory naming is deployment specific; refine the scope once the convention is known."
+  log_counts:
+    table: sumologic_search_records
+    query_language: sumo_logs
+    filters:
+      query: >-
+        {{ ('_sourceCategory=*' ~ service ~ '*') if service else '*' }}{{ (' _sourceHost=' ~ host) if host else '' }}{{ ' (error OR exception OR fatal OR fail*)' if error_only else '' }} | timeslice 1m | count as value by _timeslice | fillmissing timeslice(1m)
+    columns: {ts: ts, value: value}
+  metrics:
+    table: sumologic_metrics_query
+    query_language: sumo_metrics
+    columns: {ts: ts, value: value, metric: metric, labels: labels, host: host}
+  active_alerts:
+    table: sumologic_monitors
+    filters: {monitor_status: AllTriggered}
+    columns: {name: name, title: title, state: status, query: query, id: id}
+  alert_rules:
+    table: sumologic_monitor
+    filters: {id: "{{ alert_id }}"}
+    columns: {name: name, title: title, query: query, state: status, id: id}
+  alert_history:
+    table: sumologic_alert_events
+    filters: {monitor_id: "{{ alert_id }}"}
+    columns: {ts: ts, name: title, title: title, state: state, id: alert_id}
+  hosts:
+    table: sumologic_health_events
+    columns: {host: resource_name, health: severity, ts: ts}
+    notes: "Collector/source health (data-collection), not application hosts."

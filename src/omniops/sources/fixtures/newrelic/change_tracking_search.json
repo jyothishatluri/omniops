@@ -1,0 +1,41 @@
+{
+  "data": {
+    "actor": {
+      "changeTracking": {
+        "changeTrackingSearch": {
+          "changeEvents": [
+            {
+              "changeTrackingId": "8a3a594c-e726-4bc2-8078-26dffec9a3d8",
+              "category": "Deployment",
+              "type": "Basic",
+              "shortDescription": "checkout-service 1.2.3",
+              "description": "Roll out retry budget change",
+              "groupId": "release-2026-10-01",
+              "timestamp": 1759321800000,
+              "user": "ci-bot",
+              "customAttributes": {"region": "us-east-1", "isProduction": true},
+              "entity": {"guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA", "name": "checkout-service", "accountId": 1, "entityType": "APM_APPLICATION_ENTITY"},
+              "version": "1.2.3",
+              "commit": "3f2c1a9",
+              "changelog": "https://github.com/example/checkout/releases/tag/v1.2.3",
+              "deepLink": "https://github.com/example/checkout/actions/runs/1"
+            },
+            {
+              "changeTrackingId": "1c9b7a52-0b1f-4a43-9a4b-6d1f0d7e2c11",
+              "category": "Feature Flag",
+              "type": "Basic",
+              "shortDescription": "enable new-pricing",
+              "description": "Flag new-pricing set to 50%",
+              "groupId": null,
+              "timestamp": 1759322100000,
+              "user": "jane@example.com",
+              "customAttributes": null,
+              "entity": {"guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA", "name": "checkout-service", "accountId": 1, "entityType": "APM_APPLICATION_ENTITY"},
+              "featureFlagId": "new-pricing"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

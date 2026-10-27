@@ -1,0 +1,26 @@
+{
+  "A": {
+    "from": "2026-10-01T11:00:00Z",
+    "to": "2026-10-01T11:03:00Z",
+    "window": "1m0s",
+    "keys": ["service.name"],
+    "records": [
+      {
+        "values": ["checkout"],
+        "timeseries": [
+          {"timestamp": "2026-10-01T11:00:00Z", "value": 3},
+          {"timestamp": "2026-10-01T11:01:00Z", "value": 41},
+          {"timestamp": "2026-10-01T11:02:00Z", "value": 187}
+        ],
+        "aggregate": {"value": 231}
+      },
+      {
+        "values": ["api"],
+        "timeseries": [
+          {"timestamp": "2026-10-01T11:02:00Z", "value": 5}
+        ],
+        "aggregate": {"value": 5}
+      }
+    ]
+  }
+}

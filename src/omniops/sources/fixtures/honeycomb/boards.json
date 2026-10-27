@@ -1,0 +1,71 @@
+[
+ {
+  "id": "abc123",
+  "name": "Production Monitoring",
+  "description": "Key metrics for production environment",
+  "type": "flexible",
+  "panels": [
+   {
+    "type": "query",
+    "query_panel": {
+     "query_id": "ghi9012a",
+     "query_annotation_id": "f5e6d7c8"
+    },
+    "position": {
+     "x_coordinate": 0,
+     "y_coordinate": 0,
+     "height": 6,
+     "width": 12
+    }
+   },
+   {
+    "type": "text",
+    "text_panel": {
+     "content": "# Production Status\n\nAll systems operational"
+    },
+    "position": {
+     "x_coordinate": 0,
+     "y_coordinate": 6,
+     "height": 2,
+     "width": 12
+    }
+   }
+  ],
+  "layout_generation": "manual",
+  "tags": [
+   {
+    "key": "environment",
+    "value": "production"
+   }
+  ]
+ },
+ {
+  "id": "def456",
+  "name": "Service Health Dashboard",
+  "description": "SLO monitoring for critical services",
+  "type": "flexible",
+  "panels": [
+   {
+    "type": "slo",
+    "slo_panel": {
+     "slo_id": "dF1URaPGL"
+    }
+   },
+   {
+    "type": "query",
+    "query_panel": {
+     "query_id": "jkl3456b",
+     "query_annotation_id": "b9c8d7e6",
+     "dataset": "api-logs"
+    }
+   }
+  ],
+  "layout_generation": "auto",
+  "tags": [
+   {
+    "key": "team",
+    "value": "platform"
+   }
+  ]
+ }
+]

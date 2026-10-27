@@ -1,0 +1,41 @@
+[
+ {
+  "id": "fS4WfA82kcy",
+  "dataset_slug": "checkout-api",
+  "name": "High error count on checkout",
+  "description": "Page when checkout errors exceed the threshold",
+  "tags": [{"key": "team", "value": "blue"}],
+  "threshold": {"op": ">", "value": 100, "exceeded_limit": 1},
+  "frequency": 900,
+  "alert_type": "on_change",
+  "disabled": false,
+  "triggered": true,
+  "recipients": [{"id": "yUheCUmgZ8p", "type": "slack", "target": "#oncall"}],
+  "evaluation_schedule_type": "frequency",
+  "created_at": "2022-09-22T17:32:11Z",
+  "updated_at": "2022-10-31T15:08:11Z",
+  "query": {
+   "calculations": [{"op": "COUNT"}],
+   "filters": [{"column": "error", "op": "=", "value": true}],
+   "time_range": 900
+  }
+ },
+ {
+  "id": "gT8xgB93ldz",
+  "dataset_slug": "__all__",
+  "name": "Slow requests",
+  "description": "",
+  "tags": [],
+  "threshold": {"op": ">=", "value": 1500, "exceeded_limit": 2},
+  "frequency": 300,
+  "alert_type": "on_group_change",
+  "disabled": false,
+  "triggered": false,
+  "recipients": [],
+  "evaluation_schedule_type": "window",
+  "evaluation_schedule": {"window": {"days_of_week": ["monday", "tuesday"], "start_time": "13:00", "end_time": "21:00"}},
+  "created_at": "2022-09-22T17:32:11Z",
+  "updated_at": "2022-10-31T15:08:11Z",
+  "query_id": "abc3419d"
+ }
+]

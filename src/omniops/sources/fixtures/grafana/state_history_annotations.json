@@ -1,0 +1,81 @@
+{
+  "schema": {
+    "name": "states",
+    "fields": [
+      {
+        "name": "time",
+        "type": "time",
+        "typeInfo": {
+          "frame": "time.Time"
+        },
+        "labels": {
+          "from": "state-history",
+          "ruleUID": "pay-err-rate"
+        }
+      },
+      {
+        "name": "text",
+        "type": "string",
+        "typeInfo": {
+          "frame": "string"
+        },
+        "labels": {
+          "from": "state-history",
+          "ruleUID": "pay-err-rate"
+        }
+      },
+      {
+        "name": "prev",
+        "type": "string",
+        "typeInfo": {
+          "frame": "string"
+        },
+        "labels": {
+          "from": "state-history",
+          "ruleUID": "pay-err-rate"
+        }
+      },
+      {
+        "name": "next",
+        "type": "string",
+        "typeInfo": {
+          "frame": "string"
+        },
+        "labels": {
+          "from": "state-history",
+          "ruleUID": "pay-err-rate"
+        }
+      },
+      {
+        "name": "data",
+        "type": "string",
+        "typeInfo": {
+          "frame": "string"
+        },
+        "labels": {
+          "from": "state-history",
+          "ruleUID": "pay-err-rate"
+        }
+      }
+    ]
+  },
+  "data": {
+    "values": [
+      [
+        1790854920000
+      ],
+      [
+        "PaymentServiceHighErrorRate {alertname=PaymentServiceHighErrorRate, service=payment-service} - B=0.12"
+      ],
+      [
+        "Pending"
+      ],
+      [
+        "Alerting"
+      ],
+      [
+        "{\"values\":{\"B\":0.12,\"C\":1}}"
+      ]
+    ]
+  }
+}

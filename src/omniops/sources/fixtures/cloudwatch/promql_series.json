@@ -1,0 +1,15 @@
+{
+    "status": "success",
+    "data": [
+        {
+            "__name__": "http.server.active_requests",
+            "@resource.service.name": "myservice",
+            "@aws.region": "us-east-1"
+        },
+        {
+            "__name__": "http.server.active_requests",
+            "@resource.service.name": "myservice",
+            "@aws.region": "us-west-2"
+        }
+    ]
+}

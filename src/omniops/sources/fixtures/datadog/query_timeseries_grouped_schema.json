@@ -1,0 +1,14 @@
+{
+  "data": {
+    "id": "0",
+    "type": "timeseries_response",
+    "attributes": {
+      "series": [
+        {"group_tags": ["service:checkout", "env:prod"], "query_index": 0, "unit": [{"family": "time", "name": "millisecond", "plural": "milliseconds", "scale_factor": 0.001, "short_name": "ms"}, null]},
+        {"group_tags": ["service:cart", "env:prod"], "query_index": 0, "unit": null}
+      ],
+      "times": [1790852400000, 1790852460000],
+      "values": [[412.5, 1880.0], [35.2, null]]
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "links": {"_acl": "/services/catalog/metricstore/dimensions/_acl"},
+  "origin": "https://epic-metriks-splk.sv.splunk.com:8089/services/catalog/metricstore/dimensions",
+  "updated": "2017-12-19T00:02:27+00:00",
+  "generator": {"build": "31fcdba9ddc1", "version": "7.0.0"},
+  "entry": [
+    {
+      "name": "App",
+      "id": "https://epic-metriks-splk.sv.splunk.com:8089/services/catalog/metricstore/dimensions/App",
+      "updated": "1970-01-01T00:00:00+00:00",
+      "links": {"alternate": "/services/catalog/metricstore/dimensions/App", "list": "/services/catalog/metricstore/dimensions/App"},
+      "author": "system",
+      "acl": {"app": "", "can_list": false, "can_write": false, "modifiable": false, "owner": "system", "perms": {"read": ["admin", "bbuser", "cat_read", "power", "splunk-system-role", "statsd", "user"], "write": []}, "removable": false, "sharing": "system"},
+      "content": {"eai:acl": null}
+    }
+  ],
+  "paging": {"total": 7, "perPage": 30, "offset": 0},
+  "messages": []
+}

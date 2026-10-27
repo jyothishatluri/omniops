@@ -1,0 +1,30 @@
+{
+  "status": "success",
+  "data": {
+    "type": "time_series",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "aggregations": [
+            {
+              "index": 0,
+              "alias": "agg_value",
+              "meta": {},
+              "series": [
+                {
+                  "labels": [{"key": {"name": "service.name"}, "value": "frontend"}],
+                  "values": [
+                    {"timestamp": 1640995200000, "value": 84000000},
+                    {"timestamp": 1640995260000, "value": 1532000000}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 1200, "bytesScanned": 96000, "durationMs": 35, "stepIntervals": {"A": 60}}
+  }
+}

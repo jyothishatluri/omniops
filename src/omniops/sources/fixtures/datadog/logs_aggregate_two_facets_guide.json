@@ -1,0 +1,41 @@
+{
+  "meta": {
+    "status": "done",
+    "request_id": "MjZUNF9qRG1TaG1Tb01JenhBV2tYd3x3VTNjTUhIQUdaRUZKajQ0YTBqdmZn",
+    "page": {
+      "after": "eyJhZnRlciI6eyJzZXJ2aWNlIjpbImFjdGl2YXRvciIsImFkLWF1Y3Rpb24iXX19"
+    },
+    "elapsed": 5923
+  },
+  "data": {
+    "buckets": [
+      {
+        "computes": {
+          "c0": 312
+        },
+        "by": {
+          "status": "info",
+          "service": "activator"
+        }
+      },
+      {
+        "computes": {
+          "c0": 405606
+        },
+        "by": {
+          "status": "info",
+          "service": "ad-auction"
+        }
+      },
+      {
+        "computes": {
+          "c0": 124
+        },
+        "by": {
+          "status": "error",
+          "service": "ad-auction"
+        }
+      }
+    ]
+  }
+}

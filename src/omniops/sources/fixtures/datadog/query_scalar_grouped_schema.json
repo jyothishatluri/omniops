@@ -1,0 +1,11 @@
+{
+  "data": {
+    "type": "scalar_response",
+    "attributes": {
+      "columns": [
+        {"name": "host", "type": "group", "values": [["web-1"], ["web-2"]]},
+        {"name": "a", "type": "number", "values": [91.5, 12.25], "meta": {"unit": [{"family": "percentage", "name": "percent", "plural": "percent", "scale_factor": 1.0, "short_name": "%"}, null]}}
+      ]
+    }
+  }
+}

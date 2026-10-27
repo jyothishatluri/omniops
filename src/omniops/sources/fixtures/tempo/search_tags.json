@@ -1,0 +1,30 @@
+{
+  "traces": [
+    {
+      "traceID": "d6e9329d67b6146a",
+      "rootServiceName": "frontend",
+      "rootTraceName": "/cart",
+      "startTimeUnixNano": "1634727903545000000",
+      "durationMs": 611
+    },
+    {
+      "traceID": "1b1ba462b409200d",
+      "rootServiceName": "frontend",
+      "rootTraceName": "/cart",
+      "startTimeUnixNano": "1634727775935000000",
+      "durationMs": 611
+    }
+  ],
+  "metrics": {
+    "inspectedTraces": 3100,
+    "inspectedBytes": "3811736",
+    "totalBlocks": 3,
+    "backendReads": "47",
+    "backendBytes": "2415680",
+    "additionalMetrics": {
+      "cacheHits": "124",
+      "cacheMisses": "18",
+      "cacheBytes": "1396224"
+    }
+  }
+}

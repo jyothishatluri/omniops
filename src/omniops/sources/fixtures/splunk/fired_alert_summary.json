@@ -1,0 +1,19 @@
+{
+  "links": {},
+  "origin": "https://localhost:8089/services/alerts/fired_alerts",
+  "updated": "2011-07-11T19:27:22-07:00",
+  "generator": {"version": "102807"},
+  "entry": [
+    {
+      "name": "-",
+      "id": "https://localhost:8089/servicesNS/admin/search/alerts/fired_alerts/-",
+      "updated": "2011-07-11T19:27:22-07:00",
+      "links": {"alternate": "/servicesNS/admin/search/alerts/fired_alerts/-", "list": "/servicesNS/admin/search/alerts/fired_alerts/-"},
+      "author": "admin",
+      "acl": {"app": "search", "can_list": true, "can_write": true, "modifiable": false, "owner": "admin", "perms": {"read": ["*"], "write": ["admin"]}, "removable": false, "sharing": "app"},
+      "content": {"triggered_alert_count": 0}
+    }
+  ],
+  "paging": {"total": 1, "perPage": 30, "offset": 0},
+  "messages": []
+}

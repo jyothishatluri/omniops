@@ -1,0 +1,12 @@
+{
+  "type": "validation_error",
+  "status": 422,
+  "request_id": "631766c4-4afd-4803-997c-cd700928fa4b",
+  "errors": [
+    {
+      "code": "is_required",
+      "message": "A severity is required to open an incident",
+      "source": { "field": "severity_id" }
+    }
+  ]
+}

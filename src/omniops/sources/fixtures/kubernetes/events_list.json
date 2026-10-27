@@ -1,0 +1,101 @@
+{
+ "kind": "EventList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "recommendation-5d8f7c9b6.18a7f3c2b1d4e5f6",
+    "namespace": "shop",
+    "uid": "eb1d4e5f6-0000-4000-8000-000000000000",
+    "resourceVersion": "48190",
+    "creationTimestamp": "2026-10-01T11:41:02Z"
+   },
+   "involvedObject": {
+    "kind": "ReplicaSet",
+    "namespace": "shop",
+    "name": "recommendation-5d8f7c9b6",
+    "uid": "9d3e8c7f-1a4b-4c2d-3e5f-708192031425",
+    "apiVersion": "apps/v1",
+    "resourceVersion": "48001"
+   },
+   "reason": "FailedCreate",
+   "message": "Error creating: pods \"recommendation-5d8f7c9b6-8kq2w\" is forbidden: failed quota: platform-limits: must specify requests.cpu for: recommendation",
+   "source": {
+    "component": "replicaset-controller"
+   },
+   "firstTimestamp": "2026-10-01T11:41:02Z",
+   "lastTimestamp": "2026-10-01T11:58:40Z",
+   "count": 7,
+   "type": "Warning",
+   "eventTime": null,
+   "reportingComponent": "replicaset-controller",
+   "reportingInstance": ""
+  },
+  {
+   "metadata": {
+    "name": "frontend-7c9d8b6f5-p2q3r.18a7f3d0c4e5f607",
+    "namespace": "shop",
+    "uid": "ec4e5f607-0000-4000-8000-000000000000",
+    "resourceVersion": "48190",
+    "creationTimestamp": "2026-10-01T11:45:10Z"
+   },
+   "involvedObject": {
+    "kind": "Pod",
+    "namespace": "shop",
+    "name": "frontend-7c9d8b6f5-p2q3r",
+    "uid": "9d3e8c7f-1a4b-4c2d-3e5f-708192031425",
+    "apiVersion": "v1",
+    "resourceVersion": "48001",
+    "fieldPath": "spec.containers{frontend}"
+   },
+   "reason": "Unhealthy",
+   "message": "Readiness probe failed: HTTP probe failed with statuscode: 503",
+   "source": {
+    "component": "kubelet",
+    "host": "incident-bench-worker"
+   },
+   "firstTimestamp": "2026-10-01T11:45:10Z",
+   "lastTimestamp": "2026-10-01T11:57:55Z",
+   "count": 12,
+   "type": "Warning",
+   "eventTime": null,
+   "reportingComponent": "kubelet",
+   "reportingInstance": "incident-bench-worker"
+  },
+  {
+   "metadata": {
+    "name": "cart-7d9c6b5f4-x2x9q.18a7f3e1d5f60718",
+    "namespace": "shop",
+    "uid": "ed5f60718-0000-4000-8000-000000000000",
+    "resourceVersion": "48190",
+    "creationTimestamp": "2026-10-01T11:50:00Z"
+   },
+   "involvedObject": {
+    "kind": "Pod",
+    "namespace": "shop",
+    "name": "cart-7d9c6b5f4-x2x9q",
+    "uid": "9d3e8c7f-1a4b-4c2d-3e5f-708192031425",
+    "apiVersion": "v1",
+    "resourceVersion": "48001",
+    "fieldPath": "spec.containers{cart}"
+   },
+   "reason": "BackOff",
+   "message": "Back-off restarting failed container cart in pod cart-7d9c6b5f4-x2x9q_shop(1a2b3c4d-0000-4000-8000-000000000001)",
+   "source": {
+    "component": "kubelet",
+    "host": "incident-bench-worker"
+   },
+   "firstTimestamp": "2026-10-01T11:50:00Z",
+   "lastTimestamp": "2026-10-01T11:56:30Z",
+   "count": 3,
+   "type": "Warning",
+   "eventTime": null,
+   "reportingComponent": "kubelet",
+   "reportingInstance": "incident-bench-worker"
+  }
+ ]
+}

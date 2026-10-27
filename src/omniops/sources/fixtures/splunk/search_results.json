@@ -1,0 +1,23 @@
+{ "init_offset" : 0,
+  "messages" : [ { "text" : "base lispy: [ AND index::_internal source::*/metrics.log ]",
+        "type" : "DEBUG"
+      },
+      { "text" : "search context: user=\"admin\", app=\"search\", bs-pathname=\"/Applications/splunk/etc\"",
+        "type" : "DEBUG"
+      }
+    ],
+  "preview" : false,
+  "results" : [ { "index" : "_internal",
+        "source" : "/Applications/splunk/var/log/splunk/metrics.log",
+        "sourcetype" : "splunkd"
+      },
+      { "index" : "_internal",
+        "source" : "/Applications/splunk/var/log/splunk/metrics.log",
+        "sourcetype" : "splunkd"
+      },
+      { "index" : "_internal",
+        "source" : "/Applications/splunk/var/log/splunk/metrics.log",
+        "sourcetype" : "splunkd"
+      }
+    ]
+}

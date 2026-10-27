@@ -1,0 +1,804 @@
+# Coralogix, direct HTTPS (no MCP, no SDK). Every host is region specific:
+#   https://api.<coralogix-domain>   e.g. api.eu2.coralogix.com, api.us1.coralogix.com, api.gov1.coralogixgov.us
+#
+# Data query (DataPrime / Lucene), JSON over HTTP:
+#   POST /api/v1/dataprime/query   body {query, metadata{tier, syntax, startDate, endDate, limit, ...}}
+#   -> 200 application/x-ndjson, one JSON object per line:
+#        {"queryId":{"queryId":"..."}}
+#        {"result":{"results":[{"metadata":[{key,value}],"labels":[{key,value}],"userData":"<json string>"}]}}  (1..n batches)
+#        {"warning":{...}} / {"error":{"message":..., "code":{...}}}
+#        {"statistics":{"status":"COMPLETED|FAILED|CANCELLED|TIMED_OUT|INCOMPLETE", ...}}
+#   startDate inclusive, endDate exclusive, ISO 8601. Default limit 2000 rows, hard limit 12,000 per the API page (15,000 on the limitations page)
+#   (frequent search) / 50,000 (archive). Direct queries are capped at 30 requests/minute.
+# Metrics: Prometheus-compatible API at https://api.<domain>/metrics/api/v1/{query,query_range,
+#   series,labels,label/<name>/values} (no /alerts, /rules, /targets/metadata).
+# Management (OpenAPI v5): https://api.<domain>/mgmt/openapi/5/...  alert definitions (with live
+#   status ALERTING/OK/NO_DATA), incidents (deprecated UI, API kept), cases (successor), SLOs.
+# Alert history: the system dataset system/alerts.history through DataPrime.
+# Research notes and doc links: docs/sources/coralogix.md
+source: coralogix
+display_name: Coralogix
+vendor: Coralogix Ltd.
+description: >-
+  Coralogix DataPrime and Lucene queries over logs, spans and system datasets (alert history),
+  Prometheus-compatible metrics (PromQL), alert definitions with their current alerting status,
+  incidents, cases and SLOs.
+docs_url: https://coralogix.com/docs/dataprime/API/direct-archive-query-http/
+categories: [logs, traces, metrics, alerts, incidents]
+base_url: "https://api.{{ env.CORALOGIX_DOMAIN | trim | lower }}"
+env:
+  - {name: CORALOGIX_API_KEY, description: "Personal or team API key (Settings > API Keys). Use the DataQuerying preset for queries/metrics, add Alerts (alerts:ReadConfig), Incidents and CASE:* read permissions for the management tables. Sent as 'Authorization: Bearer <key>'.", secret: true}
+  - {name: CORALOGIX_DOMAIN, description: "Coralogix domain of the account (NOT the team hostname): us1.coralogix.com, us2.coralogix.com, us3.coralogix.com, eu1.coralogix.com, eu2.coralogix.com, ap1.coralogix.com, ap2.coralogix.com, ap3.coralogix.com or gov1.coralogixgov.us. The API host is api.<domain>; another region's host fails even with a valid key."}
+required_env: [CORALOGIX_API_KEY, CORALOGIX_DOMAIN]
+auth:
+  type: bearer
+  token: "{{ env.CORALOGIX_API_KEY }}"
+headers:
+  Accept: application/json
+rate_limit:
+  concurrency: 3
+  requests_per_minute: 30
+  notes: >-
+    Direct DataPrime/Lucene query requests are capped at 30 per minute (the engine applies 30/min
+    to the whole source). Background queries have separate limits (submit 100/min, status 50/min,
+    data 30/min). Per-query scan limits apply (high tier: 100 MB fetched for OpenSearch-style
+    queries; archive: team quota).
+retention:
+  logs: "per team / TCO policy: frequent search (high tier) is short; archive (TIER_ARCHIVE) is the S3/GCS archive retention"
+  alerts_history: "system dataspace retention (Notification Center customers only)"
+pitfalls:
+  - "CORALOGIX_DOMAIN is the region domain (eu2.coralogix.com), not the team URL (<team>.app.eu2.coralogix.com). A wrong region answers 401/403 even with a valid key."
+  - "Labels: $l.applicationname (application, often the environment or namespace) and $l.subsystemname (subsystem, usually the service/container) are set by the shipper and are case sensitive. List the real values first: source logs | groupby $l.applicationname, $l.subsystemname aggregate count() as value."
+  - "Severity lives in metadata ($m.severity == ERROR, values VERBOSE/DEBUG/INFO/WARNING/ERROR/CRITICAL), not in the user data: filtering $d.severity often returns far fewer rows."
+  - "The default tier is TIER_FREQUENT_SEARCH (high tier). Logs routed to monitoring/compliance (archive-only) by TCO policies are invisible there: set tier = 'TIER_ARCHIVE' to search the archive."
+  - "Unknown fields are silently null (0 rows) unless strict_fields = true, which turns them into a compile error."
+query_languages:
+  dataprime: >-
+    DataPrime: pipe-delimited. source logs | filter $m.severity == ERROR && $l.subsystemname ==
+    'checkout' | filter $d.message ~ 'timeout' | choose $m.timestamp, $l.subsystemname, $d.message
+    | limit 100. Keypaths: $m.* metadata (timestamp, severity, logid), $l.* labels (applicationname,
+    subsystemname, computername), $d.* user data (your JSON fields, $d.kubernetes.pod_name).
+    Aggregate: | groupby $l.subsystemname aggregate count() as value | orderby value desc ;
+    time series: | groupby roundTime($m.timestamp, 1m) as ts aggregate count() as value. Other
+    sources: source spans (traces), source system/alerts.history. Full-text: | lucene 'error AND
+    timeout' or | find 'text' in $d.message. Strings use single quotes; == for equality, ~ for
+    substring/regex-like matching. Never set time inside the query (the ts window is sent as
+    startDate/endDate).
+  lucene: >-
+    Lucene over logs: free text and field:value on user-data fields, e.g. error AND
+    kubernetes.namespace_name:prod NOT status:200, wildcards (time*), phrases ("connection
+    refused"), ranges (duration:[1000 TO *]). Use DataPrime for labels/metadata filters and
+    aggregation.
+  promql: >-
+    PromQL against the Coralogix Prometheus-compatible metrics API: sum by (service_name)
+    (rate(http_requests_total{status_code=~"5.."}[5m])); histogram_quantile(0.95, sum by (le)
+    (rate(x_bucket[5m]))). Label names are the metric's labels (e.g. k8s/OTel resource labels).
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: coralogix_dataprime
+    title: DataPrime query (logs, spans, any dataset)
+    description: >-
+      Run a DataPrime query over the ts window (POST /api/v1/dataprime/query). One row per result
+      record: ts ($m.timestamp, or the ts/timestamp field of an aggregate row), level ($m.severity),
+      application / subsystem / service ($l.applicationname / $l.subsystemname), host
+      ($l.computername), message (message/msg/log/text of the user data, else the raw user data),
+      value (the result field named value), logid, the parsed user data in `data` JSON (plus
+      flattened dynamic columns) and raw metadata/labels lists. Filter on query (required) and
+      ts; optional tier (TIER_FREQUENT_SEARCH default, TIER_ARCHIVE), strict_fields. Use it for
+      log search, error counts per service, time series of counts (groupby roundTime) and span
+      queries (source spans).
+    kind: logs
+    request:
+      method: POST
+      path: /api/v1/dataprime/query
+      headers: {Accept: "application/x-ndjson, application/json"}
+      body:
+        query: "{{ filters.query }}"
+        metadata:
+          tier: "{{ filters.tier or 'TIER_FREQUENT_SEARCH' }}"
+          syntax: QUERY_SYNTAX_DATAPRIME
+          startDate: "{{ time.start | rfc3339_ms }}"
+          endDate: "{{ time.end | rfc3339_ms }}"
+          defaultSource: logs
+          limit: "{{ [limit or 5000, 50000 if (filters.tier == 'TIER_ARCHIVE') else 12000] | min }}"
+          strictFieldsValidation: "{{ filters.strict_fields in (true, 'true', 1, '1') }}"
+      response_format: ndjson
+      timeout_s: 120
+    filters:
+      - column: query
+        required: true
+        description: "DataPrime query starting with a source (source logs | ..., source spans | ...)"
+        examples: ["source logs | filter $m.severity == ERROR && $l.subsystemname == 'checkout' | limit 200"]
+      - {column: tier, description: "TIER_FREQUENT_SEARCH (default, high tier) or TIER_ARCHIVE (archive / monitoring+compliance data)", examples: [TIER_FREQUENT_SEARCH]}
+      - {column: strict_fields, type: BOOLEAN, description: "true = unknown keypaths fail the query instead of silently matching nothing"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 6h}
+    response:
+      rows_path: "$[*].result.results[*]"
+      expand:
+        - {explode: "userData", parse: true, as: ud, keep_empty: true}
+      dynamic: "@ud"
+      errors:
+        - {path: "$[*].error.message", non_empty: true, message: "$[*].error", hint: "Coralogix rejected or aborted the query (syntax, unknown keypath, rate/resource limit): fix the query or narrow the window"}
+        - {path: "$[*].statistics.status", equals: FAILED, message: "$[*].statistics", hint: "the DataPrime query failed"}
+        - {path: "$[*].statistics.status", equals: TIMED_OUT, message: "$[*].statistics", hint: "the DataPrime query timed out: narrow the window or aggregate"}
+        - {path: "$[*].statistics.status", equals: CANCELLED, message: "$[*].statistics", hint: "the DataPrime query was cancelled"}
+    columns:
+      - {name: ts, type: TIMESTAMP, transform: auto_time, expr: "((_.metadata or []) | selectattr('key', 'equalto', 'timestamp') | map(attribute='value') | first) or ((ud.ts or ud.timestamp or ud.time_bucket) if ud is mapping else none)", description: "$m.timestamp (UTC), or the ts / timestamp field of aggregate rows"}
+      - {name: level, expr: "(_.metadata or []) | selectattr('key', 'equalto', 'severity') | map(attribute='value') | first", description: "$m.severity (Debug/Verbose/Info/Warning/Error/Critical)"}
+      - {name: application, expr: "(_.labels or []) | selectattr('key', 'in', ('applicationname', 'applicationName')) | map(attribute='value') | first", description: "$l.applicationname"}
+      - {name: subsystem, expr: "(_.labels or []) | selectattr('key', 'in', ('subsystemname', 'subsystemName')) | map(attribute='value') | first", description: "$l.subsystemname"}
+      - {name: service, expr: "((_.labels or []) | selectattr('key', 'in', ('subsystemname', 'subsystemName', 'serviceName')) | map(attribute='value') | first) or ((ud.subsystemname or ud.serviceName or ud['service.name'] or ud.service) if ud is mapping else none)", description: "Service = $l.subsystemname for logs / $l.serviceName for spans, else a subsystemname/service field of aggregate rows"}
+      - {name: host, expr: "(_.labels or []) | selectattr('key', 'in', ('computername', 'computerName')) | map(attribute='value') | first", description: "$l.computername"}
+      - {name: message, expr: "((ud.message or ud.msg or ud.log or ud.text or (ud.log_obj.message if ud.log_obj is mapping else none)) if ud is mapping else ud)", description: "message / msg / log / text field of the user data; the whole user data when it is plain text"}
+      - {name: trace_id, expr: "(ud.trace_id or ud.traceId or ud.traceID) if ud is mapping else none"}
+      - {name: value, type: DOUBLE, expr: "ud.value if ud is mapping else none", description: "Result field named value (alias your aggregate: aggregate count() as value)"}
+      - {name: logid, expr: "(_.metadata or []) | selectattr('key', 'in', ('logid', 'cxEventId')) | map(attribute='value') | first"}
+      - {name: data, type: JSON, expr: "ud", description: "Parsed user data ($d), or the aggregate row; data->>'status_code'"}
+      - {name: metadata, type: JSON, path: metadata, description: "Raw $m key/value list"}
+      - {name: labels, type: JSON, path: labels, description: "Raw $l key/value list"}
+      - {name: query, filter_only: true, description: "DataPrime query"}
+      - {name: tier, filter_only: true}
+      - {name: strict_fields, type: BOOLEAN, filter_only: true}
+    max_rows: 12000
+    sort_hint: "Raw searches come back in engine order (usually newest first); add | orderby $m.timestamp desc or | orderby value desc."
+    pitfalls:
+      - "Rows are capped by the smallest of | limit N in the query, the request limit (SQL LIMIT or 5000 here) and the tier hard limit (12,000 frequent search per the API reference - the limitations page says 15,000 - and 50,000 archive). Aggregate in DataPrime instead of pulling raw logs into SQL."
+      - "A numberOfResultsLimitWarning / bytesScannedLimitWarning line means the result is truncated; aggregate or narrow the window."
+      - "groupby without a time bucket returns one row per group with ts = null; for time series use groupby roundTime($m.timestamp, 1m) as ts aggregate count() as value (empty buckets are not returned: treat missing minutes as 0)."
+      - "Use $l.subsystemname / $l.applicationname for service scoping - user-data fields such as $d.kubernetes.container_name depend on the shipper."
+      - "Do not use now() relative filters together with the ts window unless nowDate semantics are intended; the window is already applied as startDate/endDate (end exclusive)."
+    examples:
+      - sql: >-
+          SELECT ts, level, subsystem, host, message FROM coralogix_dataprime
+          WHERE query = 'source logs | filter $m.severity == ERROR && $l.subsystemname == ''checkout'' | limit 500'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Error logs of one service in the incident window.
+      - sql: >-
+          SELECT service, value FROM coralogix_dataprime
+          WHERE query = 'source logs | filter $m.severity == ERROR | groupby $l.subsystemname as subsystemname aggregate count() as value | orderby value desc | limit 20'
+          ORDER BY value DESC
+        description: Which services log the most errors.
+      - sql: >-
+          SELECT ts, value FROM coralogix_dataprime
+          WHERE query = 'source logs | filter $l.subsystemname == ''checkout'' && $m.severity == ERROR | groupby roundTime($m.timestamp, 1m) as ts aggregate count() as value'
+            AND ts >= TIMESTAMP '2026-10-01 10:00:00'
+          ORDER BY ts
+        description: Error count per minute for one service (onset and peak).
+      - sql: >-
+          SELECT data->>'operationName' AS operation, value FROM coralogix_dataprime
+          WHERE query = 'source spans | filter $l.serviceName == ''checkout'' | groupby $l.operationName as operationName aggregate count() as value'
+        description: Span counts per operation for a service (spans dataset).
+    fixtures:
+      - file: dataprime_query_doc.ndjson
+        filters: {query: 'source logs | limit 10'}
+        expect_rows: 1
+        expect_columns: {logid: c3ca5343-88dc-4807-a8f3-82832274afb7, application: staging, subsystem: null, ts: null}
+        note: >-
+          Verbatim NDJSON 'API response' example of the Coralogix 'HTTP API queries' page
+          (queryId line, one result batch, statistics line). Its userData is elided in the docs
+          ('{ ... }'), so it stays an unparsed string (message = the raw user data).
+      - file: dataprime_query_logs.ndjson
+        filters: {query: "source logs | filter $m.severity == ERROR | limit 2"}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:02:01.784Z", level: Error, application: production, subsystem: checkout, service: checkout, host: ip-10-0-1-12, message: "payment provider timeout after 30000ms", trace_id: 5b8efff798038103d269b633813fc60c, logid: 2d7a18b8-ddd3-4429-aab9-d510f341c3a4}
+        note: >-
+          Built strictly from the documented QueryResponse schema (Swagger: result.results[].metadata[{key,value}],
+          labels[{key,value}], userData string) and documented keys ($m.timestamp/severity/logid, $l.applicationname/
+          subsystemname/computername); the metadata timestamp format follows the documented sample log
+          ('2024-08-28T11:02:01.784000'). Values are illustrative.
+      - file: dataprime_query_aggregate.ndjson
+        filters: {query: "source logs | groupby roundTime($m.timestamp, 1m) as ts aggregate count() as value"}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 12.0, level: null}
+        note: "Built from the documented QueryResponse schema: aggregate rows carry their fields in userData (metadata/labels empty); field names follow the query aliases."
+      - file: dataprime_query_error.ndjson
+        filters: {query: "source logs | filter $d.x =="}
+        expect_error: "Coralogix rejected or aborted the query"
+        note: "Error-rule check built from the documented QueryResponse schema: an NDJSON line {\"error\":{\"message\",\"code\":{\"rateLimitReached\":{}}}} after the queryId line."
+    docs_url: https://coralogix.com/docs/dataprime/API/direct-archive-query-http/
+
+  # ------------------------------------------------------------------------------------------
+  - name: coralogix_lucene
+    title: Lucene log search
+    description: >-
+      Run a Lucene query over logs in the ts window (same endpoint, syntax QUERY_SYNTAX_LUCENE).
+      One row per log with the same columns as coralogix_dataprime (ts, level, application,
+      subsystem, service, host, message, data JSON). Filter on query (required Lucene) and ts;
+      optional tier. Use it when an existing Coralogix saved view / alert is written in Lucene.
+    kind: logs
+    request:
+      method: POST
+      path: /api/v1/dataprime/query
+      headers: {Accept: "application/x-ndjson, application/json"}
+      body:
+        query: "{{ filters.query }}"
+        metadata:
+          tier: "{{ filters.tier or 'TIER_FREQUENT_SEARCH' }}"
+          syntax: QUERY_SYNTAX_LUCENE
+          startDate: "{{ time.start | rfc3339_ms }}"
+          endDate: "{{ time.end | rfc3339_ms }}"
+          limit: "{{ [limit or 5000, 50000 if (filters.tier == 'TIER_ARCHIVE') else 12000] | min }}"
+      response_format: ndjson
+      timeout_s: 120
+    filters:
+      - {column: query, required: true, description: "Lucene query over logs", examples: ['"connection refused" AND kubernetes.namespace_name:prod']}
+      - {column: tier, description: "TIER_FREQUENT_SEARCH (default) or TIER_ARCHIVE", examples: [TIER_FREQUENT_SEARCH]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 6h}
+    response:
+      rows_path: "$[*].result.results[*]"
+      expand:
+        - {explode: "userData", parse: true, as: ud, keep_empty: true}
+      dynamic: "@ud"
+      errors:
+        - {path: "$[*].error.message", non_empty: true, message: "$[*].error", hint: "Coralogix rejected or aborted the Lucene query: fix the query or narrow the window"}
+        - {path: "$[*].statistics.status", equals: FAILED, message: "$[*].statistics", hint: "the query failed"}
+        - {path: "$[*].statistics.status", equals: TIMED_OUT, message: "$[*].statistics", hint: "the query timed out: narrow the window"}
+    columns:
+      - {name: ts, type: TIMESTAMP, transform: auto_time, expr: "(_.metadata or []) | selectattr('key', 'equalto', 'timestamp') | map(attribute='value') | first"}
+      - {name: level, expr: "(_.metadata or []) | selectattr('key', 'equalto', 'severity') | map(attribute='value') | first"}
+      - {name: application, expr: "(_.labels or []) | selectattr('key', 'in', ('applicationname', 'applicationName')) | map(attribute='value') | first"}
+      - {name: subsystem, expr: "(_.labels or []) | selectattr('key', 'in', ('subsystemname', 'subsystemName')) | map(attribute='value') | first"}
+      - {name: service, expr: "(_.labels or []) | selectattr('key', 'in', ('subsystemname', 'subsystemName')) | map(attribute='value') | first"}
+      - {name: host, expr: "(_.labels or []) | selectattr('key', 'in', ('computername', 'computerName')) | map(attribute='value') | first"}
+      - {name: message, expr: "((ud.message or ud.msg or ud.log or ud.text) if ud is mapping else ud)"}
+      - {name: trace_id, expr: "(ud.trace_id or ud.traceId or ud.traceID) if ud is mapping else none"}
+      - {name: logid, expr: "(_.metadata or []) | selectattr('key', 'in', ('logid', 'cxEventId')) | map(attribute='value') | first"}
+      - {name: data, type: JSON, expr: "ud"}
+      - {name: query, filter_only: true, description: "Lucene query"}
+      - {name: tier, filter_only: true}
+    max_rows: 12000
+    pitfalls:
+      - "Lucene cannot aggregate; use coralogix_dataprime (| lucene '...' | groupby ...) for counts."
+      - "Lucene field names are user-data fields; label/metadata filters (application, subsystem, severity) are easier in DataPrime."
+    examples:
+      - sql: >-
+          SELECT ts, subsystem, message FROM coralogix_lucene
+          WHERE query = '"connection refused" OR "timeout"'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Full-text search for connection errors across services.
+    fixtures:
+      - file: dataprime_query_logs.ndjson
+        filters: {query: 'payment AND timeout'}
+        expect_rows: 2
+        expect_columns: {subsystem: checkout, level: Error, message: "payment provider timeout after 30000ms"}
+        note: "Same documented QueryResponse NDJSON schema as coralogix_dataprime (the endpoint and response are identical; only metadata.syntax differs)."
+    docs_url: https://coralogix.com/docs/dataprime/API/direct-archive-query-http/
+
+  # ------------------------------------------------------------------------------------------
+  - name: coralogix_alert_history
+    title: Alert history (system/alerts.history)
+    description: >-
+      Alert lifecycle records from the system dataset system/alerts.history via DataPrime (one row
+      per alert event): ts (alert.timestamp), title (alertDef.name), alert_def_id, status
+      (Triggered/Resolved), priority (highestPriority or alertDef.priority), alert_type, grouping
+      key, triggered/resolved group counts, alert_url, and the full record in `data`. Filter on ts
+      and optionally query (extra DataPrime stages, e.g. | filter $d.alertDef.name ~ 'checkout').
+      Requires Notification Center.
+    kind: alerts
+    request:
+      method: POST
+      path: /api/v1/dataprime/query
+      headers: {Accept: "application/x-ndjson, application/json"}
+      body:
+        query: "source system/alerts.history{{ (' | ' ~ (filters.query | trim | trim('|') | trim)) if filters.query else '' }}{{ (\" | filter $d.alertDef.name == '\" ~ filters.title ~ \"'\") if filters.title else '' }}"
+        metadata:
+          tier: TIER_FREQUENT_SEARCH
+          syntax: QUERY_SYNTAX_DATAPRIME
+          startDate: "{{ time.start | rfc3339_ms }}"
+          endDate: "{{ time.end | rfc3339_ms }}"
+          limit: "{{ [limit or 5000, 12000] | min }}"
+      response_format: ndjson
+      timeout_s: 120
+    filters:
+      - {column: title, description: "Exact alert definition name (pushed down as $d.alertDef.name == '<name>')", examples: ['checkout error rate']}
+      - {column: query, description: "Extra DataPrime stages appended after the source, e.g. filter $d.alert.status == 'Triggered'", examples: ["filter $d.alert.status == 'Triggered'"]}
+    time: {column: ts, default_lookback: 24h, max_window: 31d, control_lookback: 7d}
+    response:
+      rows_path: "$[*].result.results[*]"
+      expand:
+        - {explode: "userData", parse: true, as: ud, keep_empty: true}
+      errors:
+        - {path: "$[*].error.message", non_empty: true, message: "$[*].error", hint: "alerts.history query failed (the dataset exists only for Notification Center customers)"}
+    columns:
+      - {name: ts, type: TIMESTAMP, transform: auto_time, expr: "(ud.alert.timestamp if ud is mapping else none) or ((_.metadata or []) | selectattr('key', 'equalto', 'timestamp') | map(attribute='value') | first)", description: "alert.timestamp (epoch ns) or $m.timestamp"}
+      - {name: title, expr: "ud.alertDef.name if ud is mapping else none", description: "Alert definition name"}
+      - {name: alert_def_id, expr: "ud.alertDef.id if ud is mapping else none"}
+      - {name: alert_version_id, expr: "ud.alertDef.alertVersionId if ud is mapping else none"}
+      - {name: alert_id, expr: "ud.alert.id if ud is mapping else none", description: "Alert instance id"}
+      - {name: status, expr: "ud.alert.status if ud is mapping else none", description: "Triggered / Resolved"}
+      - {name: state, expr: "ud.alert.status if ud is mapping else none"}
+      - {name: priority, expr: "(ud.alert.highestPriority or ud.alertDef.priority) if ud is mapping else none", description: "P1..P5"}
+      - {name: severity, expr: "(ud.alert.highestPriority or ud.alertDef.priority) if ud is mapping else none"}
+      - {name: alert_type, expr: "ud.alertDef.type if ud is mapping else none"}
+      - {name: grouping_key, expr: "ud.alert.groupingKey if ud is mapping else none"}
+      - {name: triggered_groups, type: BIGINT, expr: "ud.alert.statusBreakdown.totalTriggeredGroupCount if ud is mapping else none"}
+      - {name: resolved_groups, type: BIGINT, expr: "ud.alert.statusBreakdown.totalResolvedGroupCount if ud is mapping else none"}
+      - {name: url, expr: "ud.alert.alertDataUrl if ud is mapping else none", description: "Link to the alert's view"}
+      - {name: entity_labels, type: JSON, expr: "ud.alertDef.entityLabels if ud is mapping else none"}
+      - {name: data, type: JSON, expr: "ud"}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "alerts.history is generated only for alerts processed through Notification Center; otherwise the query returns nothing (or a dataset error). Fall back to coralogix_alert_defs.last_triggered and coralogix_incidents / coralogix_cases."
+      - "Triggered and Resolved are separate records; pair them per alert_def_id + grouping_key."
+    examples:
+      - sql: >-
+          SELECT ts, title, status, priority, grouping_key FROM coralogix_alert_history
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Every alert that triggered or resolved around the incident.
+      - sql: >-
+          SELECT ts, status FROM coralogix_alert_history
+          WHERE title = 'checkout error rate' AND ts >= TIMESTAMP '2026-09-24 00:00:00' ORDER BY ts
+        description: Has this alert been flapping over the past week?
+    fixtures:
+      - file: alerts_history.ndjson
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:05:00Z", title: "checkout error rate", status: Triggered, priority: P1, alert_def_id: 3f2504e0-4f89-11d3-9a0c-0305e82c3301, triggered_groups: 2}
+        note: >-
+          Built strictly from the alerts.history schema on the Coralogix 'alerts.history' system
+          dataset page (alertDef{name,id,alertVersionId,type,priority,entityLabels},
+          alert{timestamp (epoch ns), id, status, groupingKey, highestPriority, alertDataUrl,
+          statusBreakdown{totalGroupCount,totalTriggeredGroupCount,totalResolvedGroupCount}}),
+          wrapped in the documented DataPrime NDJSON QueryResponse envelope. Values illustrative.
+    docs_url: https://coralogix.com/docs/user-guides/data-layer/system_dataspace/alerts-history/
+
+  # ------------------------------------------------------------------------------------------
+  - name: coralogix_metrics_query_range
+    title: PromQL range query (metrics)
+    description: >-
+      Evaluate a PromQL expression over the ts window against the Coralogix Prometheus-compatible
+      metrics API (GET /metrics/api/v1/query_range). One row per (series, timestamp): ts, value,
+      metric, labels JSON. Filter on query (required) and ts; optional step (seconds).
+    kind: timeseries
+    request:
+      method: GET
+      path: /metrics/api/v1/query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression", examples: ['sum by (service_name) (rate(http_requests_total{status_code=~"5.."}[5m]))']}
+      - {column: step, type: BIGINT, description: "Resolution step in seconds (default: auto, ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.data.result[*]"
+      expand:
+        - {explode: values, as: p}
+      errors:
+        - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error: fix the expression; do not retry unchanged"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric, description: "Series labels; labels->>'service_name'"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "An unknown metric or label returns 0 series, not an error: list names with coralogix_metrics_label_values WHERE label = '__name__' first."
+      - "Coralogix-generated metrics (logs2metrics, span metrics) have their own names and labels; check coralogix_metrics_series before writing selectors."
+    examples:
+      - sql: >-
+          SELECT labels->>'service_name' AS service, max(value) AS peak, arg_max(ts, value) AS peak_at
+          FROM coralogix_metrics_query_range
+          WHERE query = 'sum by (service_name) (rate(http_requests_total{status_code=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per service and when it peaked.
+    fixtures:
+      - file: metrics_query_range.json
+        filters: {query: 'up'}
+        expect_rows: 4
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+        note: "Prometheus HTTP API documentation example for /api/v1/query_range; Coralogix documents the Metrics API as Prometheus-compatible and refers to that reference for parameters and responses."
+    docs_url: https://coralogix.com/docs/user-guides/data-query/metrics-api/
+
+  - name: coralogix_metrics_query
+    title: PromQL instant query (metrics)
+    description: Evaluate a PromQL expression at one instant (the end of the ts window). One row per series.
+    kind: timeseries
+    request:
+      method: GET
+      path: /metrics/api/v1/query
+      query:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression returning an instant vector", examples: ['topk(5, sum by (k8s_pod_name) (rate(container_cpu_usage_seconds_total[5m])))']}
+    time: {column: ts, default_lookback: 5m, reapply: false}
+    response:
+      rows_path: "$.data.result[*]"
+      errors:
+        - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error: fix the expression"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT labels, value FROM coralogix_metrics_query WHERE query = 'vector(1)'"
+        description: Connectivity check (the documented example query).
+      - sql: "SELECT labels->>'k8s_pod_name' AS pod, value FROM coralogix_metrics_query WHERE query = 'topk(5, sum by (k8s_pod_name) (rate(container_cpu_usage_seconds_total[5m])))' ORDER BY value DESC"
+        description: Top CPU pods right now.
+    fixtures:
+      - file: metrics_query_vector.json
+        filters: {query: up}
+        expect_rows: 2
+        expect_columns: {value: 1.0, metric: up}
+        note: "Prometheus HTTP API documentation example for /api/v1/query (Coralogix Metrics API is Prometheus-compatible)."
+    docs_url: https://coralogix.com/docs/user-guides/data-query/metrics-api/
+
+  - name: coralogix_metrics_series
+    title: Metric series matching a selector
+    description: List label sets of series matching a selector in the ts window (cheap discovery before querying).
+    kind: entities
+    request:
+      method: GET
+      path: /metrics/api/v1/series
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: match, required: true, description: "Series selector, e.g. {__name__=~\"http_.*\", service_name=\"checkout\"}", examples: ['up']}
+    time: {column: ts, default_lookback: 1h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: metric, path: "__name__"}
+      - {name: labels, type: JSON, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT DISTINCT metric FROM coralogix_metrics_series WHERE match = '{service_name=\"checkout\"}'"
+        description: Which metrics exist for a service.
+    fixtures:
+      - file: metrics_series.json
+        filters: {match: up}
+        expect_rows: 3
+        note: "Prometheus HTTP API documentation example for /api/v1/series."
+    docs_url: https://coralogix.com/docs/user-guides/data-query/metrics-api/
+
+  - name: coralogix_metrics_label_values
+    title: Values of one metric label
+    description: List the values of a metric label (e.g. __name__ for metric names, service_name) - confirm a value exists before filtering.
+    kind: entities
+    request:
+      method: GET
+      path: "/metrics/api/v1/label/{{ filters.label }}/values"
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: label, required: true, description: "Label name (__name__ lists metric names)", examples: [__name__]}
+      - {column: match, description: "Optional series selector"}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: value, path: "."}
+      - {name: label, filter_only: true}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value AS metric FROM coralogix_metrics_label_values WHERE label = '__name__' AND value LIKE '%http%'"
+        description: Find metric names mentioning http.
+    fixtures:
+      - file: metrics_label_values.json
+        filters: {label: job}
+        expect_rows: 2
+        expect_columns: {value: node}
+        note: "Prometheus HTTP API documentation example for /api/v1/label/<name>/values."
+    docs_url: https://coralogix.com/docs/user-guides/data-query/metrics-api/
+
+  # ------------------------------------------------------------------------------------------
+  - name: coralogix_alert_defs
+    title: Alert definitions (with current status)
+    description: >-
+      All alert definitions of the team (GET /mgmt/openapi/5/alerts/alerts/v3). One row per alert:
+      id, name/title, description, enabled, priority (P1..P5), type (LOGS_THRESHOLD,
+      METRIC_THRESHOLD, ...), status (ALERT_DEF_STATUS_ALERTING / OK / NO_DATA = live state),
+      last_triggered, query (Lucene, PromQL or DataPrime of the condition), group_by_keys,
+      entity_labels, created/updated, and the full properties JSON. No pushdown filters; filter
+      in SQL. Use it to find what is alerting now and the condition behind an alert.
+    kind: alerts
+    request:
+      method: GET
+      path: /mgmt/openapi/5/alerts/alerts/v3
+    response:
+      rows_path: "$.alertDefs[*]"
+    columns:
+      - {name: id, path: id, description: "Persistent alert definition id"}
+      - {name: name, path: "alertDefProperties.name"}
+      - {name: title, path: "alertDefProperties.name"}
+      - {name: description, path: "alertDefProperties.description"}
+      - {name: enabled, type: BOOLEAN, path: "alertDefProperties.enabled"}
+      - {name: priority, path: "alertDefProperties.priority", description: "ALERT_DEF_PRIORITY_P1 (highest) .. P4, P5_OR_UNSPECIFIED"}
+      - {name: severity, path: "alertDefProperties.priority"}
+      - {name: type, path: "alertDefProperties.type", description: "ALERT_DEF_TYPE_LOGS_THRESHOLD, _LOGS_IMMEDIATE_OR_UNSPECIFIED, _METRIC_THRESHOLD, _TRACING_THRESHOLD, _FLOW, _SLO_THRESHOLD ..."}
+      - {name: status, path: status, description: "Live status: ALERT_DEF_STATUS_ALERTING, ALERT_DEF_STATUS_OK, ALERT_DEF_STATUS_NO_DATA"}
+      - {name: state, path: status}
+      - {name: last_triggered, type: TIMESTAMP, path: lastTriggeredTime}
+      - {name: query, expr: "_.alertDefProperties.logsThreshold.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsImmediate.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsAnomaly.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsNewValue.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsUniqueCount.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsTimeRelativeThreshold.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsRatioThreshold.numerator.simpleFilter.luceneQuery or _.alertDefProperties.metricThreshold.metricFilter.promql or _.alertDefProperties.metricAnomaly.metricFilter.promql or _.alertDefProperties.analyticsThreshold.dataprimeQuery.query or _.alertDefProperties.analyticsImmediate.dataprimeQuery.query", description: "The condition's query: Lucene (logs alerts), PromQL (metric alerts) or DataPrime (analytics alerts)"}
+      - {name: group_by_keys, type: JSON, path: "alertDefProperties.groupByKeys"}
+      - {name: entity_labels, type: JSON, path: "alertDefProperties.entityLabels"}
+      - {name: phantom_mode, type: BOOLEAN, path: "alertDefProperties.phantomMode"}
+      - {name: alert_version_id, path: alertVersionId}
+      - {name: created_at, type: TIMESTAMP, path: createdTime}
+      - {name: updated_at, type: TIMESTAMP, path: updatedTime}
+      - {name: properties, type: JSON, path: alertDefProperties, description: "Full definition (thresholds in <type>.rules[].condition)"}
+    pitfalls:
+      - "status is the live evaluation state; an alert in phantom_mode evaluates but never creates incidents/cases."
+      - "Thresholds and time windows are inside properties-><type>.rules[].condition (threshold, timeWindow / ofTheLast, conditionType)."
+      - "The list returns at most 1000 definitions per call and this table does not paginate further."
+    examples:
+      - sql: >-
+          SELECT name, priority, type, last_triggered, query FROM coralogix_alert_defs
+          WHERE status = 'ALERT_DEF_STATUS_ALERTING' ORDER BY priority
+        description: Alerts that are firing right now and their conditions.
+      - sql: >-
+          SELECT name, status, updated_at, properties->'metricThreshold'->'rules' AS rules FROM coralogix_alert_defs
+          WHERE name ILIKE '%checkout%'
+        description: Thresholds and recent edits of a service's alerts.
+    fixtures:
+      - file: alert_defs.json
+        expect_rows: 2
+        expect_columns: {id: cb7e34ab-26a5-426e-b069-272eebc7b2bf, name: logs threshold, priority: ALERT_DEF_PRIORITY_P2, type: ALERT_DEF_TYPE_LOGS_THRESHOLD, status: ALERT_DEF_STATUS_ALERTING, query: "_exists_:field", enabled: true, last_triggered: "2026-10-01T11:04:00Z"}
+        note: >-
+          The two alertDef objects are the verbatim 'Response' samples of 'Create a standard alert
+          with a threshold' and 'Create a metric alert with a threshold' (Coralogix Alerts API v3
+          page), placed in the documented ListAlertDefsResponse envelope (alertDefs[]); status and
+          lastTriggeredTime are added from the AlertDef schema (OpenAPI v5) since create responses omit them.
+    docs_url: https://coralogix.com/docs/api-reference/v5/alert-definitions-service/get-a-list-of-all-accessible-alert-definitions/
+
+  - name: coralogix_alert_def
+    title: Alert definition by id
+    description: One alert definition by id (GET /mgmt/openapi/5/alerts/alerts/v3/{id}) with its full condition. Filter on id (required).
+    kind: entities
+    request:
+      method: GET
+      path: "/mgmt/openapi/5/alerts/alerts/v3/{{ filters.id | urlencode }}"
+      accept_status: [404]
+    filters:
+      - {column: id, required: true, description: "Alert definition id (UUID)", examples: [bb835aa2-7462-4d39-903b-9eab7dbaf1ca]}
+    response:
+      rows_path: "$.alertDef"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: "alertDefProperties.name"}
+      - {name: description, path: "alertDefProperties.description"}
+      - {name: enabled, type: BOOLEAN, path: "alertDefProperties.enabled"}
+      - {name: priority, path: "alertDefProperties.priority"}
+      - {name: type, path: "alertDefProperties.type"}
+      - {name: status, path: status}
+      - {name: last_triggered, type: TIMESTAMP, path: lastTriggeredTime}
+      - {name: query, expr: "_.alertDefProperties.logsThreshold.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsImmediate.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsAnomaly.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsNewValue.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsUniqueCount.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsTimeRelativeThreshold.logsFilter.simpleFilter.luceneQuery or _.alertDefProperties.logsRatioThreshold.numerator.simpleFilter.luceneQuery or _.alertDefProperties.metricThreshold.metricFilter.promql or _.alertDefProperties.metricAnomaly.metricFilter.promql or _.alertDefProperties.analyticsThreshold.dataprimeQuery.query or _.alertDefProperties.analyticsImmediate.dataprimeQuery.query"}
+      - {name: updated_at, type: TIMESTAMP, path: updatedTime}
+      - {name: properties, type: JSON, path: alertDefProperties}
+    examples:
+      - sql: "SELECT name, type, query, properties FROM coralogix_alert_def WHERE id = 'bb835aa2-7462-4d39-903b-9eab7dbaf1ca'"
+        description: The exact condition behind an alert.
+    fixtures:
+      - file: alert_def.json
+        filters: {id: bb835aa2-7462-4d39-903b-9eab7dbaf1ca}
+        expect_rows: 1
+        expect_columns: {name: metrics threshold, type: ALERT_DEF_TYPE_METRIC_THRESHOLD, query: "sum(http_requests_total{job=\"api-server\"}) by (job)"}
+        note: "Verbatim 'Response' sample of 'Create a metric alert with a threshold' (Coralogix Alerts API v3 page); GetAlertDef returns the same {alertDef:{...}} shape per the OpenAPI v5 reference."
+    docs_url: https://coralogix.com/docs/api-reference/v5/alert-definitions-service/get-alert-definition-by-id/
+
+  # ------------------------------------------------------------------------------------------
+  - name: coralogix_incidents
+    title: Incidents
+    description: >-
+      Incidents created in the ts window (POST /mgmt/openapi/5/incidents/incidents/v1), newest
+      first: id, title/name, description, status (TRIGGERED/ACKNOWLEDGED/RESOLVED), state,
+      severity, created/closed/last-update times, duration, muted, assignee, contextual and display
+      labels (application, subsystem, alert grouping), events JSON. Optional status / severity
+      pushdown. Use it for alert-driven incidents during the window (accounts on Cases: use coralogix_cases).
+    kind: incidents
+    request:
+      method: POST
+      path: /mgmt/openapi/5/incidents/incidents/v1
+      body:
+        filter:
+          createdAtRange:
+            startTime: "{{ time.start | rfc3339_ms }}"
+            endTime: "{{ time.end | rfc3339_ms }}"
+          status: "{{ filters.status | as_list if filters.status else none }}"
+          severity: "{{ filters.severity | as_list if filters.severity else none }}"
+        orderBys:
+          - {incidentField: INCIDENTS_FIELDS_CREATED_TIME, direction: ORDER_BY_DIRECTION_DESC}
+        pagination: {pageSize: 100}
+    filters:
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "INCIDENT_STATUS_TRIGGERED, INCIDENT_STATUS_ACKNOWLEDGED, INCIDENT_STATUS_RESOLVED", examples: [INCIDENT_STATUS_TRIGGERED]}
+      - {column: severity, ops: ["=", "in"], fan_out: false, description: "INCIDENT_SEVERITY_CRITICAL, _ERROR, _WARNING, _INFO, _LOW", examples: [INCIDENT_SEVERITY_CRITICAL]}
+    time: {column: created_at, default_lookback: 24h, max_window: 31d}
+    pagination: {type: cursor, cursor_path: "$.pagination.nextPageToken", cursor_param: body.pagination.pageToken, max_pages: 5}
+    response:
+      rows_path: "$.incidents[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: title, path: name}
+      - {name: description, path: description}
+      - {name: status, path: status}
+      - {name: state, path: state, description: "INCIDENT_STATE_TRIGGERED / INCIDENT_STATE_RESOLVED"}
+      - {name: severity, path: severity}
+      - {name: created_at, type: TIMESTAMP, path: createdAt}
+      - {name: closed_at, type: TIMESTAMP, path: closedAt}
+      - {name: last_state_update, type: TIMESTAMP, path: lastStateUpdateTime}
+      - {name: duration, path: duration}
+      - {name: is_muted, type: BOOLEAN, path: isMuted}
+      - {name: assignee, path: "assignments[0].assignedTo.userId"}
+      - {name: contextual_labels, type: JSON, path: contextualLabels}
+      - {name: display_labels, type: JSON, path: displayLabels}
+      - {name: meta_labels, type: JSON, path: metaLabels}
+      - {name: events, type: JSON, path: events}
+    pitfalls:
+      - "The Incidents view is retired on 2026-10-30 in favour of Cases; the Incidents API keeps working but new accounts only have Cases (coralogix_cases)."
+      - "The window filters on creation time: an incident opened before the window and still open is not returned; widen the window or query coralogix_cases (active-window semantics)."
+    examples:
+      - sql: >-
+          SELECT created_at, title, severity, status, contextual_labels FROM coralogix_incidents
+          WHERE created_at >= TIMESTAMP '2026-10-01 10:00:00' ORDER BY created_at
+        description: Incidents opened around the event.
+      - sql: >-
+          SELECT title, created_at, duration FROM coralogix_incidents
+          WHERE status = 'INCIDENT_STATUS_TRIGGERED' AND severity IN ('INCIDENT_SEVERITY_CRITICAL', 'INCIDENT_SEVERITY_ERROR')
+        description: Still-open critical incidents.
+    fixtures:
+      - file: incidents.json
+        expect_rows: 1
+        expect_columns: {id: 3f2504e0-4f89-11d3-9a0c-0305e82c3301, title: "checkout error rate", status: INCIDENT_STATUS_TRIGGERED, state: INCIDENT_STATE_TRIGGERED, severity: INCIDENT_SEVERITY_CRITICAL, created_at: "2026-10-01T11:05:00Z"}
+        note: "Built strictly from the ListIncidentsResponse / Incident schema of the Coralogix OpenAPI v5 spec (POST /incidents/incidents/v1) and its examples; values illustrative."
+    docs_url: https://coralogix.com/docs/api-reference/v5/incidents-service/list-incidents-with-filters/
+
+  - name: coralogix_cases
+    title: Cases (incident response)
+    description: >-
+      Cases active during the ts window (POST /mgmt/openapi/5/cases/cases/v1, dateRange mode
+      ACTIVE_WINDOW), newest first: id, readable_id, title, status (ACTIVE/ACKNOWLEDGED/RESOLVED/
+      CLOSED), priority (P1..P5), category, created/updated/acknowledged/resolved times, assignee,
+      groupings (service, subsystem...), labels, the alert indicators that opened the case and
+      Olly's AI summary. Optional status / priority pushdown.
+    kind: incidents
+    request:
+      method: POST
+      path: /mgmt/openapi/5/cases/cases/v1
+      body:
+        filters:
+          dateRange:
+            from: "{{ time.start | rfc3339_ms }}"
+            to: "{{ time.end | rfc3339_ms }}"
+            mode: DATE_RANGE_MODE_ACTIVE_WINDOW
+          statuses: "{{ filters.status | as_list if filters.status else none }}"
+          priorities: "{{ filters.priority | as_list if filters.priority else none }}"
+        orderBy: {field: CASE_ORDER_BY_FIELD_CREATED_AT, direction: CASE_ORDER_BY_DIRECTION_DESCENDING}
+        pagination: {pageSize: 100}
+    filters:
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "CASE_STATUS_ACTIVE, CASE_STATUS_ACKNOWLEDGED, CASE_STATUS_RESOLVED, CASE_STATUS_CLOSED, CASE_STATUS_PENDING_ACTIVATION", examples: [CASE_STATUS_ACTIVE]}
+      - {column: priority, ops: ["=", "in"], fan_out: false, description: "CASE_PRIORITY_P1 .. CASE_PRIORITY_P5", examples: [CASE_PRIORITY_P1]}
+    time: {column: created_at, default_lookback: 24h, max_window: 31d, reapply: false}
+    pagination: {type: cursor, cursor_path: "$.pagination.nextPageToken", cursor_param: body.pagination.pageToken, max_pages: 5}
+    response:
+      rows_path: "$.cases[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: readable_id, path: readableId}
+      - {name: title, path: title}
+      - {name: status, path: status}
+      - {name: state, path: status}
+      - {name: priority, path: priority}
+      - {name: severity, path: priority}
+      - {name: category, path: category}
+      - {name: created_at, type: TIMESTAMP, path: createTime}
+      - {name: updated_at, type: TIMESTAMP, path: updateTime}
+      - {name: acknowledged_at, type: TIMESTAMP, path: acknowledgeTime}
+      - {name: resolved_at, type: TIMESTAMP, path: "resolutionDetails.resolveTime"}
+      - {name: duration_ms, type: DOUBLE, path: duration, description: "How long the case is/was open, ms"}
+      - {name: assignee, path: "assignee.userId"}
+      - {name: groupings, type: JSON, path: groupings, description: "[{key, value}] e.g. service / subsystem"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: alert_ids, expr: "(_.caseIndicators.alertIndicators or []) | map(attribute='alertId') | join(',')", description: "Alert definition ids that contributed"}
+      - {name: alert_indicators, type: JSON, path: "caseIndicators.alertIndicators", description: "[{alertId, state, priority, triggerTime, resolveTime, ...}]"}
+      - {name: summary, path: aiSummary, description: "Olly AI summary of the case"}
+    pitfalls:
+      - "The window uses ACTIVE_WINDOW semantics (cases active at any point in the range), so created_at can be before the window; the engine does not re-filter on created_at."
+      - "Cases need the CASE:* read permissions on the API key (no preset)."
+    examples:
+      - sql: >-
+          SELECT readable_id, title, priority, status, created_at, alert_ids, summary FROM coralogix_cases
+          WHERE created_at >= TIMESTAMP '2026-10-01 10:00:00' ORDER BY priority, created_at
+        description: Cases active around the incident, with the alerts behind them.
+      - sql: "SELECT title, created_at, groupings FROM coralogix_cases WHERE status IN ('CASE_STATUS_ACTIVE', 'CASE_STATUS_ACKNOWLEDGED')"
+        description: Open cases right now.
+    fixtures:
+      - file: cases.json
+        expect_rows: 1
+        expect_columns: {id: 3f166e9f-3c88-4af2-b52e-138f339dab3e, readable_id: CASE-123, title: "Database outage investigation", status: CASE_STATUS_ACKNOWLEDGED, priority: CASE_PRIORITY_P2, alert_ids: f56645c5-9cd4-4b9f-961f-4f852d8835a0}
+        note: "Built strictly from the ListCasesResponse / Case schema of the Coralogix OpenAPI v5 spec (POST /cases/cases/v1) using the schema's example values (id, readableId, title, status, priority, category, labels, alertIds)."
+    docs_url: https://coralogix.com/docs/api-reference/v5/cases-service/list-cases-with-filters/
+
+  - name: coralogix_slos
+    title: SLOs
+    description: SLO definitions (GET /mgmt/openapi/5/slo/slos/v1) - id, name, target percentage, time frame, type, labels, created/updated. No filters.
+    kind: entities
+    request:
+      method: GET
+      path: /mgmt/openapi/5/slo/slos/v1
+    response:
+      rows_path: "$.slos[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: target_pct, type: DOUBLE, path: targetThresholdPercentage}
+      - {name: time_frame, path: sloTimeFrame}
+      - {name: slo_type, path: sloType}
+      - {name: product_type, path: productType}
+      - {name: labels, type: JSON, path: labels}
+      - {name: grouping, type: JSON, path: grouping}
+      - {name: definition, type: JSON, expr: "_.requestBasedMetricSli or _.windowBasedMetricSli or _.apmSli"}
+      - {name: created_at, type: TIMESTAMP, path: createTime}
+      - {name: updated_at, type: TIMESTAMP, path: updateTime}
+    examples:
+      - sql: "SELECT name, target_pct, time_frame, definition FROM coralogix_slos WHERE name ILIKE '%checkout%'"
+        description: Which SLOs cover a service and their target.
+    fixtures:
+      - file: slos.json
+        expect_rows: 1
+        expect_columns: {id: b11919d5-ef85-4bb1-8655-02640dbe94d9, name: Example Slo Name, target_pct: 99.999, time_frame: SLO_TIME_FRAME_1_DAY, slo_type: SLO_TYPE_REQUEST}
+        note: "Built strictly from the ListSlosResponse / Slo schema of the Coralogix OpenAPI v5 spec (GET /slo/slos/v1) using the schema example values (id, name, creator, targetThresholdPercentage 99.999, SLO_TIME_FRAME_1_DAY, RequestBasedMetricSli goodEvents/totalEvents queries)."
+    docs_url: https://coralogix.com/docs/api-reference/v5/slos-service/list-slos/
+
+roles:
+  logs:
+    table: coralogix_dataprime
+    query_language: dataprime
+    filters:
+      query: >-
+        source logs{{ (" | filter $l.subsystemname == '" ~ service ~ "'") if service else '' }}{{ (" | filter $l.computername == '" ~ host ~ "'") if host else '' }}{{ ' | filter $m.severity == ERROR || $m.severity == CRITICAL' if error_only else '' }} | limit 1000
+    columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id}
+  log_counts:
+    table: coralogix_dataprime
+    query_language: dataprime
+    filters:
+      query: >-
+        source logs{{ (" | filter $l.subsystemname == '" ~ service ~ "'") if service else '' }}{{ (" | filter $l.computername == '" ~ host ~ "'") if host else '' }}{{ ' | filter $m.severity == ERROR || $m.severity == CRITICAL' if error_only else '' }} | groupby roundTime($m.timestamp, 1m) as ts aggregate count() as value
+    columns: {ts: ts, value: value}
+    notes: "Empty minutes are not returned; treat gaps as 0."
+  traces:
+    table: coralogix_dataprime
+    query_language: dataprime
+    filters:
+      query: >-
+        source spans{{ (" | filter $l.serviceName == '" ~ service ~ "'") if service else '' }} | limit 500
+    columns: {ts: ts, service: service, labels: labels}
+    notes: "Span fields live in data JSON (operationName, duration, traceID, tags); verify keypaths with a small query first."
+  metrics:
+    table: coralogix_metrics_query_range
+    query_language: promql
+    columns: {ts: ts, value: value, metric: metric, labels: labels}
+  active_alerts:
+    table: coralogix_alert_defs
+    columns: {name: name, title: title, state: status, severity: priority, query: query, ts: last_triggered, id: id}
+    notes: "Filter status = 'ALERT_DEF_STATUS_ALERTING' in SQL."
+  alert_rules:
+    table: coralogix_alert_def
+    filters: {id: "{{ alert_id }}"}
+    columns: {name: name, query: query, state: status, id: id}
+  alert_history:
+    table: coralogix_alert_history
+    columns: {ts: ts, name: title, title: title, state: status, severity: priority, id: alert_def_id}
+  incidents:
+    - table: coralogix_cases
+      columns: {ts: created_at, title: title, state: status, severity: priority, id: id}
+    - table: coralogix_incidents
+      columns: {ts: created_at, title: title, state: status, severity: severity, id: id}
+  slo:
+    table: coralogix_slos
+    columns: {name: name, target: target_pct}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 403,
+    "message": "Error Reporting API has not been used in project my-project before or it is disabled.",
+    "status": "PERMISSION_DENIED"
+  }
+}

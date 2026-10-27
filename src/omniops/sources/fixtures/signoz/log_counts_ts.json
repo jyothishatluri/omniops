@@ -1,0 +1,38 @@
+{
+  "status": "success",
+  "data": {
+    "type": "time_series",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "aggregations": [
+            {
+              "index": 0,
+              "alias": "agg_value",
+              "meta": {},
+              "series": [
+                {
+                  "labels": [{"key": {"name": "service.name"}, "value": "frontend"}],
+                  "values": [
+                    {"timestamp": 1640995200000, "value": 12},
+                    {"timestamp": 1640995260000, "value": 31},
+                    {"timestamp": 1640995320000, "value": 4, "partial": true}
+                  ]
+                },
+                {
+                  "labels": [{"key": {"name": "service.name"}, "value": "checkout"}],
+                  "values": [
+                    {"timestamp": 1640995200000, "value": 0},
+                    {"timestamp": 1640995260000, "value": 7}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 54, "bytesScanned": 10240, "durationMs": 21, "stepIntervals": {"A": 60}}
+  }
+}

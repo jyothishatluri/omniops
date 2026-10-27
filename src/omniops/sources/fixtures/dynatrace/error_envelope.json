@@ -1,0 +1,14 @@
+{
+ "error": {
+  "code": 1,
+  "constraintViolations": [
+   {
+    "location": "string",
+    "message": "string",
+    "parameterLocation": "HEADER",
+    "path": "string"
+   }
+  ],
+  "message": "string"
+ }
+}

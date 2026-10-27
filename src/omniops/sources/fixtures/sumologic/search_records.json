@@ -1,0 +1,10 @@
+{
+   "warning": "",
+   "fields":[
+      {"name":"_sourceCategory","fieldType":"string","keyField":true},
+      {"name":"_count","fieldType":"int","keyField":false}
+   ],
+   "records":[
+      {"map":{"_count":"90","_sourceCategory":"service"}}
+   ]
+}

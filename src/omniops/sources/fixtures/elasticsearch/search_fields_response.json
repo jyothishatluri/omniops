@@ -1,0 +1,30 @@
+{
+  "hits": {
+    "total": {
+      "value": 1,
+      "relation": "eq"
+    },
+    "max_score": 1.0,
+    "hits": [
+      {
+        "_index": "my-index-000001",
+        "_id": "0",
+        "_score": 1.0,
+        "fields": {
+          "user.id": [
+            "kimchy"
+          ],
+          "@timestamp": [
+            "4098435132000"
+          ],
+          "http.response.bytes": [
+            1070000
+          ],
+          "http.response.status_code": [
+            200
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "error": "string",
+  "from_date": "integer",
+  "group_by": [],
+  "message": "string",
+  "query": "string",
+  "res_type": "time_series",
+  "resp_version": 1,
+  "series": [
+    {
+      "aggr": "avg",
+      "attributes": {},
+      "display_name": "system.cpu.idle",
+      "end": "integer",
+      "expression": "system.cpu.idle{host:foo,env:test}",
+      "interval": "integer",
+      "length": "integer",
+      "metric": "system.cpu.idle",
+      "pointlist": [
+        [
+          1681683300000,
+          77.62145685254418
+        ]
+      ],
+      "query_index": "integer",
+      "scope": "host:foo,env:test",
+      "start": "integer",
+      "tag_set": [],
+      "unit": [
+        {
+          "family": "percentage",
+          "id": 17,
+          "name": "percent",
+          "plural": "percent",
+          "scale_factor": 1,
+          "short_name": "%"
+        }
+      ]
+    }
+  ],
+  "status": "ok",
+  "times": [],
+  "to_date": "integer",
+  "values": []
+}

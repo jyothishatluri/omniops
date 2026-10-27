@@ -1,0 +1,38 @@
+{
+  "status": "success",
+  "data": {
+    "type": "list",
+    "endTimeBeforeRetention": false,
+    "total": 2,
+    "records": [
+      {
+        "podUID": "pod-uid-5",
+        "podStatus": "crashloopbackoff",
+        "podAge": 108000000,
+        "podCPU": 0.42,
+        "podCPULimit": 0.84,
+        "podCPURequest": 1.68,
+        "podMemory": 503316480,
+        "podMemoryLimit": 0.94,
+        "podMemoryRequest": 1.88,
+        "podRestarts": 8,
+        "podCountsByStatus": {"pending": 0, "running": 0, "failed": 0, "unknown": 0, "crashLoopBackOff": 1, "imagePullBackOff": 0, "errImagePull": 0, "createContainerConfigError": 0, "containerCreating": 0, "oomKilled": 0, "completed": 0, "error": 0, "containerCannotRun": 0, "evicted": 0, "nodeAffinity": 0, "nodeLost": 0, "shutdown": 0, "unexpectedAdmissionError": 0},
+        "meta": {"k8s.cluster.name": "prod-us-east", "k8s.namespace.name": "payments", "deployment.environment": "production", "k8s.pod.name": "checkout-7d9f14-x4k2p", "k8s.pod.uid": "pod-uid-5", "k8s.node.name": "ip-10-0-3-17", "k8s.deployment.name": "checkout"}
+      },
+      {
+        "podUID": "pod-uid-1",
+        "podStatus": "running",
+        "podAge": 21600000,
+        "podCPU": 0.12,
+        "podCPULimit": 0.24,
+        "podCPURequest": 0.48,
+        "podMemory": 268435456,
+        "podMemoryLimit": 0.5,
+        "podMemoryRequest": 1.0,
+        "podRestarts": 0,
+        "podCountsByStatus": {"pending": 0, "running": 1, "failed": 0, "unknown": 0, "crashLoopBackOff": 0, "imagePullBackOff": 0, "errImagePull": 0, "createContainerConfigError": 0, "containerCreating": 0, "oomKilled": 0, "completed": 0, "error": 0, "containerCannotRun": 0, "evicted": 0, "nodeAffinity": 0, "nodeLost": 0, "shutdown": 0, "unexpectedAdmissionError": 0},
+        "meta": {"k8s.cluster.name": "prod-us-east", "k8s.namespace.name": "payments", "deployment.environment": "production", "k8s.pod.name": "cart-7d9f10-m7vqz", "k8s.pod.uid": "pod-uid-1", "k8s.node.name": "ip-10-0-3-18", "k8s.deployment.name": "cart"}
+      }
+    ]
+  }
+}

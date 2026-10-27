@@ -1,0 +1,45 @@
+{
+  "platform": "datadog",
+  "description": "Datadog app for Slack: the same monitor and group re-triggered 38 minutes after the first trigger (a flapping monitor).",
+  "provenance": "Datadog Slack integration docs; 'Re-Triggered' is Datadog's state for a monitor that re-enters alert after recovering, used with {{#is_alert}} / {{#is_renotify}} template conditionals. Link window conventions as in datadog_triggered.",
+  "event": {
+    "type": "message",
+    "user": "U01DDAPP01",
+    "bot_id": "B01DDBOT01",
+    "app_id": "A01DATADOG",
+    "bot_profile": {"id": "B01DDBOT01", "app_id": "A01DATADOG", "name": "Datadog", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "E01E5A",
+        "fallback": "[Re-Triggered on {host:web-01,env:prod}] [P2] High CPU on checkout web tier",
+        "title": "[Re-Triggered on {host:web-01,env:prod}] [P2] High CPU on checkout web tier",
+        "title_link": "https://app.datadoghq.com/monitors/48213977?group=host%3Aweb-01%2Cenv%3Aprod&from_ts=1792506300000&to_ts=1792507500000&event_id=7781234567890200001&link_source=monitor_notif",
+        "text": "CPU usage on web-01 has been above 90% for 5 minutes.\nValue: 93.8\nThreshold: 90\nThe monitor was last triggered at Tue Oct 20 2026 14:40:00 UTC.\n@slack-acme-ops-alerts",
+        "fields": [
+          {"title": "Related Tags", "value": "env:prod, host:web-01, service:checkout, team:payments", "short": false}
+        ],
+        "footer": "Datadog",
+        "ts": 1792507200
+      }
+    ],
+    "ts": "1792507231.000900",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792507231.000900",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "datadog",
+    "rule_id": "48213977",
+    "status": "firing",
+    "raw_status": "Re-Triggered",
+    "retriggered": true,
+    "is_recovery": false,
+    "group": "host:web-01,env:prod",
+    "triggered_at": "2026-10-20T14:40:00Z",
+    "window_start": "2026-10-20T14:25:00Z",
+    "window_end": "2026-10-20T14:45:00Z",
+    "same_key_as": "datadog_triggered.json"
+  }
+}

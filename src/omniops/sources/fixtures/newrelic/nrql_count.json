@@ -1,0 +1,15 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {
+              "count": 1000
+            }
+          ]
+        }
+      }
+    }
+  }
+}

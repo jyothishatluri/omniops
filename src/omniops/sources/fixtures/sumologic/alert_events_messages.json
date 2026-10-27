@@ -1,0 +1,42 @@
+{
+ "warning": "",
+ "fields": [
+  {
+   "name": "_messagetime",
+   "fieldType": "long",
+   "keyField": false
+  },
+  {
+   "name": "_raw",
+   "fieldType": "string",
+   "keyField": false
+  },
+  {
+   "name": "_sourceCategory",
+   "fieldType": "string",
+   "keyField": false
+  },
+  {
+   "name": "_sourceName",
+   "fieldType": "string",
+   "keyField": false
+  },
+  {
+   "name": "_sourceHost",
+   "fieldType": "string",
+   "keyField": false
+  }
+ ],
+ "messages": [
+  {
+   "map": {
+    "_messagetime": "1721141217739",
+    "_receipttime": "1721141217901",
+    "_sourceCategory": "alerts",
+    "_sourceName": "AlertSystemInfo",
+    "_sourceHost": "no_sourceHost",
+    "_raw": "{\"severityLevel\":\"Info\",\"details\":{\"alertUpdateTime\":\"2024-07-16T14:46:57.739Z\",\"isMuted\":false,\"monitorInfo\":{\"monitorId\":\"0000000000574434\",\"monitorName\":\"Kubernetes - Container Waiting (Crashloopbackoff)\",\"monitorPath\":\"/Monitor/Kubernetes - Container Waiting (Crashloopbackoff)\",\"triggerGranularity\":\"OnePerMonitor\"},\"queryStartTime\":\"2024-07-16T14:40:57.210Z\",\"queryEndTime\":\"2024-07-16T14:45:57.210Z\",\"alertingGroup\":{\"groupKey\":\"\",\"timeSeriesKey\":\"container=the-coffee-machine pod=coffee-bar-k8demostaging001-coffeemachine-7566c7dd97-tzxkz cluster=k8sdemo-staging metric=sum namespace=k8demostaging001 \",\"previousState\":\"Warning\",\"currentState\":\"Normal\",\"triggerValue\":1},\"tags\":{},\"name\":\"AlertUpdated\"},\"eventType\":\"System\",\"accountId\":\"00000000009B3BEC\",\"eventId\":\"c5d49a6e-cd95-48b9-b88b-a1a3d0d7a8c1\",\"eventName\":\"AlertSystemInfo\",\"eventTime\":\"2024-07-16T14:46:57.739Z\",\"eventFormatVersion\":\"1.0 beta\",\"subsystem\":\"alerts\",\"resourceIdentity\":{\"id\":\"0000000000A74A83\",\"name\":\"Kubernetes - Container Waiting (Crashloopbackoff)\",\"type\":\"Alert\"}}"
+   }
+  }
+ ]
+}

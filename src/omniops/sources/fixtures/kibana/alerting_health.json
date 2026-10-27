@@ -1,0 +1,18 @@
+{
+  "alerting_framework_health": {
+    "decryption_health": {
+      "status": "ok",
+      "timestamp": "2023-01-13T01:28:00.280Z"
+    },
+    "execution_health": {
+      "status": "ok",
+      "timestamp": "2023-01-13T01:28:00.280Z"
+    },
+    "read_health": {
+      "status": "ok",
+      "timestamp": "2023-01-13T01:28:00.280Z"
+    }
+  },
+  "has_permanent_encryption_key": true,
+  "is_sufficiently_secure": true
+}

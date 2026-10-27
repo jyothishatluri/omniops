@@ -1,0 +1,271 @@
+{
+ "Services": [
+  {
+   "ReferenceId": 0,
+   "Name": "xray-sample.elasticbeanstalk.com",
+   "Names": [
+    "xray-sample.elasticbeanstalk.com"
+   ],
+   "Type": "client",
+   "State": "unknown",
+   "StartTime": 1528317567.0,
+   "EndTime": 1528317589.0,
+   "Edges": [
+    {
+     "ReferenceId": 2,
+     "StartTime": 1528317567.0,
+     "EndTime": 1528317589.0,
+     "SummaryStatistics": {
+      "OkCount": 3,
+      "ErrorStatistics": {
+       "ThrottleCount": 0,
+       "OtherCount": 1,
+       "TotalCount": 1
+      },
+      "FaultStatistics": {
+       "OtherCount": 0,
+       "TotalCount": 0
+      },
+      "TotalCount": 4,
+      "TotalResponseTime": 0.273
+     },
+     "ResponseTimeHistogram": [
+      {
+       "Value": 0.005,
+       "Count": 1
+      },
+      {
+       "Value": 0.015,
+       "Count": 1
+      },
+      {
+       "Value": 0.157,
+       "Count": 1
+      },
+      {
+       "Value": 0.096,
+       "Count": 1
+      }
+     ],
+     "Aliases": []
+    }
+   ]
+  },
+  {
+   "ReferenceId": 1,
+   "Name": "awseb-e-dixzws4s9p-stack-StartupSignupsTable-4IMSMHAYX2BA",
+   "Names": [
+    "awseb-e-dixzws4s9p-stack-StartupSignupsTable-4IMSMHAYX2BA"
+   ],
+   "Type": "AWS::DynamoDB::Table",
+   "State": "unknown",
+   "StartTime": 1528317583.0,
+   "EndTime": 1528317589.0,
+   "Edges": [],
+   "SummaryStatistics": {
+    "OkCount": 2,
+    "ErrorStatistics": {
+     "ThrottleCount": 0,
+     "OtherCount": 0,
+     "TotalCount": 0
+    },
+    "FaultStatistics": {
+     "OtherCount": 0,
+     "TotalCount": 0
+    },
+    "TotalCount": 2,
+    "TotalResponseTime": 0.12
+   },
+   "DurationHistogram": [
+    {
+     "Value": 0.076,
+     "Count": 1
+    },
+    {
+     "Value": 0.044,
+     "Count": 1
+    }
+   ],
+   "ResponseTimeHistogram": [
+    {
+     "Value": 0.076,
+     "Count": 1
+    },
+    {
+     "Value": 0.044,
+     "Count": 1
+    }
+   ]
+  },
+  {
+   "ReferenceId": 2,
+   "Name": "xray-sample.elasticbeanstalk.com",
+   "Names": [
+    "xray-sample.elasticbeanstalk.com"
+   ],
+   "Root": true,
+   "Type": "AWS::EC2::Instance",
+   "State": "active",
+   "StartTime": 1528317567.0,
+   "EndTime": 1528317589.0,
+   "Edges": [
+    {
+     "ReferenceId": 1,
+     "StartTime": 1528317567.0,
+     "EndTime": 1528317589.0,
+     "SummaryStatistics": {
+      "OkCount": 2,
+      "ErrorStatistics": {
+       "ThrottleCount": 0,
+       "OtherCount": 0,
+       "TotalCount": 0
+      },
+      "FaultStatistics": {
+       "OtherCount": 0,
+       "TotalCount": 0
+      },
+      "TotalCount": 2,
+      "TotalResponseTime": 0.12
+     },
+     "ResponseTimeHistogram": [
+      {
+       "Value": 0.076,
+       "Count": 1
+      },
+      {
+       "Value": 0.044,
+       "Count": 1
+      }
+     ],
+     "Aliases": []
+    },
+    {
+     "ReferenceId": 3,
+     "StartTime": 1528317567.0,
+     "EndTime": 1528317589.0,
+     "SummaryStatistics": {
+      "OkCount": 2,
+      "ErrorStatistics": {
+       "ThrottleCount": 0,
+       "OtherCount": 0,
+       "TotalCount": 0
+      },
+      "FaultStatistics": {
+       "OtherCount": 0,
+       "TotalCount": 0
+      },
+      "TotalCount": 2,
+      "TotalResponseTime": 0.125
+     },
+     "ResponseTimeHistogram": [
+      {
+       "Value": 0.049,
+       "Count": 1
+      },
+      {
+       "Value": 0.076,
+       "Count": 1
+      }
+     ],
+     "Aliases": []
+    }
+   ],
+   "SummaryStatistics": {
+    "OkCount": 3,
+    "ErrorStatistics": {
+     "ThrottleCount": 0,
+     "OtherCount": 1,
+     "TotalCount": 1
+    },
+    "FaultStatistics": {
+     "OtherCount": 0,
+     "TotalCount": 0
+    },
+    "TotalCount": 4,
+    "TotalResponseTime": 0.273
+   },
+   "DurationHistogram": [
+    {
+     "Value": 0.005,
+     "Count": 1
+    },
+    {
+     "Value": 0.015,
+     "Count": 1
+    },
+    {
+     "Value": 0.157,
+     "Count": 1
+    },
+    {
+     "Value": 0.096,
+     "Count": 1
+    }
+   ],
+   "ResponseTimeHistogram": [
+    {
+     "Value": 0.005,
+     "Count": 1
+    },
+    {
+     "Value": 0.015,
+     "Count": 1
+    },
+    {
+     "Value": 0.157,
+     "Count": 1
+    },
+    {
+     "Value": 0.096,
+     "Count": 1
+    }
+   ]
+  },
+  {
+   "ReferenceId": 3,
+   "Name": "SNS",
+   "Names": [
+    "SNS"
+   ],
+   "Type": "AWS::SNS",
+   "State": "unknown",
+   "StartTime": 1528317583.0,
+   "EndTime": 1528317589.0,
+   "Edges": [],
+   "SummaryStatistics": {
+    "OkCount": 2,
+    "ErrorStatistics": {
+     "ThrottleCount": 0,
+     "OtherCount": 0,
+     "TotalCount": 0
+    },
+    "FaultStatistics": {
+     "OtherCount": 0,
+     "TotalCount": 0
+    },
+    "TotalCount": 2,
+    "TotalResponseTime": 0.125
+   },
+   "DurationHistogram": [
+    {
+     "Value": 0.049,
+     "Count": 1
+    },
+    {
+     "Value": 0.076,
+     "Count": 1
+    }
+   ],
+   "ResponseTimeHistogram": [
+    {
+     "Value": 0.049,
+     "Count": 1
+    },
+    {
+     "Value": 0.076,
+     "Count": 1
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,1 @@
+{"status":"success","data":[{"pattern":"<_> caller=grpc_logging.go:66 <_> level=error method=/cortex.Ingester/Push <_> msg=gRPC err=\"connection refused to object store\"","level":"error","samples":[[1711839260,3]]},{"pattern":"<_> caller=grpc_logging.go:66 <_> level=info method=/cortex.Ingester/Push <_> msg=gRPC","level":"info","samples":[[1711839260,105]]}]}

@@ -1,0 +1,16 @@
+{
+ "values": [
+  {
+   "value": "host-1",
+   "hits": 69426656
+  },
+  {
+   "value": "host-2",
+   "hits": 66507749
+  },
+  {
+   "value": "host-3",
+   "hits": 65454351
+  }
+ ]
+}

@@ -1,0 +1,313 @@
+# Google Cloud Trace API v1 (the read API; v2 only writes) reached directly over HTTPS.
+#
+#   base:   https://cloudtrace.googleapis.com
+#   list:   GET /v1/projects/{projectId}/traces?view=MINIMAL|ROOTSPAN|COMPLETE&startTime&endTime&filter&orderBy
+#   get:    GET /v1/projects/{projectId}/traces/{traceId}
+#   auth:   OAuth2 scope https://www.googleapis.com/auth/trace.readonly (roles/cloudtrace.user)
+#   time:   startTime/endTime and span times are RFC 3339 (nanosecond precision)
+#   ids:    traceId = 32 hex chars; spanId / parentSpanId = DECIMAL uint64 strings in v1 (Cloud Logging
+#           spanId is 16 hex chars: compare with span_id_hex)
+#   quota:  reads share 300 units / 60 s per project: ListTraces costs 25 units (12 lists/min!),
+#           GetTrace 1 unit. ListTraces returns <= 1000 traces (ROOTSPAN/MINIMAL) or <= 100 (COMPLETE).
+# Research notes: docs/sources/gcp_trace.md
+source: gcp_trace
+display_name: Google Cloud Trace
+vendor: Google Cloud
+description: >-
+  Cloud Trace v1: trace search (root spans with latency and HTTP status), span search across traces,
+  and full trace detail by trace id.
+docs_url: https://docs.cloud.google.com/trace/docs/reference/v1/rest
+categories: [traces]
+base_url: "{{ env.GCP_TRACE_BASE_URL }}"
+env:
+  - {name: GCP_PROJECT_ID, description: "Project id where the trace data is stored."}
+  - {name: GCP_CREDENTIALS_FILE, description: "Optional service-account JSON key path; Application Default Credentials otherwise. Needs roles/cloudtrace.user."}
+  - {name: GCP_TRACE_BASE_URL, default: "https://cloudtrace.googleapis.com", description: "API endpoint override."}
+required_env: [GCP_PROJECT_ID]
+auth:
+  type: gcp_service_account
+  scope: https://www.googleapis.com/auth/trace.readonly
+  credentials_file: "{{ env.GCP_CREDENTIALS_FILE }}"
+rate_limit:
+  concurrency: 3
+  requests_per_minute: 30
+  notes: >-
+    Trace API reads (GetTrace, ListTraces, ListSpan) share 300 quota units per 60 s per project; ListTraces
+    costs 25 units (about 12 list calls per minute), GetTrace 1 unit. 429 RESOURCE_EXHAUSTED when exceeded.
+    Google recommends a linked BigQuery dataset for high-volume trace analysis.
+retention:
+  traces: 30d
+  spans: 30d
+errors:
+  - {path: "$.error.message", non_empty: true, message: "$.error.message", hint: "Google API error (permission, quota or invalid trace filter)"}
+ui_base_url: "https://console.cloud.google.com"
+pitfalls:
+  - "Spans are kept 30 days (_Trace bucket). Traces are sampled: a missing trace is not proof a request did not happen."
+  - "ListTraces is expensive (25 of 300 quota units per minute): one well-filtered list (root/latency/status) beats many; then fetch details with gcp_trace_trace (1 unit each)."
+  - "v1 span ids are decimal; Cloud Logging spanId and OpenTelemetry ids are 16 hex chars - use span_id_hex to join."
+  - "Filter terms are AND-ed and case-sensitive; root:/span: match a name PREFIX, +root:/+span: the exact name; latency:500ms keeps traces whose overall latency is >= 500 ms (no unit = ms)."
+  - "Span attributes are v1 labels: /http/status_code, /http/method, /http/url, /http/route, /component, /error/message, /agent, g.co/r/k8s_container/* ... OpenTelemetry attributes keep their own keys (labels->>'service.name', labels->>'http.response.status_code')."
+query_languages:
+  gcp_trace_filter: >-
+    Cloud Trace list filter: space-separated terms, all must match, case-sensitive. root:NAME_PREFIX /
+    +root:EXACT_NAME (root span name), span:NAME_PREFIX / +span:EXACT (any span), latency:500ms (overall
+    latency >= value; s, ms, ns; default ms), label:KEY (label exists), KEY:VALUE_PREFIX, +KEY:EXACT_VALUE
+    (e.g. /http/status_code:500, +/http/method:POST, service.name:checkout), method:GET and url:/api (shortcuts
+    for /http/method and /http/url), ^ after the optional + restricts a term to the root span (+^url:/main).
+    Quote values with special characters in double quotes.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_trace_traces
+    title: Trace search (root spans)
+    description: >-
+      Find traces in a window: one row per trace with its root span (view ROOTSPAN) - trace_id, root name
+      (resource), start, duration_ms, HTTP status/method/url and labels. Narrow with resource (exact root
+      span name), root_prefix, span (any span name prefix), duration_ms >= N (pushed as latency:Nms),
+      status_code (root /http/status_code), method, url_prefix, service (label service.name) or a raw Cloud
+      Trace filter. order_by: 'start desc' (default), 'duration desc' (slowest first), 'name', 'traceId'.
+      Then read whole traces with gcp_trace_trace.
+    kind: traces
+    request:
+      method: GET
+      path: "/v1/projects/{{ env.GCP_PROJECT_ID }}/traces"
+      query:
+        view: ROOTSPAN
+        startTime: "{{ time.start | rfc3339 }}"
+        endTime: "{{ time.end | rfc3339 }}"
+        filter: >-
+          {{ ([
+               ('+root:' ~ (filters.resource | quote)) if filters.resource else none,
+               ('root:' ~ (filters.root_prefix | quote)) if filters.root_prefix else none,
+               ('span:' ~ (filters.span | quote)) if filters.span else none,
+               ('latency:' ~ (filters.duration_ms | int) ~ 'ms') if filters.duration_ms else none,
+               ('+/http/status_code:' ~ (filters.status_code | int)) if filters.status_code else none,
+               ('+method:' ~ (filters.method | upper)) if filters.method else none,
+               ('url:' ~ (filters.url_prefix | quote)) if filters.url_prefix else none,
+               ('+service.name:' ~ (filters.service | quote)) if filters.service else none,
+               filters.filter or none
+             ] | compact | join(' ')) or none }}
+        orderBy: "{{ filters.order_by or 'start desc' }}"
+        pageSize: "{{ [limit or 1000, 1000] | min }}"
+    filters:
+      - {column: resource, description: "Exact root span name (e.g. /api/checkout or 'POST /api/checkout')", examples: ["/api/checkout"]}
+      - {column: root_prefix, description: "Root span name prefix"}
+      - {column: span, description: "Any span in the trace whose name starts with this"}
+      - {column: duration_ms, type: DOUBLE, ops: [">=", ">"], description: "Overall trace latency floor in ms (latency:Nms)"}
+      - {column: status_code, type: BIGINT, description: "HTTP status label (/http/status_code, exact)"}
+      - {column: method, description: "HTTP method label (/http/method)"}
+      - {column: url_prefix, description: "/http/url prefix"}
+      - {column: service, description: "Exact service.name label (OpenTelemetry-instrumented services)"}
+      - {column: filter, description: "Raw Cloud Trace filter terms (space-separated, AND-ed)", examples: ["latency:500ms"]}
+      - {column: order_by, description: "start desc (default) | duration desc | name | traceId (one field, optional ' desc')"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 6h}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 2}
+    response:
+      rows_path: "$.traces[*]"
+      expand:
+        - {explode: spans, as: s}
+    columns:
+      - {name: trace_id, path: traceId, description: "32-hex trace id"}
+      - {name: ts, type: TIMESTAMP, path: "@s.startTime", transform: auto_time, description: "Root span start"}
+      - {name: end_ts, type: TIMESTAMP, path: "@s.endTime", transform: auto_time}
+      - {name: duration_ms, type: DOUBLE, expr: "(((s.endTime | epoch_us) - (s.startTime | epoch_us)) / 1000.0) if (s.startTime and s.endTime) else none", description: "Root span duration (= trace latency)"}
+      - {name: resource, path: "@s.name", description: "Root span name (endpoint / operation)"}
+      - {name: service, expr: "s.labels['service.name'] or s.labels['g.co/gae/app/module'] or s.labels['g.co/r/k8s_container/container_name'] or s.labels['g.co/r/k8s_container/namespace']", description: "Derived: service.name, App Engine module, GKE container name"}
+      - {name: status_code, type: BIGINT, expr: "s.labels['/http/status_code'] or s.labels['http.response.status_code'] or s.labels['http.status_code']"}
+      - {name: method, expr: "s.labels['/http/method'] or s.labels['http.request.method'] or s.labels['http.method']"}
+      - {name: url, expr: "s.labels['/http/url'] or s.labels['url.full'] or s.labels['http.url']", transform: redact, description: "Request URL of the root span"}
+      - {name: error, expr: "s.labels['/error/message'] or s.labels['/error/name'] or s.labels['exception.message']"}
+      - {name: kind, path: "@s.kind", description: "RPC_SERVER | RPC_CLIENT | SPAN_KIND_UNSPECIFIED"}
+      - {name: span_id, path: "@s.spanId", description: "Root span id (decimal)"}
+      - {name: labels, type: JSON, path: "@s.labels"}
+      - {name: project_id, path: projectId}
+      - {name: root_prefix, filter_only: true}
+      - {name: span, filter_only: true}
+      - {name: url_prefix, filter_only: true}
+      - {name: filter, filter_only: true}
+      - {name: order_by, filter_only: true}
+    max_rows: 2000
+    sort_hint: "start desc unless order_by says otherwise"
+    pitfalls:
+      - "status_code/method/service filters match labels on ANY span server-side; the SQL re-check keeps traces whose ROOT span matches."
+      - "Spans written through the v2 API / OpenTelemetry show OTel attribute keys as labels; the derived columns try both spellings."
+      - "status_code and method push down the v1 label keys (/http/status_code, /http/method). Spans ingested with OTel semantic-convention keys (Telemetry API / OTLP) only carry http.response.status_code / http.request.method: when status_code = N returns nothing, retry with filter = '+http.response.status_code:N' (and no status_code predicate)."
+    examples:
+      - sql: >-
+          SELECT trace_id, ts, resource, duration_ms, status_code FROM gcp_trace_traces
+          WHERE duration_ms >= 2000 AND order_by = 'duration desc'
+            AND ts BETWEEN TIMESTAMP '2026-10-20 13:50:00' AND TIMESTAMP '2026-10-20 14:10:00'
+          LIMIT 20
+        description: Slowest traces (>= 2 s) during the incident window.
+      - sql: >-
+          SELECT resource, count(*) AS traces, quantile_cont(duration_ms, 0.95) AS p95_ms,
+                 count(*) FILTER (WHERE status_code >= 500) AS errors
+          FROM gcp_trace_traces
+          WHERE root_prefix = '/api/' AND ts >= TIMESTAMP '2026-10-20 13:00:00' AND ts < TIMESTAMP '2026-10-20 15:00:00'
+          GROUP BY resource ORDER BY p95_ms DESC
+        description: Latency and errors per endpoint from sampled root spans.
+      - sql: "SELECT trace_id, ts, duration_ms FROM gcp_trace_traces WHERE resource = '/api/checkout' AND status_code = 503 ORDER BY ts DESC LIMIT 10"
+        description: Example traces of failing checkout requests.
+    fixtures:
+      - file: traces_rootspan.json
+        filters: {filter: "latency:500ms"}
+        expect_rows: 2
+        expect_columns: {trace_id: 382d4f4c6b7bb2f4a972559d9085001d, resource: /api/checkout, duration_ms: 1520.5, status_code: 503, method: POST, span_id: "2205310701640571284", ts: "2026-10-20T14:02:03.100Z", kind: RPC_SERVER}
+        note: "Built strictly from the documented ListTracesResponse / Trace / TraceSpan schema (traceId example 382d4f4c6b7bb2f4a972559d9085001d and spanId example 2205310701640571284 from the reference; predefined labels /http/status_code, /http/method, /http/url from the Trace labels doc); the docs give no list example. Times illustrative."
+      - file: google_error.json
+        expect_error: "Request had invalid filter"
+        note: "Google API error envelope {error: {code, message, status}} answered with 200 by a proxy; proves the source-level error rule fires. Message illustrative."
+    ui_link: "https://console.cloud.google.com/traces/list?project={{ env.GCP_PROJECT_ID }}"
+    docs_url: https://docs.cloud.google.com/trace/docs/reference/v1/rest/v1/projects.traces/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_trace_spans
+    title: Span search across traces (view COMPLETE)
+    description: >-
+      Every span of the matching traces (view COMPLETE, at most 100 traces per page): use to find which
+      downstream call is slow or failing across many traces (GROUP BY resource). Same filters as
+      gcp_trace_traces (the filter selects traces; all their spans come back). Rows carry trace_id,
+      span_id (decimal) and span_id_hex, parent_span_id, name (resource), duration_ms, labels, is_root.
+    kind: spans
+    request:
+      method: GET
+      path: "/v1/projects/{{ env.GCP_PROJECT_ID }}/traces"
+      query:
+        view: COMPLETE
+        startTime: "{{ time.start | rfc3339 }}"
+        endTime: "{{ time.end | rfc3339 }}"
+        filter: >-
+          {{ ([
+               ('+root:' ~ (filters.root | quote)) if filters.root else none,
+               ('span:' ~ (filters.span_prefix | quote)) if filters.span_prefix else none,
+               ('+span:' ~ (filters.resource | quote)) if filters.resource else none,
+               ('latency:' ~ (filters.min_trace_ms | int) ~ 'ms') if filters.min_trace_ms else none,
+               ('+/http/status_code:' ~ (filters.status_code | int)) if filters.status_code else none,
+               ('+service.name:' ~ (filters.service | quote)) if filters.service else none,
+               filters.filter or none
+             ] | compact | join(' ')) or none }}
+        orderBy: "{{ filters.order_by or 'start desc' }}"
+        pageSize: 100
+    filters:
+      - {column: root, description: "Exact root span name of the traces to load", examples: ["/api/checkout"]}
+      - {column: span_prefix, description: "Traces having a span whose name starts with this"}
+      - {column: resource, description: "Exact span name that must occur in the trace (rows still include all spans; filter in SQL too)"}
+      - {column: min_trace_ms, type: DOUBLE, description: "Overall trace latency floor in ms (latency:Nms)"}
+      - {column: status_code, type: BIGINT, description: "Traces with a span labelled /http/status_code = N"}
+      - {column: service, description: "Traces with a span labelled service.name = X"}
+      - {column: filter, description: "Raw Cloud Trace filter terms"}
+      - {column: order_by, description: "start desc (default) | duration desc | name | traceId"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 6h}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 2}
+    response:
+      rows_path: "$.traces[*]"
+      expand:
+        - {explode: spans, as: s}
+    columns:
+      - {name: trace_id, path: traceId}
+      - {name: span_id, path: "@s.spanId", description: "Decimal uint64 (v1)"}
+      - {name: span_id_hex, expr: "('%016x' % (s.spanId | int)) if s.spanId else none", description: "16-hex form (matches Cloud Logging spanId)"}
+      - {name: parent_span_id, path: "@s.parentSpanId"}
+      - {name: is_root, type: BOOLEAN, expr: "(s.parentSpanId or '0') == '0'"}
+      - {name: ts, type: TIMESTAMP, path: "@s.startTime", transform: auto_time}
+      - {name: end_ts, type: TIMESTAMP, path: "@s.endTime", transform: auto_time}
+      - {name: duration_ms, type: DOUBLE, expr: "(((s.endTime | epoch_us) - (s.startTime | epoch_us)) / 1000.0) if (s.startTime and s.endTime) else none"}
+      - {name: resource, path: "@s.name", description: "Span name"}
+      - {name: kind, path: "@s.kind"}
+      - {name: service, expr: "s.labels['service.name'] or s.labels['g.co/gae/app/module'] or s.labels['g.co/r/k8s_container/container_name'] or s.labels['g.co/r/k8s_container/namespace']"}
+      - {name: status_code, type: BIGINT, expr: "s.labels['/http/status_code'] or s.labels['http.response.status_code'] or s.labels['http.status_code']"}
+      - {name: method, expr: "s.labels['/http/method'] or s.labels['http.request.method'] or s.labels['http.method']"}
+      - {name: url, expr: "s.labels['/http/url'] or s.labels['url.full'] or s.labels['http.url']", transform: redact}
+      - {name: error, expr: "s.labels['/error/message'] or s.labels['/error/name'] or s.labels['exception.message']"}
+      - {name: component, expr: "s.labels['/component']"}
+      - {name: labels, type: JSON, path: "@s.labels"}
+      - {name: root, filter_only: true}
+      - {name: span_prefix, filter_only: true}
+      - {name: min_trace_ms, type: DOUBLE, filter_only: true}
+      - {name: filter, filter_only: true}
+      - {name: order_by, filter_only: true}
+    max_rows: 10000
+    pitfalls:
+      - "resource / status_code / service select TRACES; every span of those traces is returned - repeat the predicate in SQL on the span rows you want (it is re-applied automatically for resource and status_code)."
+      - "COMPLETE is capped at 100 traces per page and 2 pages here; keep the window short or the filter tight."
+    examples:
+      - sql: >-
+          SELECT resource, count(*) AS calls, avg(duration_ms) AS avg_ms, max(duration_ms) AS max_ms
+          FROM gcp_trace_spans
+          WHERE root = '/api/checkout' AND min_trace_ms = 1000
+            AND ts BETWEEN TIMESTAMP '2026-10-20 13:50:00' AND TIMESTAMP '2026-10-20 14:10:00'
+          GROUP BY resource ORDER BY max_ms DESC LIMIT 15
+        description: Which child operation dominates slow checkout traces.
+    fixtures:
+      - file: traces_complete.json
+        filters: {root: /api/checkout}
+        expect_rows: 3
+        expect_columns: {trace_id: 382d4f4c6b7bb2f4a972559d9085001d, span_id: "2205310701640571284", span_id_hex: "1e9ad6661ea75994", is_root: true, resource: /api/checkout, duration_ms: 1520.5}
+        note: "Built strictly from the documented Trace / TraceSpan schema (decimal uint64 spanId/parentSpanId, kind RPC_SERVER/RPC_CLIENT, RFC 3339 start/end, labels map) with the reference's example ids; values illustrative."
+    docs_url: https://docs.cloud.google.com/trace/docs/reference/v1/rest/v1/projects.traces/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_trace_trace
+    title: One trace by id (traces.get)
+    description: >-
+      All spans of one trace (trace_id = '<32 hex>' required; IN fans out, max 10): parent/child structure,
+      per-span duration_ms, HTTP status, errors and labels. trace_id comes from gcp_trace_traces, from log
+      entries (gcp_logging_entries.trace_id) or from exemplars.
+    kind: spans
+    request:
+      method: GET
+      path: "/v1/projects/{{ env.GCP_PROJECT_ID }}/traces/{{ filters.trace_id }}"
+      accept_status: [404]
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "32-hex trace id", examples: ["382d4f4c6b7bb2f4a972559d9085001d"]}
+    response:
+      rows_path: "$.spans[*]"
+    columns:
+      - {name: trace_id, path: "$.traceId"}
+      - {name: span_id, path: spanId}
+      - {name: span_id_hex, expr: "('%016x' % (_.spanId | int)) if _.spanId else none", description: "16-hex form (matches Cloud Logging spanId)"}
+      - {name: parent_span_id, path: parentSpanId}
+      - {name: is_root, type: BOOLEAN, expr: "(_.parentSpanId or '0') == '0'"}
+      - {name: ts, type: TIMESTAMP, path: startTime, transform: auto_time}
+      - {name: end_ts, type: TIMESTAMP, path: endTime, transform: auto_time}
+      - {name: duration_ms, type: DOUBLE, expr: "(((_.endTime | epoch_us) - (_.startTime | epoch_us)) / 1000.0) if (_.startTime and _.endTime) else none"}
+      - {name: resource, path: name, description: "Span name"}
+      - {name: kind, path: kind}
+      - {name: service, expr: "_.labels['service.name'] or _.labels['g.co/gae/app/module'] or _.labels['g.co/r/k8s_container/container_name'] or _.labels['g.co/r/k8s_container/namespace']"}
+      - {name: status_code, type: BIGINT, expr: "_.labels['/http/status_code'] or _.labels['http.response.status_code'] or _.labels['http.status_code']"}
+      - {name: method, expr: "_.labels['/http/method'] or _.labels['http.request.method'] or _.labels['http.method']"}
+      - {name: url, expr: "_.labels['/http/url'] or _.labels['url.full'] or _.labels['http.url']", transform: redact}
+      - {name: error, expr: "_.labels['/error/message'] or _.labels['/error/name'] or _.labels['exception.message']"}
+      - {name: component, expr: "_.labels['/component']"}
+      - {name: stacktrace, expr: "_.labels['/stacktrace']", description: "JSON stack trace (v1 /stacktrace label) when recorded"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: project_id, path: "$.projectId"}
+    sort_hint: "span order as stored; ORDER BY ts for a timeline"
+    pitfalls:
+      - "A 404 (trace not found or not yet indexed - traces become readable a few seconds to minutes after they end) returns 0 rows."
+    examples:
+      - sql: >-
+          SELECT span_id, parent_span_id, resource, ts, duration_ms, status_code, error
+          FROM gcp_trace_trace WHERE trace_id = '382d4f4c6b7bb2f4a972559d9085001d' ORDER BY ts
+        description: The whole trace as a timeline.
+      - sql: >-
+          SELECT resource, duration_ms FROM gcp_trace_trace
+          WHERE trace_id IN ('382d4f4c6b7bb2f4a972559d9085001d', '4bf92f3577b34da6a3ce929d0e0e4736')
+            AND NOT is_root ORDER BY duration_ms DESC LIMIT 10
+        description: Slowest child spans of two example traces.
+    fixtures:
+      - file: trace_get.json
+        filters: {trace_id: 382d4f4c6b7bb2f4a972559d9085001d}
+        expect_rows: 3
+        expect_columns: {trace_id: 382d4f4c6b7bb2f4a972559d9085001d, span_id: "2205310701640571284", is_root: true, resource: /api/checkout, duration_ms: 1520.5, status_code: 503, service: checkout}
+        note: "Built strictly from the documented Trace schema (projectId, traceId, spans[] TraceSpan with decimal spanId/parentSpanId, kind, name, startTime, endTime, labels) using the reference's example ids; labels from the Trace labels doc. Values illustrative."
+    docs_url: https://docs.cloud.google.com/trace/docs/reference/v1/rest/v1/projects.traces/get
+
+roles:
+  traces:
+    table: gcp_trace_traces
+    columns: {ts: ts, trace_id: trace_id, service: service, resource: resource, duration_ms: duration_ms, status_code: status_code}
+    query_language: gcp_trace_filter
+  trace_detail:
+    table: gcp_trace_trace
+    columns: {ts: ts, trace_id: trace_id, span_id: span_id, parent_id: parent_span_id, service: service, resource: resource, duration_ms: duration_ms, status_code: status_code, message: error}
+    notes: "Filter trace_id = '<32 hex>'; span ids are decimal (span_id_hex for log correlation)."

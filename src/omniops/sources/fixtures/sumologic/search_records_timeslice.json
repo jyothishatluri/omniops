@@ -1,0 +1,35 @@
+{
+ "warning": "",
+ "fields": [
+  {
+   "name": "_timeslice",
+   "fieldType": "long",
+   "keyField": true
+  },
+  {
+   "name": "_count",
+   "fieldType": "int",
+   "keyField": false
+  }
+ ],
+ "records": [
+  {
+   "map": {
+    "_timeslice": "1790852400000",
+    "_count": "12"
+   }
+  },
+  {
+   "map": {
+    "_timeslice": "1790852700000",
+    "_count": "0"
+   }
+  },
+  {
+   "map": {
+    "_timeslice": "1790853000000",
+    "_count": "57"
+   }
+  }
+ ]
+}

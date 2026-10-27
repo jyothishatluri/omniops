@@ -1,0 +1,26 @@
+# Prometheus Alertmanager (API v2). All tables come from templates/alertmanager.yaml.
+# ALERTMANAGER_URL is everything before /api/v2:
+#   upstream Alertmanager            http://alertmanager:9093   (plus --web.route-prefix if set)
+#   Grafana Mimir / Cortex           http://mimir:8080/alertmanager   + ALERTMANAGER_TENANT_ID
+#   Grafana Cloud Alertmanager       the stack's Alertmanager URL ending in /alertmanager (basic auth: instance id + access policy token)
+#   Grafana built-in Alertmanager    http://grafana:3000/api/alertmanager/grafana   + ALERTMANAGER_TOKEN (Grafana service account token)
+source: alertmanager
+display_name: Prometheus Alertmanager
+extends: alertmanager
+base_url: "{{ env.ALERTMANAGER_URL }}"
+env:
+  - {name: ALERTMANAGER_URL, description: "Base URL before /api/v2, e.g. http://alertmanager:9093, http://mimir:8080/alertmanager or http://grafana:3000/api/alertmanager/grafana"}
+  - {name: ALERTMANAGER_TOKEN, description: "Optional bearer token (reverse proxy, or a Grafana service account token for Grafana's built-in Alertmanager)", secret: true}
+  - {name: ALERTMANAGER_USERNAME, description: "Optional basic-auth user (Grafana Cloud: Alertmanager instance id)"}
+  - {name: ALERTMANAGER_PASSWORD, description: "Optional basic-auth password (Grafana Cloud: access policy token with alerts:read)", secret: true}
+  - {name: ALERTMANAGER_TENANT_ID, description: "Optional X-Scope-OrgID for Mimir/Cortex multi-tenant Alertmanager"}
+required_env: [ALERTMANAGER_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Bearer ' ~ env.ALERTMANAGER_TOKEN) if env.ALERTMANAGER_TOKEN
+         else (('Basic ' ~ ((env.ALERTMANAGER_USERNAME ~ ':' ~ (env.ALERTMANAGER_PASSWORD or '')) | b64)) if env.ALERTMANAGER_USERNAME else None) }}
+headers:
+  X-Scope-OrgID: "{{ env.ALERTMANAGER_TENANT_ID }}"
+ui_base_url: "{{ env.ALERTMANAGER_URL }}"

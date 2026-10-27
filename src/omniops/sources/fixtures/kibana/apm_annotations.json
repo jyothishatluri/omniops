@@ -1,0 +1,16 @@
+{
+  "annotations": [
+    {
+      "@timestamp": 1735689600000,
+      "id": "opbeans-node@2.0.0",
+      "text": "opbeans-node@2.0.0",
+      "type": "version"
+    },
+    {
+      "@timestamp": 1736294400000,
+      "id": "opbeans-node@2.1.0",
+      "text": "opbeans-node@2.1.0",
+      "type": "version"
+    }
+  ]
+}

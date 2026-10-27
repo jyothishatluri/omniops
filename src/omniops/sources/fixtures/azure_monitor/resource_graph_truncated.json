@@ -1,0 +1,12 @@
+{
+  "totalRecords": 2405,
+  "count": 1000,
+  "data": [
+    {
+      "name": "myNetworkInterface",
+      "type": "microsoft.network/networkinterfaces"
+    }
+  ],
+  "facets": [],
+  "resultTruncated": "true"
+}

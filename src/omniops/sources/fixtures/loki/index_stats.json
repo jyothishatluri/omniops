@@ -1,0 +1,6 @@
+{
+  "streams": 100,
+  "chunks": 1000,
+  "entries": 5000,
+  "bytes": 100000
+}

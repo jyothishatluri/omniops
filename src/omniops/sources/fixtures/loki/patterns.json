@@ -1,0 +1,39 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "pattern": "<_> caller=grpc_logging.go:66 <_> level=error method=/cortex.Ingester/Push <_> msg=gRPC err=\"connection refused to object store\"",
+      "samples": [
+        [
+          1711839260,
+          1
+        ],
+        [
+          1711839270,
+          2
+        ],
+        [
+          1711839280,
+          1
+        ]
+      ]
+    },
+    {
+      "pattern": "<_> caller=grpc_logging.go:66 <_> level=info method=/cortex.Ingester/Push <_> msg=gRPC",
+      "samples": [
+        [
+          1711839260,
+          105
+        ],
+        [
+          1711839270,
+          222
+        ],
+        [
+          1711839280,
+          196
+        ]
+      ]
+    }
+  ]
+}

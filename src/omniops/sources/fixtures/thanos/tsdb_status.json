@@ -1,0 +1,51 @@
+{
+ "status": "success",
+ "data": {
+  "headStats": {
+   "numSeries": 508,
+   "chunkCount": 937,
+   "minTime": 1591516800000,
+   "maxTime": 1598896800143
+  },
+  "seriesCountByMetricName": [
+   {
+    "name": "net_conntrack_dialer_conn_failed_total",
+    "value": 20
+   },
+   {
+    "name": "prometheus_http_request_duration_seconds_bucket",
+    "value": 20
+   }
+  ],
+  "labelValueCountByLabelName": [
+   {
+    "name": "__name__",
+    "value": 211
+   },
+   {
+    "name": "event",
+    "value": 3
+   }
+  ],
+  "memoryInBytesByLabelName": [
+   {
+    "name": "__name__",
+    "value": 8266
+   },
+   {
+    "name": "instance",
+    "value": 28
+   }
+  ],
+  "seriesCountByLabelValuePair": [
+   {
+    "name": "job=prometheus",
+    "value": 425
+   },
+   {
+    "name": "instance=localhost:9090",
+    "value": 425
+   }
+  ]
+ }
+}

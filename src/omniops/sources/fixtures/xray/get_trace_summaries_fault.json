@@ -1,0 +1,57 @@
+{
+ "TraceSummaries": [
+  {
+   "Id": "1-6abe4853-5d0c3b2f8e1a4c7d9b6e2f10",
+   "StartTime": 1790855251.412,
+   "Duration": 5.012,
+   "ResponseTime": 5.009,
+   "HasFault": true,
+   "HasError": false,
+   "HasThrottle": false,
+   "IsPartial": false,
+   "Http": {
+    "HttpURL": "https://shop.example.com/api/checkout",
+    "HttpStatus": 502,
+    "HttpMethod": "POST",
+    "UserAgent": "Mozilla/5.0",
+    "ClientIp": "203.0.113.10"
+   },
+   "Annotations": {},
+   "Users": [],
+   "EntryPoint": {
+    "Name": "checkout-api",
+    "Names": ["checkout-api"],
+    "Type": "AWS::ECS::Container",
+    "AccountId": "123456789012"
+   },
+   "ServiceIds": [
+    {"Name": "checkout-api", "Names": ["checkout-api"], "Type": "AWS::ECS::Container", "AccountId": "123456789012"},
+    {"Name": "orders-db", "Names": ["orders-db"], "Type": "remote", "AccountId": "123456789012"}
+   ],
+   "FaultRootCauses": [
+    {
+     "ClientImpacting": true,
+     "Services": [
+      {
+       "Name": "orders-db",
+       "Names": ["orders-db"],
+       "Type": "remote",
+       "AccountId": "123456789012",
+       "Inferred": true,
+       "EntityPath": [
+        {"Name": "checkout-api", "Remote": false, "Exceptions": []},
+        {"Name": "orders-db", "Remote": true, "Exceptions": [{"Name": "SQLException", "Message": "connection refused"}]}
+       ]
+      }
+     ]
+    }
+   ],
+   "ErrorRootCauses": [],
+   "ResponseTimeRootCauses": [],
+   "Revision": 2,
+   "MatchedEventTime": 1790855251.412
+  }
+ ],
+ "ApproximateTime": 1790855280.0,
+ "TracesProcessedCount": 1
+}

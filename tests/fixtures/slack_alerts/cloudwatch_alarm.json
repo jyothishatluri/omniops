@@ -1,0 +1,52 @@
+{
+  "platform": "cloudwatch",
+  "description": "Amazon CloudWatch alarm (OK -> ALARM) delivered through SNS to Amazon Q Developer in chat applications (formerly AWS Chatbot), with the alarm's NewStateReason and metric details.",
+  "provenance": "Amazon Q Developer in chat applications admin guide (CloudWatch alarms reach chat through an SNS topic mapped to the channel configuration; the notification shows 'CloudWatch Alarm | <alarm name> | <region> | Account: <account id>', the state reason, metric details, a graph and console links). The reason text is CloudWatch's standard NewStateReason: 'Threshold Crossed: N out of the last M datapoints [<value> (<dd/MM/yy HH:mm:ss>)] was greater than or equal to the threshold (<t>) (minimum 1 datapoint for OK -> ALARM transition).'",
+  "event": {
+    "type": "message",
+    "user": "U09AWSQ001",
+    "bot_id": "B09AMAZONQ",
+    "app_id": "A09AMAZONQ",
+    "bot_profile": {"id": "B09AMAZONQ", "app_id": "A09AMAZONQ", "name": "Amazon Q", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "danger",
+        "fallback": "CloudWatch Alarm | checkout-5xx-high | us-east-1 | Account: 123456789012",
+        "title": ":rotating_light: CloudWatch Alarm | checkout-5xx-high | us-east-1 | Account: 123456789012",
+        "title_link": "https://console.aws.amazon.com/cloudwatch/home?region=us-east-1#alarmsV2:alarm/checkout-5xx-high",
+        "text": "Target 5xx responses on the checkout load balancer are above 25 per minute.\n\nThreshold Crossed: 1 out of the last 1 datapoints [57.0 (20/10/26 14:01:00)] was greater than or equal to the threshold (25.0) (minimum 1 datapoint for OK -&gt; ALARM transition).",
+        "fields": [
+          {"title": "Namespace", "value": "AWS/ApplicationELB", "short": true},
+          {"title": "Metric", "value": "HTTPCode_Target_5XX_Count", "short": true},
+          {"title": "Dimensions", "value": "LoadBalancer = app/checkout-alb/50dc6c495c0c9188", "short": false},
+          {"title": "Period", "value": "60 seconds", "short": true},
+          {"title": "Statistic", "value": "Sum", "short": true}
+        ],
+        "image_url": "https://chatbot-graphs.s3.amazonaws.com/123456789012/checkout-5xx-high-1792504920.png",
+        "footer": "Amazon CloudWatch"
+      }
+    ],
+    "ts": "1792504957.000700",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.000700",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "cloudwatch",
+    "rule_id": "checkout-5xx-high",
+    "rule_name": "checkout-5xx-high",
+    "status": "firing",
+    "raw_status": "ALARM",
+    "value": "57.0",
+    "threshold": "25.0",
+    "triggered_at": "2026-10-20T14:01:00Z",
+    "url": "https://console.aws.amazon.com/cloudwatch/home?region=us-east-1#alarmsV2:alarm/checkout-5xx-high",
+    "title": "CloudWatch Alarm | checkout-5xx-high | us-east-1 | Account: 123456789012",
+    "namespace": null,
+    "tags": {"region": "us-east-1", "account": "123456789012", "metric_namespace": "AWS/ApplicationELB",
+             "metric": "HTTPCode_Target_5XX_Count", "LoadBalancer": "app/checkout-alb/50dc6c495c0c9188"},
+    "anchor": {"source": "trigger", "window_start": "2026-10-20T13:46:00Z", "window_end": "2026-10-20T14:06:00Z"}
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "platform": "opsgenie",
+  "description": "Opsgenie Slack app alert notification: a new P2 alert forwarded from Datadog, with priority, source, tags and routed team fields.",
+  "provenance": "Opsgenie Slack (app) integration docs: alert notifications show '#<tinyId>: <message>' linked to the alert, priority, source, tags, routed teams and actions (Ack, Close, ...). Alert detail URLs are https://<org>.app.opsgenie.com/alert/detail/<alertId>/details; Opsgenie alert ids end with the creation time in epoch ms.",
+  "event": {
+    "type": "message",
+    "user": "U07OGAPP01",
+    "bot_id": "B07OPSGENI",
+    "app_id": "A07OPSGENI",
+    "bot_profile": {"id": "B07OPSGENI", "app_id": "A07OPSGENI", "name": "Opsgenie", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "E01E5A",
+        "fallback": "#1287: CPU load high on web-01",
+        "title": "#1287: CPU load high on web-01",
+        "title_link": "https://acme.app.opsgenie.com/alert/detail/0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d-1792504920123/details",
+        "text": "avg(last_5m):avg:system.load.norm.5{host:web-01} &gt; 2",
+        "fields": [
+          {"title": "Priority", "value": "P2", "short": true},
+          {"title": "Source", "value": "Datadog", "short": true},
+          {"title": "Tags", "value": "env:prod, host:web-01, service:checkout", "short": false},
+          {"title": "Routed Teams", "value": "Payments", "short": true}
+        ],
+        "actions": [
+          {"id": "1", "name": "action", "text": "Ack", "type": "button", "value": "ack"},
+          {"id": "2", "name": "action", "text": "Close", "type": "button", "value": "close"}
+        ]
+      }
+    ],
+    "ts": "1792504933.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504933.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "opsgenie",
+    "rule_name": "CPU load high on web-01",
+    "status": "firing",
+    "raw_status": "Open",
+    "severity": "P2",
+    "service": "checkout",
+    "env": "prod",
+    "host": "web-01",
+    "incident_id": "0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d-1792504920123",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "url": "https://acme.app.opsgenie.com/alert/detail/0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d-1792504920123/details",
+    "tags": {"alert_number": "1287"}
+  }
+}

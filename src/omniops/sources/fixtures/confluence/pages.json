@@ -1,0 +1,60 @@
+{
+ "results": [
+  {
+   "id": "123456",
+   "status": "current",
+   "title": "Checkout service runbook",
+   "spaceId": "98305",
+   "parentId": "98306",
+   "parentType": "page",
+   "position": 3,
+   "authorId": "5b10a2844c20165700ede21g",
+   "ownerId": "5b10a2844c20165700ede21g",
+   "lastOwnerId": null,
+   "subtype": null,
+   "createdAt": "2025-03-02T10:00:00.000Z",
+   "version": {
+    "createdAt": "2026-09-28T14:03:11.000Z",
+    "message": "add pool exhaustion step",
+    "number": 17,
+    "minorEdit": false,
+    "authorId": "5b10a2844c20165700ede21g"
+   },
+   "_links": {
+    "webui": "/spaces/OPS/pages/123456/Checkout+service+runbook",
+    "editui": "/pages/resumedraft.action?draftId=123456",
+    "tinyui": "/x/QAAB"
+   }
+  },
+  {
+   "id": "123999",
+   "status": "current",
+   "title": "Payments DB failover",
+   "spaceId": "98305",
+   "parentId": "98306",
+   "parentType": "page",
+   "position": 4,
+   "authorId": "5b10ac8d82e05b22cc7d4ef5",
+   "ownerId": "5b10ac8d82e05b22cc7d4ef5",
+   "lastOwnerId": null,
+   "subtype": null,
+   "createdAt": "2024-11-20T08:30:00.000Z",
+   "version": {
+    "createdAt": "2026-07-01T16:45:00.000Z",
+    "message": "",
+    "number": 5,
+    "minorEdit": true,
+    "authorId": "5b10ac8d82e05b22cc7d4ef5"
+   },
+   "_links": {
+    "webui": "/spaces/OPS/pages/123999/Payments+DB+failover",
+    "editui": "/pages/resumedraft.action?draftId=123999",
+    "tinyui": "/x/rwAB"
+   }
+  }
+ ],
+ "_links": {
+  "next": "/wiki/api/v2/pages?space-id=98305&sort=-modified-date&limit=2&cursor=eyJpZCI6IjEyMzk5OSJ9",
+  "base": "https://your-domain.atlassian.net/wiki"
+ }
+}

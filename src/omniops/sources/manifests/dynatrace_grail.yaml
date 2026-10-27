@@ -1,0 +1,902 @@
+# Dynatrace Grail via the platform Query API (DQL). Separate host and auth from the classic
+# Environment API v2 (source "dynatrace"): https://{env-id}.apps.dynatrace.com + platform token.
+# Research notes, doc URLs and pitfalls: docs/sources/dynatrace_grail.md
+#
+# Every table runs the documented async flow:
+#   1. POST /platform/storage/query/v1/query:execute   (requestTimeoutMilliseconds: 1 -> always
+#      returns the requestToken immediately instead of racing to inline the result)
+#   2. GET  /platform/storage/query/v1/query:poll?request-token=...  (long-poll 5 s, repeated until
+#      state == SUCCEEDED; FAILED / CANCELLED / RESULT_GONE fail loudly)
+# Rows come from result.records[*]. The SQL time window is sent as defaultTimeframeStart/End
+# (RFC 3339), so DQL text must NOT hard-code from:/to: unless you mean it (it takes precedence).
+# Engine gap (docs/sources/dynatrace_grail.md): if query:execute ever answers 200 with the result
+# inline and no requestToken, the poll step cannot use it; requestTimeoutMilliseconds: 1 makes the
+# documented 202 + requestToken path the normal one.
+source: dynatrace_grail
+display_name: Dynatrace Grail (DQL)
+vendor: Dynatrace LLC
+description: >-
+  Dynatrace Grail through the platform Query API: logs, spans/traces, Davis problems and events,
+  SDLC/deployment events, metrics (timeseries), Smartscape topology and arbitrary DQL.
+docs_url: https://docs.dynatrace.com/docs/dynatrace-api/platform-api/platform-storage-query-v1
+categories: [logs, traces, metrics, incidents, events, changes, topology]
+base_url: "{{ env.DT_PLATFORM_URL }}"
+env:
+  - name: DT_PLATFORM_URL
+    description: "Platform URL https://{env-id}.apps.dynatrace.com (NOT *.live.dynatrace.com), no trailing path"
+  - name: DT_PLATFORM_TOKEN
+    description: >-
+      Platform token (dt0s16.*) sent as "Authorization: Bearer <token>", with scopes
+      storage:buckets:read plus storage:logs:read, storage:spans:read, storage:events:read,
+      storage:metrics:read, storage:entities:read (and storage:fieldsets:read for sensitive span fields,
+      plus the Smartscape read scope your environment lists for smartscapeNodes/Edges). OAuth
+      clients work too if you put a fresh bearer token here; this source does not refresh it.
+    secret: true
+required_env: [DT_PLATFORM_URL, DT_PLATFORM_TOKEN]
+auth:
+  type: bearer
+  token: "{{ env.DT_PLATFORM_TOKEN }}"
+headers:
+  Accept: application/json
+  dt-client-context: omniops
+rate_limit:
+  concurrency: 4
+  retry_statuses: [429, 502, 503, 504]
+  notes: >-
+    Grail enforces query concurrency/consumption limits per environment (HTTP 429). A finished
+    result is only kept ~1 minute (HTTP 410 / RESULT_GONE afterwards), so polling is continuous.
+retention:
+  logs: 35d (default_logs bucket; custom buckets configurable)
+  spans: 10d (default_spans)
+  events: 35d (default events buckets); Davis problems/events 1-3y
+  metrics: 15mo (default_metrics)
+errors:
+  - path: "$.error.message"
+    non_empty: true
+    message: "$.error"
+    hint: "Grail query error: read error.details (syntax position, unknown command/field) and fix the DQL"
+ui_base_url: "{{ env.DT_PLATFORM_URL }}"
+pitfalls:
+  - "DQL is case-sensitive for field names and == string comparisons. Status values: logs status ERROR/WARN/INFO/NONE; Davis event.status ACTIVE/CLOSED; SDLC event.status started/finished."
+  - "Field names contain dots (dt.service.name, k8s.namespace.name); in SQL they appear as snake_case columns (service, namespace) or inside JSON columns (record->>'dt.service.name')."
+  - "A filter on a field that does not exist silently returns 0 records (no error). Check fields with dynatrace_grail_query: `fetch logs | limit 5` or `fieldsSnapshot logs`."
+  - "Each query scans at most 500 GB by default (scanLimitGBytes) and returns at most maxResultRecords (SQL LIMIT, default 1000, max 10000): wide windows can be silently partial; aggregate in DQL (summarize/makeTimeseries) instead of pulling raw records."
+  - "Timestamps are RFC 3339 with nanoseconds; durations are nanoseconds (tables expose duration_ms)."
+  - "Grail data is only present if Log Management/Traces/Events are stored on Grail in this environment (latest Dynatrace); otherwise use the classic dynatrace source."
+  - "Davis problems and events are stored as one Grail record PER UPDATE (refreshed at least every 6 h). The typed tables dedup to the latest record per event.id; hand-written DQL over dt.davis.problems must do the same (| dedup event.id, sort: {timestamp desc}) or counts are inflated."
+  - "`filter not(x)` drops records where x is null; use `filterOut x == true` to exclude flagged records but keep unflagged ones."
+  - "The query result is kept only briefly after it is ready (410 Gone / RESULT_GONE afterwards); the engine polls continuously, so this only matters for very slow pages."
+query_languages:
+  dql: >-
+    DQL (Dynatrace Query Language): pipeline of commands separated by |. Sources: fetch logs |
+    fetch spans | fetch events | fetch bizevents | fetch dt.davis.problems | fetch dt.davis.events |
+    timeseries <agg>(<metric.key>) [, by:{dims}] [, filter:{cond}] [, interval:5m]. Commands: filter
+    <cond> (==, !=, <, >, and, or, not(), in(x, array("a","b")), contains(f, "x", caseSensitive:false),
+    matchesPhrase(content, "x"), isNotNull(f)), fields a, b=expr, fieldsAdd, summarize c=count(),
+    by:{ts=bin(timestamp, 1m), loglevel}, makeTimeseries count(), interval:1m, sort f desc, limit n,
+    dedup f, append [subquery], lookup [subquery], sourceField:a, lookupField:b. Durations: 5m, 1h,
+    duration >= 500ms. Do NOT put from:/to: in the text: the SQL ts window is applied as the query
+    default timeframe. Strings use double quotes with backslash escapes. Davis records: fetch
+    dt.davis.problems | dedup event.id, sort:{timestamp desc} (one record per update otherwise).
+    Topology (latest Dynatrace): smartscapeNodes SERVICE | filter name == "x" | traverse {"calls"},
+    {"SERVICE"}, direction: forward. Example: fetch logs | filter dt.service.name ==
+    "checkout-service" and loglevel == "ERROR" | summarize n = count(), by:{content} | sort n desc
+    | limit 20
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_query
+    title: Arbitrary DQL query
+    description: >-
+      Run any DQL query (filter: dql, required) over the SQL time window. One row per DQL
+      record: every top-level field becomes a column (dots -> underscores, e.g. dt_service_name),
+      plus `record` (the whole record as JSON) and `timestamp` when present. Use for anything the
+      typed dynatrace_grail_* tables do not cover (bizevents, smartscape, custom buckets,
+      summarize/join pipelines).
+    kind: generic
+    steps:
+      - &grail_execute
+        name: execute
+        method: POST
+        path: /platform/storage/query/v1/query:execute
+        body:
+          <<: &grail_body
+            defaultTimeframeStart: "{{ time.start | rfc3339_ms }}"
+            defaultTimeframeEnd: "{{ time.end | rfc3339_ms }}"
+            timezone: UTC
+            locale: en_US
+            maxResultRecords: "{{ [limit or 1000, 10000] | min }}"
+            fetchTimeoutSeconds: 60
+            requestTimeoutMilliseconds: 1
+            enablePreview: false
+          query: "{{ filters.dql }}"
+        capture: {token: "$.requestToken"}
+        timeout_s: 30
+      - &grail_poll
+        name: poll
+        method: GET
+        path: /platform/storage/query/v1/query:poll
+        query:
+          request-token: "{{ captures.token }}"
+          request-timeout-milliseconds: 5000
+        poll:
+          until: "response.state == 'SUCCEEDED'"
+          fail_if: "response.state in ['FAILED', 'CANCELLED', 'RESULT_GONE']"
+          interval_s: 0.2
+          timeout_s: 120
+        timeout_s: 30
+    filters:
+      - {column: dql, required: true, description: "Full DQL query (no from:/to: needed; the SQL window applies)", examples: ['fetch logs | filter loglevel == "ERROR" | summarize n = count(), by:{dt.service.name} | sort n desc | limit 20']}
+    time: {column: ts, default_lookback: 1h, max_window: 35d, control_lookback: 6h}
+    response:
+      rows_path: "$.result.records[*]"
+      dynamic: "."
+      dynamic_max_columns: 60
+    columns:
+      - {name: timestamp, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "Record timestamp when the result has one"}
+      - {name: record, type: JSON, path: ".", description: "Whole record: record->>'dt.service.name'"}
+      - {name: notifications, type: JSON, path: "$.result.metadata.grail.notifications", description: "Query notifications (e.g. scan limit reached, result truncated): non-empty = the result may be partial"}
+      - {name: dql, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Query window (sent as the default timeframe)"}
+    pitfalls:
+      - "Only the declared columns (timestamp, record) are guaranteed; other columns appear dynamically from the result fields (dots become underscores, max 60). Use record->>'field.name' in SQL when unsure."
+      - "Do the heavy lifting in DQL (summarize, sort, limit) and keep the result small."
+      - "Check notifications: a WARN about the scan limit or maxResultRecords means the answer is partial."
+    examples:
+      - sql: >-
+          SELECT record->>'dt.service.name' AS service, CAST(record->>'n' AS BIGINT) AS errors
+          FROM dynatrace_grail_query
+          WHERE dql = 'fetch logs | filter loglevel == "ERROR" | summarize n = count(), by:{dt.service.name} | sort n desc | limit 20'
+        description: Services with the most error logs in the window.
+      - sql: >-
+          SELECT record->>'display_id' AS problem, record->>'event.name' AS title, record->>'event.status' AS status
+          FROM dynatrace_grail_query
+          WHERE dql = 'fetch dt.davis.problems | dedup event.id, sort: {timestamp desc} | filterOut toBoolean(dt.davis.is_duplicate) == true | filter event.status == "ACTIVE" | fields display_id, event.name, event.status'
+        description: Active Davis problems with a hand-written DQL query.
+    tests:
+      - {sql: "SELECT record FROM dynatrace_grail_query WHERE dql = 'fetch logs | limit 1'", min_rows: 0}
+    fixtures:
+      - file: query_reference.json
+        note: "Verbatim QueryStartResponse/QueryPollResponse example (SUCCEEDED, 4 davis records) from the official query:execute and query:poll docs pages."
+        filters: {dql: "fetch events | filter event.type == \"davis\""}
+        expect_rows: 4
+        expect_columns: {timestamp: "2022-03-17T08:00:01Z", davis_status: OPEN, davis_title: Http monitor global outage, record: {not_null: true}, notifications: null}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/platform-api/platform-storage-query-v1/query-execute-post
+    ui_link: "{{ source.base_url }}/ui/apps/dynatrace.notebooks"
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_logs
+    title: Logs (Grail)
+    description: >-
+      Log records from Grail, newest first. Filter on service (dt.service.name / service.name /
+      k8s.workload.name), level (loglevel or status), host, namespace, pod, trace_id, search
+      (case-insensitive substring of content), log_source, dql_filter (raw DQL condition) and ts.
+      Returns message, level, service, host, k8s context and trace/span ids for correlation.
+    kind: logs
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          query: |-
+            fetch logs
+            {% if filters.service %}| filter dt.service.name == {{ filters.service | quote }} or service.name == {{ filters.service | quote }} or k8s.workload.name == {{ filters.service | quote }}
+            {% endif %}{% if filters.level %}| filter loglevel == {{ filters.level | upper | quote }} or status == {{ filters.level | upper | quote }}
+            {% endif %}{% if filters.host %}| filter host.name == {{ filters.host | quote }}
+            {% endif %}{% if filters.namespace %}| filter k8s.namespace.name == {{ filters.namespace | quote }}
+            {% endif %}{% if filters.pod %}| filter k8s.pod.name == {{ filters.pod | quote }}
+            {% endif %}{% if filters.trace_id %}| filter trace_id == {{ filters.trace_id | quote }}
+            {% endif %}{% if filters.log_source %}| filter log.source == {{ filters.log_source | quote }}
+            {% endif %}{% if filters.search %}| filter contains(content, {{ filters.search | quote }}, caseSensitive: false)
+            {% endif %}{% if filters.dql_filter %}| filter {{ filters.dql_filter }}
+            {% endif %}| sort timestamp desc
+            | limit {{ [limit or 1000, 10000] | min }}
+            | fields timestamp, content, loglevel, status, dt.service.name, service.name, k8s.workload.name, host.name, k8s.namespace.name, k8s.pod.name, k8s.container.name, k8s.cluster.name, log.source, trace_id, span_id, dt.entity.host, dt.entity.process_group
+      - *grail_poll
+    filters:
+      - {column: service, description: "Service name (dt.service.name, service.name or k8s.workload.name; exact)", examples: ['checkout-service']}
+      - {column: level, description: "ERROR | WARN | INFO | DEBUG ... (matches loglevel or status, upper-cased)", examples: [ERROR]}
+      - {column: host, variants: hostname, description: "host.name (exact)"}
+      - {column: namespace, description: "k8s.namespace.name", examples: [shop]}
+      - {column: pod, description: "k8s.pod.name"}
+      - {column: trace_id, description: "trace_id (32 hex chars) to pull the logs of one trace", examples: ['357bf70f3c617cb34584b31bd4616af8']}
+      - {column: log_source, description: "log.source"}
+      - {column: search, description: "Case-insensitive substring of content", examples: ['connection refused']}
+      - {column: dql_filter, description: "Raw DQL filter condition, e.g. matchesPhrase(content, \"OutOfMemoryError\")"}
+    time: {column: ts, default_lookback: 1h, max_window: 35d, retention: 35d, control_lookback: 6h}
+    response:
+      rows_path: "$.result.records[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time}
+      - {name: message, path: content}
+      - name: level
+        expr: "filters.level if filters.level and (filters.level | upper) in [_['loglevel'], _['status']] else (_['loglevel'] or _['status'])"
+        description: "loglevel (raw) or status (normalized ERROR/WARN/INFO/NONE)"
+      - {name: status, path: status}
+      - name: service
+        expr: "filters.service if filters.service and filters.service in [_['dt.service.name'], _['service.name'], _['k8s.workload.name']] else (_['dt.service.name'] or _['service.name'] or _['k8s.workload.name'])"
+      - {name: host, path: "['host.name']"}
+      - {name: namespace, path: "['k8s.namespace.name']"}
+      - {name: pod, path: "['k8s.pod.name']"}
+      - {name: container, path: "['k8s.container.name']"}
+      - {name: cluster, path: "['k8s.cluster.name']"}
+      - {name: log_source, path: "['log.source']"}
+      - {name: trace_id, path: trace_id}
+      - {name: span_id, path: span_id}
+      - {name: host_entity_id, path: "['dt.entity.host']"}
+      - {name: process_group_id, path: "['dt.entity.process_group']"}
+      - {name: search, filter_only: true}
+      - {name: dql_filter, filter_only: true}
+    sort_hint: "Newest first."
+    pitfalls:
+      - "Raw records are capped by the SQL LIMIT (default 1000, max 10000): for 'how many / since when' use dynatrace_grail_log_counts."
+      - "service matches exact names only; if 0 rows, list names with dynatrace_grail_query: fetch logs | summarize count(), by:{dt.service.name, k8s.workload.name}."
+      - "loglevel values are whatever the app wrote (SEVERE, error, Error); status is normalized. level filter compares upper-cased values."
+    examples:
+      - sql: >-
+          SELECT ts, service, pod, message, trace_id FROM dynatrace_grail_logs
+          WHERE service = 'checkout-service' AND level = 'ERROR'
+          ORDER BY ts DESC LIMIT 200
+        description: Latest error logs of a service in the window.
+      - sql: >-
+          SELECT message, count(*) AS n, min(ts) AS first_seen FROM dynatrace_grail_logs
+          WHERE namespace = 'shop' AND level = 'ERROR' GROUP BY message ORDER BY n DESC LIMIT 20
+        description: Most frequent error messages in a namespace and when each first appeared.
+    tests:
+      - {sql: "SELECT ts, message FROM dynatrace_grail_logs LIMIT 5", min_rows: 0}
+    fixtures:
+      - file: logs.json
+        note: "QueryPollResponse envelope as documented (state/progress/result.metadata.grail/types); records built strictly from the documented Grail log fields (semantic dictionary: timestamp, content, loglevel, status, log.source, trace_id, span_id, dt.service.name, host.name, k8s.*)."
+        filters: {service: checkout-service}
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:42:07Z", level: ERROR, service: checkout-service, namespace: shop, trace_id: 357bf70f3c617cb34584b31bd4616af8, host: ip-10-0-1-17.eu-west-1.compute.internal}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/platform-api/platform-storage-query-v1/query-execute-post
+    ui_link: "{{ source.base_url }}/ui/apps/dynatrace.logs"
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_log_counts
+    title: Log volume over time (Grail)
+    description: >-
+      Log record counts per time bucket and group value (default grouping: loglevel), computed in
+      Grail with summarize ... by:{bin(timestamp, interval), <group_by>}. Same filters as
+      dynatrace_grail_logs. Use to see when errors started and which group spikes.
+    kind: timeseries
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          maxResultRecords: 10000
+          query: |-
+            fetch logs
+            {% if filters.service %}| filter dt.service.name == {{ filters.service | quote }} or service.name == {{ filters.service | quote }} or k8s.workload.name == {{ filters.service | quote }}
+            {% endif %}{% if filters.level %}| filter loglevel == {{ filters.level | upper | quote }} or status == {{ filters.level | upper | quote }}
+            {% endif %}{% if filters.host %}| filter host.name == {{ filters.host | quote }}
+            {% endif %}{% if filters.namespace %}| filter k8s.namespace.name == {{ filters.namespace | quote }}
+            {% endif %}{% if filters.search %}| filter contains(content, {{ filters.search | quote }}, caseSensitive: false)
+            {% endif %}{% if filters.dql_filter %}| filter {{ filters.dql_filter }}
+            {% endif %}| summarize value = count(), by: { ts = bin(timestamp, {{ filters.interval or (([time.step_s, 60] | max) ~ 's') }}), group_value = {{ filters.group_by or 'loglevel' }} }
+            | sort ts asc
+            | limit 10000
+      - *grail_poll
+    filters:
+      - {column: group_by, description: "Field to group by (default loglevel): status, dt.service.name, k8s.namespace.name, k8s.pod.name, host.name, log.source", examples: [dt.service.name]}
+      - {column: service, description: "Service name (exact)", examples: ['checkout-service']}
+      - {column: level, description: "ERROR | WARN | INFO", examples: [ERROR]}
+      - {column: host, description: "host.name"}
+      - {column: namespace, description: "k8s.namespace.name"}
+      - {column: search, description: "Case-insensitive substring of content"}
+      - {column: dql_filter, description: "Raw DQL filter condition"}
+      - {column: interval, description: "Bucket size as DQL duration (default: window/~300, >= 60s), e.g. 1m, 5m"}
+    time: {column: ts, default_lookback: 1h, max_window: 35d, retention: 35d, control_lookback: 6h}
+    zero_fill: true
+    response:
+      rows_path: "$.result.records[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: ts, transform: auto_time, description: "Bucket start"}
+      - {name: group_value, path: group_value, description: "Value of the group_by field (NULL when absent)"}
+      - {name: value, type: BIGINT, path: value, description: "Number of log records"}
+      - {name: group_by, filter_only: true}
+      - {name: service, filter_only: true}
+      - {name: level, filter_only: true}
+      - {name: host, filter_only: true}
+      - {name: namespace, filter_only: true}
+      - {name: search, filter_only: true}
+      - {name: dql_filter, filter_only: true}
+      - {name: interval, filter_only: true}
+    pitfalls:
+      - "Empty buckets are not returned by summarize (zero_fill adds them back)."
+      - "group_by is a DQL field name, not a SQL column: use dt.service.name, not service."
+    examples:
+      - sql: >-
+          SELECT ts, group_value AS service, value FROM dynatrace_grail_log_counts
+          WHERE level = 'ERROR' AND group_by = 'dt.service.name' ORDER BY ts, value DESC
+        description: Error log volume per service over time (who started erroring first).
+      - sql: "SELECT ts, value FROM dynatrace_grail_log_counts WHERE service = 'checkout-service' AND group_by = 'status' ORDER BY ts"
+        description: Log volume by status for one service.
+    fixtures:
+      - file: log_counts.json
+        note: "Documented QueryPollResponse envelope; records shaped exactly as the table's summarize command emits them (ts, group_value, value as long)."
+        filters: {group_by: loglevel}
+        expect_rows: 4
+        expect_columns: {ts: "2026-10-01T11:40:00Z", group_value: ERROR, value: 12}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/platform-api/platform-storage-query-v1/query-execute-post
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_spans
+    title: Spans / traces (Grail)
+    description: >-
+      Distributed-tracing spans from Grail. Filter on service, trace_id (all spans of one trace,
+      oldest first), failed (true = failed requests or error status), endpoint, span_name,
+      min_duration_ms, dql_filter and ts. Without trace_id: newest first. Returns timing,
+      parent/child ids, HTTP method/status, error status and k8s context.
+    kind: spans
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          query: |-
+            fetch spans
+            {% if filters.service %}| filter dt.service.name == {{ filters.service | quote }} or service.name == {{ filters.service | quote }}
+            {% endif %}{% if filters.trace_id %}| filter trace.id == toUid({{ filters.trace_id | quote }})
+            {% endif %}{% if filters.failed in [true, 'true', 'True', 1] %}| filter request.is_failed == true or transaction.is_failed == true or span.status_code == "error"
+            {% endif %}{% if filters.endpoint %}| filter endpoint.name == {{ filters.endpoint | quote }}
+            {% endif %}{% if filters.span_name %}| filter span.name == {{ filters.span_name | quote }}
+            {% endif %}{% if filters.min_duration_ms %}| filter duration >= {{ filters.min_duration_ms | int }}ms
+            {% endif %}{% if filters.dql_filter %}| filter {{ filters.dql_filter }}
+            {% endif %}| sort start_time {{ 'asc' if filters.trace_id else 'desc' }}
+            | limit {{ [limit or 1000, 10000] | min }}
+            | fieldsAdd duration_ms = toDouble(duration) / 1000000.0
+            | fields start_time, end_time, duration_ms, trace.id, span.id, span.parent_id, span.name, span.kind, dt.service.name, service.name, endpoint.name, http.request.method, http.response.status_code, span.status_code, span.status_message, request.is_failed, transaction.is_failed, request.is_root_span, k8s.namespace.name, k8s.pod.name, host.name, db.system, server.address, dt.entity.service
+      - *grail_poll
+    filters:
+      - {column: service, description: "dt.service.name or service.name (exact)", examples: ['checkout-service']}
+      - {column: trace_id, description: "32-hex trace id: returns the whole trace oldest-first", examples: ['357bf70f3c617cb34584b31bd4616af8']}
+      - {column: failed, type: BOOLEAN, description: "true = only failed requests / error spans"}
+      - {column: endpoint, description: "endpoint.name, e.g. POST /api/checkout"}
+      - {column: span_name, description: "span.name (exact)"}
+      - {column: min_duration_ms, type: DOUBLE, description: "Only spans at least this slow"}
+      - {column: dql_filter, description: "Raw DQL filter condition, e.g. http.response.status_code >= 500"}
+    time: {column: ts, default_lookback: 30m, max_window: 1d, retention: 10d, control_lookback: 2h}
+    response:
+      rows_path: "$.result.records[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: start_time, transform: auto_time, description: "Span start"}
+      - {name: end_ts, type: TIMESTAMP, path: end_time, transform: auto_time}
+      - {name: duration_ms, type: DOUBLE, path: duration_ms}
+      - {name: trace_id, path: "['trace.id']"}
+      - {name: span_id, path: "['span.id']"}
+      - {name: parent_span_id, path: "['span.parent_id']"}
+      - {name: resource, path: "['span.name']", description: "Span name (operation / route)"}
+      - {name: span_kind, path: "['span.kind']", description: "server | client | internal | producer | consumer"}
+      - name: service
+        expr: "filters.service if filters.service and filters.service in [_['dt.service.name'], _['service.name']] else (_['dt.service.name'] or _['service.name'])"
+      - {name: endpoint, path: "['endpoint.name']"}
+      - {name: http_method, path: "['http.request.method']"}
+      - {name: status_code, type: BIGINT, path: "['http.response.status_code']"}
+      - {name: span_status, path: "['span.status_code']", description: "error when the span reported an error"}
+      - {name: status_message, path: "['span.status_message']"}
+      - name: failed
+        type: BOOLEAN
+        expr: "true if (_['request.is_failed'] or _['transaction.is_failed'] or _['span.status_code'] == 'error') else false"
+      - {name: is_root, type: BOOLEAN, path: "['request.is_root_span']"}
+      - {name: namespace, path: "['k8s.namespace.name']"}
+      - {name: pod, path: "['k8s.pod.name']"}
+      - {name: host, path: "['host.name']"}
+      - {name: db_system, path: "['db.system']"}
+      - {name: peer, path: "['server.address']", description: "Called server address (client spans)"}
+      - {name: service_entity_id, path: "['dt.entity.service']"}
+      - {name: min_duration_ms, type: DOUBLE, filter_only: true}
+      - {name: span_name, filter_only: true}
+      - {name: dql_filter, filter_only: true}
+    pitfalls:
+      - "Span volume is huge: always filter service/trace_id/failed and keep windows short (default 30m, max 1d)."
+      - "failed=false is not pushed down (only failed=true filters in DQL)."
+      - "request.is_failed is deprecated in favour of transaction.is_failed; both are checked. Only request/transaction ROOT spans carry them; child spans carry span.status_code."
+      - "duration_ms is computed in DQL from the nanosecond duration."
+    examples:
+      - sql: >-
+          SELECT endpoint, count(*) AS failures, avg(duration_ms) AS avg_ms, max(status_code) AS max_status
+          FROM dynatrace_grail_spans WHERE service = 'checkout-service' AND failed = true
+          GROUP BY endpoint ORDER BY failures DESC
+        description: Failing endpoints of a service in the window.
+      - sql: >-
+          SELECT ts, service, resource, span_kind, duration_ms, status_code, span_status, peer
+          FROM dynatrace_grail_spans WHERE trace_id = '357bf70f3c617cb34584b31bd4616af8' ORDER BY ts
+        description: Waterfall of one trace (which hop failed or was slow).
+    fixtures:
+      - file: spans.json
+        note: "Documented QueryPollResponse envelope; records built strictly from the documented span fields (semantic dictionary: start_time, end_time, trace.id, span.id, span.parent_id, span.name, span.kind, endpoint.name, http.*, span.status_code, request.is_failed, transaction.is_failed) plus the table's computed duration_ms."
+        filters: {trace_id: 357bf70f3c617cb34584b31bd4616af8}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:42:07Z", duration_ms: 112.0, service: checkout-service, status_code: 500, failed: true, resource: POST /api/checkout, parent_span_id: null}
+    docs_url: https://docs.dynatrace.com/docs/dynatrace-api/platform-api/platform-storage-query-v1/query-execute-post
+    ui_link: "{{ source.base_url }}/ui/apps/dynatrace.distributedtracing"
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_problems
+    title: Davis problems (Grail)
+    description: >-
+      Davis problems from dt.davis.problems, one row per problem in its LATEST state (records are
+      deduplicated by event.id, newest update wins; duplicates merged into other problems are
+      removed), newest start first: title, status (ACTIVE/CLOSED), category, severity, root cause,
+      affected entities, affected users and duration. Returns problems that OVERLAP the SQL ts
+      window (started before its end and still active or ended after its start). Filter on
+      status, display_id, id, category, service (affected or root-cause entity name) and ts.
+    kind: incidents
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          defaultTimeframeStart: "{{ ((time.start | epoch_ms) - 21600000) | rfc3339_ms }}"
+          query: |-
+            fetch dt.davis.problems
+            | dedup event.id, sort: { timestamp desc }
+            | filterOut toBoolean(dt.davis.is_duplicate) == true
+            | filter event.start <= toTimestamp({{ time.end | rfc3339_ms | quote }}) and (lower(event.status) == "active" or isNull(event.end) or event.end >= toTimestamp({{ time.start | rfc3339_ms | quote }}))
+            {% if filters.status %}| filter lower(event.status) == {{ filters.status | lower | quote }}
+            {% endif %}{% if filters.display_id %}| filter in(display_id, array({{ filters.display_id | as_list | map('quote') | join(', ') }}))
+            {% endif %}{% if filters.id %}| filter in(event.id, array({{ filters.id | as_list | map('quote') | join(', ') }}))
+            {% endif %}{% if filters.category %}| filter event.category == {{ filters.category | upper | quote }}
+            {% endif %}{% if filters.service %}| filter in({{ filters.service | quote }}, affected_entity_names) or root_cause_entity_name == {{ filters.service | quote }} or contains(toString(smartscape.affected_entities), {{ filters.service | quote }}) or contains(toString(root_cause.smartscape_entity), {{ filters.service | quote }})
+            {% endif %}{% if filters.dql_filter %}| filter {{ filters.dql_filter }}
+            {% endif %}| sort event.start desc
+            | limit {{ [limit or 1000, 10000] | min }}
+            | fields event.id, display_id, event.name, event.status, event.category, event.severity, event.description, event.start, event.end, timestamp, root_cause_entity_id, root_cause_entity_name, root_cause.smartscape_entity, affected_entity_ids, affected_entity_names, smartscape.affected_entities, dt.davis.event_ids, dt.davis.impact_level, dt.davis.affected_users_count, dt.davis.mute.status, maintenance.is_under_maintenance, resolved_problem_duration, entity_tags
+      - *grail_poll
+    filters:
+      - {column: status, description: "ACTIVE | CLOSED (state of the latest update before the window end)", examples: [ACTIVE]}
+      - {column: display_id, ops: ["=", "in"], fan_out: false, description: "P-... display id(s)", examples: ['P-24101234']}
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "event.id of the problem"}
+      - {column: category, description: "AVAILABILITY, ERROR, SLOWDOWN, RESOURCE_CONTENTION, CUSTOM_ALERT, MONITORING_UNAVAILABLE"}
+      - {column: service, description: "Entity name affected by or root cause of the problem (exact)", examples: ['checkout-service']}
+      - {column: dql_filter, description: "Raw DQL filter condition, e.g. dt.davis.affected_users_count > 0"}
+    time: {column: ts, default_lookback: 2h, max_window: 90d, reapply: false, control_lookback: 24h}
+    response:
+      rows_path: "$.result.records[*]"
+    columns:
+      - {name: id, path: "['event.id']"}
+      - {name: display_id, path: display_id}
+      - {name: title, path: "['event.name']"}
+      - {name: status, path: "['event.status']", description: "ACTIVE | CLOSED (latest update in the fetch window)"}
+      - {name: category, path: "['event.category']"}
+      - {name: severity, type: BIGINT, path: "['event.severity']", description: "1 (most severe) .. 5 when set"}
+      - {name: description, path: "['event.description']"}
+      - {name: ts, type: TIMESTAMP, path: "['event.start']", transform: auto_time, description: "Problem start; ts predicates select OVERLAPPING problems and are not re-applied in SQL"}
+      - {name: start_ts, type: TIMESTAMP, path: "['event.start']", transform: auto_time, description: "Copy of the start that IS filtered locally (use for 'started after X')"}
+      - {name: end_ts, type: TIMESTAMP, path: "['event.end']", transform: auto_time}
+      - {name: updated_ts, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "Time of the update record used (latest in the window)"}
+      - {name: root_cause_entity_id, expr: "_['root_cause_entity_id'] or (_['root_cause.smartscape_entity'].id if _['root_cause.smartscape_entity'] else none)"}
+      - {name: root_cause_entity_name, expr: "_['root_cause_entity_name'] or (_['root_cause.smartscape_entity'].name if _['root_cause.smartscape_entity'] else none)"}
+      - name: service
+        expr: >-
+          filters.service if filters.service and (filters.service in ((_['affected_entity_names'] or []) + ((_['smartscape.affected_entities'] or []) | map(attribute='name') | list))
+          or filters.service == _['root_cause_entity_name'] or (_['root_cause.smartscape_entity'] and filters.service == _['root_cause.smartscape_entity'].name))
+          else (((_['affected_entity_names'] or []) + ((_['smartscape.affected_entities'] or []) | map(attribute='name') | list)) or [none]) | first
+        description: "First affected entity name (or the service filter when it matches an affected / root-cause entity)"
+      - {name: affected_entities, expr: "(_['affected_entity_names'] or ((_['smartscape.affected_entities'] or []) | map(attribute='name') | list)) | join(', ')"}
+      - {name: affected_entity_ids, type: JSON, expr: "_['affected_entity_ids'] or ((_['smartscape.affected_entities'] or []) | map(attribute='id') | list)"}
+      - {name: event_ids, type: JSON, path: "['dt.davis.event_ids']", description: "Davis event ids in the problem (join dynatrace_grail_events.id)"}
+      - {name: impact_level, path: "['dt.davis.impact_level']"}
+      - {name: affected_users, type: BIGINT, path: "['dt.davis.affected_users_count']"}
+      - {name: muted, type: BOOLEAN, expr: "_['dt.davis.mute.status'] == 'MUTED'", description: "Muted (also set when closed manually)"}
+      - {name: under_maintenance, type: BOOLEAN, path: "['maintenance.is_under_maintenance']"}
+      - {name: duration_ms, type: DOUBLE, path: resolved_problem_duration, transform: ns_to_ms, description: "Final duration of resolved problems"}
+      - {name: tags, type: JSON, path: entity_tags}
+      - {name: dql_filter, filter_only: true}
+    sort_hint: "Newest start first."
+    pitfalls:
+      - "Status is the state of the LATEST update inside the fetch window (window start - 6 h .. window end): a problem that closed after the window end shows ACTIVE. Status values are ACTIVE/CLOSED here (classic API: OPEN/CLOSED)."
+      - "ts predicates select problems overlapping the window and are not re-applied in SQL (time.reapply false); use start_ts to keep only problems that started after a moment."
+      - "affected_entity_names / root_cause_entity_* are deprecated in favour of smartscape.* records; both are read. The service filter matches smartscape names as a substring in DQL, then exactly in SQL."
+    examples:
+      - sql: "SELECT display_id, title, category, ts, root_cause_entity_name, affected_entities, affected_users FROM dynatrace_grail_problems WHERE status = 'ACTIVE' ORDER BY ts DESC"
+        description: Active Davis problems with root cause and user impact.
+      - sql: "SELECT display_id, title, status, ts, end_ts, duration_ms / 60000 AS minutes FROM dynatrace_grail_problems WHERE service = 'checkout-service' AND ts >= TIMESTAMP '2026-09-24 00:00:00' ORDER BY ts DESC"
+        description: Problems involving one service over the last week (recurrence check).
+    fixtures:
+      - file: problems.json
+        note: "Documented QueryPollResponse envelope (query:poll docs); records built strictly from the documented dt.davis.problems fields (semantic dictionary 'Davis AI': event.*, display_id, root_cause_*, affected_entity_*, smartscape.*, dt.davis.*, resolved_problem_duration)."
+        expect_rows: 2
+        expect_columns: {id: "-2045823616914785224_1727778600000V2", display_id: P-24101234, status: ACTIVE, severity: 2, ts: "2026-10-01T11:40:00Z", root_cause_entity_name: payment-service, service: checkout-service, affected_users: 1840, affected_entities: checkout-service, muted: false}
+      - file: problems_smartscape_only.json
+        note: "Documented QueryPollResponse envelope; one record carrying only the non-deprecated smartscape.affected_entities / root_cause.smartscape_entity fields (semantic dictionary), proving names/ids are read from them."
+        filters: {service: checkout-service}
+        expect_rows: 1
+        expect_columns: {display_id: P-24101301, service: checkout-service, root_cause_entity_id: SERVICE-9A1B2C3D4E5F6071, root_cause_entity_name: payment-service, affected_entities: "checkout-service, frontend", status: CLOSED, duration_ms: 1500000.0}
+    docs_url: https://docs.dynatrace.com/docs/semantic-dictionary/model/davis
+    ui_link: "{{ source.base_url }}/ui/apps/dynatrace.davis.problems"
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_events
+    title: Davis events (Grail)
+    description: >-
+      Davis events from dt.davis.events, one row per event in its latest state (dedup by
+      event.id): anomalies (SERVICE_ERROR_RATE_INCREASED, OSI_HIGH_CPU, ...), PROCESS_RESTART,
+      availability, custom alerts/info/deployment events. Returns events overlapping the SQL ts
+      window. Filter on event_type, status, category, entity_id (source entity) and ts.
+    kind: events
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          defaultTimeframeStart: "{{ ((time.start | epoch_ms) - 21600000) | rfc3339_ms }}"
+          query: |-
+            fetch dt.davis.events
+            | dedup event.id, sort: { timestamp desc }
+            | filter event.start <= toTimestamp({{ time.end | rfc3339_ms | quote }}) and (isNull(event.end) or event.end >= toTimestamp({{ time.start | rfc3339_ms | quote }}))
+            {% if filters.event_type %}| filter in(event.type, array({{ filters.event_type | as_list | map('quote') | join(', ') }}))
+            {% endif %}{% if filters.status %}| filter lower(event.status) == {{ filters.status | lower | quote }}
+            {% endif %}{% if filters.category %}| filter event.category == {{ filters.category | upper | quote }}
+            {% endif %}{% if filters.entity_id %}| filter dt.source_entity == {{ filters.entity_id | quote }} or toString(dt.smartscape_source.id) == {{ filters.entity_id | quote }}
+            {% endif %}{% if filters.dql_filter %}| filter {{ filters.dql_filter }}
+            {% endif %}| sort event.start desc
+            | limit {{ [limit or 1000, 10000] | min }}
+            | fields event.id, event.name, event.type, event.category, event.status, event.start, event.end, event.description, event.provider, event.severity, dt.source_entity, dt.source_entity.type, dt.smartscape_source.id, dt.smartscape_source.type, dt.davis.impact_level, dt.davis.is_frequent_event, dt.davis.is_rootcause_relevant, maintenance.is_under_maintenance, timestamp
+      - *grail_poll
+    filters:
+      - {column: event_type, ops: ["=", "in"], fan_out: false, description: "event.type(s), e.g. SERVICE_ERROR_RATE_INCREASED, PROCESS_RESTART, OSI_HIGH_CPU, CUSTOM_DEPLOYMENT", examples: [PROCESS_RESTART]}
+      - {column: status, description: "ACTIVE | CLOSED (case-insensitive)"}
+      - {column: category, description: "AVAILABILITY, ERROR, SLOWDOWN, RESOURCE_CONTENTION, CUSTOM_ALERT, INFO, MONITORING_UNAVAILABLE"}
+      - {column: entity_id, description: "Source entity id (dt.source_entity / dt.smartscape_source.id)", examples: ['SERVICE-5D53A2A6A1F2C3B4']}
+      - {column: dql_filter, description: "Raw DQL filter condition"}
+    time: {column: ts, default_lookback: 2h, max_window: 90d, reapply: false, control_lookback: 24h}
+    response:
+      rows_path: "$.result.records[*]"
+    columns:
+      - {name: id, path: "['event.id']"}
+      - {name: title, path: "['event.name']"}
+      - {name: event_type, path: "['event.type']"}
+      - {name: category, path: "['event.category']"}
+      - {name: status, expr: "_['event.status'] | upper if _['event.status'] else none", description: "ACTIVE | CLOSED (upper-cased; Grail stores Active/Closed or ACTIVE/CLOSED)"}
+      - {name: ts, type: TIMESTAMP, path: "['event.start']", transform: auto_time, description: "Event start; ts predicates select OVERLAPPING events and are not re-applied"}
+      - {name: start_ts, type: TIMESTAMP, path: "['event.start']", transform: auto_time, description: "Copy of the start that IS filtered locally"}
+      - {name: end_ts, type: TIMESTAMP, path: "['event.end']", transform: auto_time}
+      - {name: description, path: "['event.description']"}
+      - {name: provider, path: "['event.provider']"}
+      - {name: severity, type: BIGINT, path: "['event.severity']"}
+      - {name: entity_id, expr: "_['dt.smartscape_source.id'] or _['dt.source_entity']"}
+      - {name: entity_type, expr: "_['dt.smartscape_source.type'] or _['dt.source_entity.type']"}
+      - {name: impact_level, path: "['dt.davis.impact_level']"}
+      - {name: frequent, type: BOOLEAN, path: "['dt.davis.is_frequent_event']"}
+      - {name: root_cause_relevant, type: BOOLEAN, path: "['dt.davis.is_rootcause_relevant']"}
+      - {name: under_maintenance, type: BOOLEAN, path: "['maintenance.is_under_maintenance']"}
+      - {name: dql_filter, filter_only: true}
+    pitfalls:
+      - "Frequent events (frequent = true) never open problems; filter them out when building a causal timeline."
+      - "Events are deduplicated to the latest update in the fetch window (window start - 6 h .. window end)."
+    examples:
+      - sql: "SELECT ts, event_type, title, entity_id, status FROM dynatrace_grail_events WHERE category IN ('ERROR', 'AVAILABILITY', 'SLOWDOWN') AND frequent = false ORDER BY ts"
+        description: Anomaly timeline in the window (which signal moved first).
+      - sql: "SELECT ts, entity_id, title FROM dynatrace_grail_events WHERE event_type = 'PROCESS_RESTART' ORDER BY ts"
+        description: Process restarts around the incident.
+    fixtures:
+      - file: events.json
+        note: "Documented QueryPollResponse envelope; records built strictly from the documented dt.davis.events fields (semantic dictionary 'Davis AI': event.id/name/type/category/status/start/end/description/provider, dt.source_entity, dt.smartscape_source.*, dt.davis.*, maintenance.is_under_maintenance)."
+        expect_rows: 2
+        expect_columns: {id: "-2127669892157121805_1727778600000", event_type: SERVICE_ERROR_RATE_INCREASED, status: ACTIVE, ts: "2026-10-01T11:40:00Z", entity_id: SERVICE-5D53A2A6A1F2C3B4, entity_type: SERVICE, frequent: false}
+    docs_url: https://docs.dynatrace.com/docs/semantic-dictionary/model/davis
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_changes
+    title: Deployments and configuration changes (Grail)
+    description: >-
+      Change events: SDLC deployment events (event.kind SDLC_EVENT, event.type deployment, sent
+      by CI/CD integrations such as Argo CD, GitHub, GitLab, Jenkins: deployment name/namespace,
+      release stage, status, commit, outcome) plus Davis CUSTOM_DEPLOYMENT / CUSTOM_CONFIGURATION
+      events (version, ci link). Filter on service (case-insensitive substring of the deployed
+      component), stage, kind and ts. Newest first.
+    kind: changes
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          query: |-
+            fetch events
+            | filter event.kind == "SDLC_EVENT" and event.type == "deployment"
+            | append [
+                fetch dt.davis.events
+                | filter in(event.type, array("CUSTOM_DEPLOYMENT", "CUSTOM_CONFIGURATION"))
+                | dedup event.id, sort: { timestamp desc }
+              ]
+            | fieldsAdd ts = coalesce(start_time, event.start, timestamp),
+                service = coalesce(dt.service.name, service.name, cicd.deployment.name, dt.event.deployment.name, artifact.name),
+                version = coalesce(dt.event.deployment.version, artifact.version),
+                stage = coalesce(cicd.deployment.release_stage, dt.event.deployment.release_stage),
+                revision = coalesce(vcs.ref.base.revision, vcs.ref.head.revision)
+            {% if filters.service %}| filter contains(service, {{ filters.service | quote }}, caseSensitive: false)
+            {% endif %}{% if filters.stage %}| filter stage == {{ filters.stage | quote }}
+            {% endif %}{% if filters.kind %}| filter event.kind == {{ filters.kind | upper | quote }}
+            {% endif %}| sort ts desc
+            | limit {{ [limit or 1000, 10000] | min }}
+            | fields ts, end_time, timestamp, event.kind, event.type, event.status, event.name, event.provider, service, version, stage, revision, cicd.deployment.id, cicd.deployment.name, cicd.deployment.namespace, cicd.deployment.status, task.name, task.outcome, vcs.repository.url.full, vcs.ref.base.name, dt.event.deployment.ci_back_link, dt.source_entity
+      - *grail_poll
+    filters:
+      - {column: service, description: "Deployed component (case-insensitive substring of dt.service.name / service.name / cicd.deployment.name / dt.event.deployment.name)", examples: ['payment']}
+      - {column: stage, description: "Release stage, e.g. production (cicd.deployment.release_stage / dt.event.deployment.release_stage)", examples: [production]}
+      - {column: kind, description: "SDLC_EVENT | DAVIS_EVENT"}
+    time: {column: ts, default_lookback: 24h, max_window: 90d, control_lookback: 7d}
+    response:
+      rows_path: "$.result.records[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: ts, transform: auto_time, description: "Deployment start (start_time / event.start / timestamp)"}
+      - {name: end_ts, type: TIMESTAMP, path: end_time, transform: auto_time, description: "SDLC finished events: deployment end"}
+      - {name: kind, path: "['event.kind']", description: "SDLC_EVENT | DAVIS_EVENT"}
+      - {name: event_type, path: "['event.type']", description: "deployment | CUSTOM_DEPLOYMENT | CUSTOM_CONFIGURATION"}
+      - {name: status, path: "['event.status']", description: "SDLC: started | finished; Davis: ACTIVE | CLOSED"}
+      - {name: title, expr: "_['event.name'] or _['task.name'] or _['cicd.deployment.name']"}
+      - {name: provider, path: "['event.provider']", description: "e.g. argocd, github.com, EVENTS_REST_API_INGEST"}
+      - name: service
+        expr: "filters.service if filters.service and _['service'] and (filters.service | lower) in (_['service'] | lower) else _['service']"
+      - {name: version, path: version, description: "dt.event.deployment.version (Davis) or artifact.version"}
+      - {name: env, path: stage, description: "Release stage"}
+      - {name: namespace, path: "['cicd.deployment.namespace']"}
+      - {name: deployment_id, path: "['cicd.deployment.id']"}
+      - {name: deployment_status, path: "['cicd.deployment.status']", description: "SDLC finished events: succeeded | failed"}
+      - {name: outcome, path: "['task.outcome']", description: "SDLC finished events: Success | Error | Failure"}
+      - {name: repository, path: "['vcs.repository.url.full']"}
+      - {name: ref, path: "['vcs.ref.base.name']", description: "Branch / tag deployed"}
+      - {name: revision, path: revision, description: "Commit sha (vcs.ref.base.revision)"}
+      - {name: url, path: "['dt.event.deployment.ci_back_link']", description: "CI link (Davis deployment events)"}
+      - {name: entity_id, path: "['dt.source_entity']"}
+      - {name: stage, filter_only: true}
+    pitfalls:
+      - "SDLC events exist only if a CI/CD integration sends them to /platform/ingest/v1/events.sdlc; Davis CUSTOM_DEPLOYMENT events only if the pipeline posts them. 0 rows = no data source, not 'no deployment'."
+      - "SDLC deployments emit a started AND a finished event; count distinct deployment_id/revision, and use status = 'finished' with deployment_status for the result."
+      - "SDLC deployment events carry no version field (only vcs.ref.base.name/revision); version is set for Davis deployment events."
+    examples:
+      - sql: "SELECT ts, service, version, env, status, deployment_status, revision, url FROM dynatrace_grail_changes ORDER BY ts DESC"
+        description: All deployments/config changes in the window (change correlation).
+      - sql: "SELECT ts, ref, revision, deployment_status, outcome FROM dynatrace_grail_changes WHERE service = 'payment' AND kind = 'SDLC_EVENT' AND status = 'finished' ORDER BY ts DESC"
+        description: Finished deployments of one component with commit sha and result.
+    fixtures:
+      - file: changes.json
+        note: "Documented QueryPollResponse envelope; records built strictly from the documented SDLC deployment finished event fields (semantic dictionary 'SDLC events': event.*, start_time, end_time, task.*, cicd.deployment.*, vcs.ref.base.*, vcs.repository.url.full) and Davis CUSTOM_DEPLOYMENT properties (dt.event.deployment.*), plus the table's computed ts/service/version/stage/revision."
+        filters: {service: payment}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:31:12Z", kind: SDLC_EVENT, event_type: deployment, service: payment, env: production, deployment_status: succeeded, revision: d4322ab6cba38d21ad83c9de3046a8c19b2a3f11, ref: main, namespace: shop, version: null}
+    docs_url: https://docs.dynatrace.com/docs/semantic-dictionary/model/sdlc-events
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_entities
+    title: Smartscape nodes (services, hosts, k8s, ...) on Grail
+    description: >-
+      Topology nodes from Smartscape on Grail (latest Dynatrace) seen in the SQL ts window, one row
+      per node: id, type, name, tags. Filter on type (SERVICE default; HOST, PROCESS, K8S_POD,
+      K8S_NAMESPACE, K8S_CLUSTER, CONTAINER, ... or a quoted pattern like K8S_*), name (= exact,
+      LIKE '%x%' contains, LIKE 'x%' starts with) and entity_id. Use to resolve a service name
+      to its id or list what exists.
+    kind: entities
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          query: |-
+            {%- set t = filters.type or 'SERVICE' -%}
+            smartscapeNodes {% if t is string %}{{ ('"' ~ t ~ '"') if '*' in t else t }}{% else %}{ {{ t | join(', ') }} }{% endif %}
+            {% set n = filters.name %}{% if n is string and n %}{% set segs = n.split('%') | select | list %}{% if '%' not in n %}| filter name == {{ n | quote }}
+            {% elif n.endswith('%') and not n.startswith('%') and segs | length == 1 %}| filter startsWith(name, {{ segs[0] | quote }}, caseSensitive: false)
+            {% elif segs %}| filter contains(name, {{ segs | first | quote }}, caseSensitive: false)
+            {% endif %}{% elif n %}| filter in(name, array({{ n | map('quote') | join(', ') }}))
+            {% endif %}{% if filters.entity_id %}| filter in(toString(id), array({{ filters.entity_id | as_list | map('quote') | join(', ') }}))
+            {% endif %}| limit {{ [limit or 1000, 10000] | min }}
+            | fields id, type, name, tags
+      - *grail_poll
+    filters:
+      - {column: type, ops: ["=", "in"], fan_out: false, description: "Smartscape node type(s): SERVICE (default), HOST, PROCESS, CONTAINER, K8S_CLUSTER, K8S_NAMESPACE, K8S_POD, K8S_DEPLOYMENT, AWS_*, ... (patterns with * are quoted for you)", examples: [SERVICE]}
+      - {column: name, ops: ["=", "in", "like"], fan_out: false, description: "Node name: = exact, IN, LIKE 'x%' starts with, LIKE '%x%' contains (case-insensitive)", examples: ['checkout%']}
+      - {column: entity_id, ops: ["=", "in"], fan_out: false, description: "Node id(s), e.g. SERVICE-5D53A2A6A1F2C3B4", examples: ['SERVICE-5D53A2A6A1F2C3B4']}
+    time: {column: ts, default_lookback: 2h, max_window: 30d, control_lookback: 24h}
+    response:
+      rows_path: "$.result.records[*]"
+    columns:
+      - {name: entity_id, path: id}
+      - {name: type, path: type}
+      - {name: name, path: name}
+      - {name: tags, type: JSON, path: tags}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Nodes present in this window"}
+    pitfalls:
+      - "Smartscape on Grail exists only on latest Dynatrace; elsewhere use dynatrace_entities (classic source). Classic entity ids and Smartscape ids share the TYPE-16HEX form."
+      - "Node types are UPPER_SNAKE (SERVICE, K8S_POD); list them with dynatrace_grail_query: smartscapeNodes \"*\" | fields type | dedup type."
+    examples:
+      - sql: "SELECT entity_id, name, type FROM dynatrace_grail_entities WHERE type = 'SERVICE' AND name LIKE '%checkout%'"
+        description: Resolve a service name to its Smartscape id.
+      - sql: "SELECT type, count(*) AS n FROM dynatrace_grail_entities WHERE type IN ('HOST', 'K8S_POD', 'SERVICE') GROUP BY type"
+        description: Inventory size per node type.
+    fixtures:
+      - file: entities.json
+        note: "Documented QueryPollResponse envelope; records shaped as the documented smartscapeNodes examples output them (fields id, type, name, tags; DQL Smartscape commands + Services Smartscape docs)."
+        filters: {type: SERVICE}
+        expect_rows: 2
+        expect_columns: {entity_id: SERVICE-5D53A2A6A1F2C3B4, type: SERVICE, name: checkout-service}
+    docs_url: https://docs.dynatrace.com/docs/platform/grail/dynatrace-query-language/commands/smartscape-commands
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_topology
+    title: Smartscape edges via traverse (service map, runs-on, belongs-to)
+    description: >-
+      One row per Smartscape edge reached from the selected start nodes: start node -[relationship]->
+      neighbor. Defaults: start type SERVICE, relationship calls, direction forward (= services the
+      start service calls). direction 'backward' = who calls / points at the start node.
+      relationship runs_on reaches hosts/pods/containers, belongs_to reaches k8s namespaces/clusters.
+      Filter on start_type, start_name, start_id, relationship, neighbor_type, direction, neighbor_name.
+    kind: entities
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          query: |-
+            smartscapeNodes {{ filters.start_type or 'SERVICE' }}
+            {% if filters.start_name %}| filter in(name, array({{ filters.start_name | as_list | map('quote') | join(', ') }}))
+            {% endif %}{% if filters.start_id %}| filter in(toString(id), array({{ filters.start_id | as_list | map('quote') | join(', ') }}))
+            {% endif %}| traverse { {{ (filters.relationship or 'calls') | as_list | map('quote') | join(', ') }} }, { {{ (filters.neighbor_type or '*') | as_list | map('quote') | join(', ') }} }, direction: {{ 'backward' if (filters.direction or '') | lower == 'backward' else 'forward' }}, fieldsKeep: name
+            | fieldsAdd start_id = dt.traverse.history[0][id], start_name = dt.traverse.history[0][name], relationship = dt.traverse.history[0][edge_type], direction = dt.traverse.history[0][direction]
+            {% if filters.neighbor_name %}| filter in(name, array({{ filters.neighbor_name | as_list | map('quote') | join(', ') }}))
+            {% endif %}| limit {{ [limit or 1000, 10000] | min }}
+            | fields start_id, start_name, relationship, direction, neighbor_id = id, neighbor_type = type, neighbor_name = name
+      - *grail_poll
+    filters:
+      - {column: start_type, description: "Type of the start nodes (default SERVICE)", examples: [SERVICE]}
+      - {column: start_name, ops: ["=", "in"], fan_out: false, description: "Start node name(s), exact", examples: ['checkout-service']}
+      - {column: start_id, ops: ["=", "in"], fan_out: false, description: "Start node id(s)"}
+      - {column: relationship, ops: ["=", "in"], fan_out: false, description: "Edge type(s): calls (default), runs_on, belongs_to, is_part_of, routes_to, contains, instance_of, uses, ... or a pattern", examples: [calls]}
+      - {column: neighbor_type, ops: ["=", "in"], fan_out: false, description: "Neighbor node type(s) or pattern (default *), e.g. SERVICE, HOST, \"DB_*\"", examples: [SERVICE]}
+      - {column: direction, description: "forward (default: edges leaving the start node) | backward (edges arriving: callers)", examples: [forward]}
+      - {column: neighbor_name, ops: ["=", "in"], fan_out: false, description: "Neighbor node name(s), exact"}
+    time: {column: ts, default_lookback: 2h, max_window: 30d, control_lookback: 24h}
+    response:
+      rows_path: "$.result.records[*]"
+    columns:
+      - {name: start_id, path: start_id}
+      - {name: start_name, path: start_name}
+      - {name: relationship, path: relationship}
+      - {name: direction, expr: "_['direction'] or filters.direction or 'forward'"}
+      - {name: neighbor_id, path: neighbor_id}
+      - {name: neighbor_type, path: neighbor_type}
+      - {name: neighbor_name, path: neighbor_name}
+      - {name: start_type, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Latest Dynatrace (Smartscape on Grail) only; elsewhere use dynatrace_relationships_out / _in from the classic source."
+      - "Without start_name/start_id the traversal starts from EVERY node of start_type: always scope it for big environments."
+      - "Edge and type names are case-sensitive: edges lower_snake (calls, runs_on), node types UPPER_SNAKE (SERVICE, K8S_POD)."
+    examples:
+      - sql: "SELECT start_name, neighbor_name, neighbor_type FROM dynatrace_grail_topology WHERE start_name = 'checkout-service' AND relationship = 'calls'"
+        description: Downstream dependencies of checkout-service (services and databases it calls).
+      - sql: "SELECT neighbor_name AS caller FROM dynatrace_grail_topology WHERE start_name = 'payment-service' AND relationship = 'calls' AND direction = 'backward'"
+        description: Who calls payment-service (upstream blast radius).
+      - sql: "SELECT start_name AS service, neighbor_type, neighbor_name FROM dynatrace_grail_topology WHERE start_name = 'checkout-service' AND relationship = 'runs_on'"
+        description: Hosts / pods / containers a service runs on.
+    fixtures:
+      - file: topology.json
+        note: "Documented QueryPollResponse envelope; records shaped exactly as this table's traverse + fields pipeline emits them (traverse output node id/type/name plus dt.traverse.history[0] id/edge_type/direction and the fieldsKeep'd name, per the DQL Smartscape commands docs)."
+        filters: {start_name: checkout-service, relationship: calls}
+        expect_rows: 2
+        expect_columns: {start_id: SERVICE-5D53A2A6A1F2C3B4, start_name: checkout-service, relationship: calls, direction: forward, neighbor_id: SERVICE-9A1B2C3D4E5F6071, neighbor_type: SERVICE, neighbor_name: payment-service}
+    docs_url: https://docs.dynatrace.com/docs/platform/grail/dynatrace-query-language/commands/smartscape-commands
+
+  # ------------------------------------------------------------------------------------------
+  - name: dynatrace_grail_metrics
+    title: Metric time series (DQL timeseries)
+    description: >-
+      Metric time series from Grail via `timeseries`: one row per (series, timestamp). Filter on
+      metric (required, e.g. dt.service.request.response_time), aggregation (avg default; sum,
+      min, max, count), percentile (e.g. 95), by (comma-separated dimensions), metric_filter (DQL
+      condition on dimensions), interval and ts. Dimension values are in `dimensions` JSON.
+    kind: timeseries
+    steps:
+      - <<: *grail_execute
+        body:
+          <<: *grail_body
+          query: |-
+            timeseries value = {% if filters.percentile %}percentile({{ filters.metric }}, {{ filters.percentile }}{% if filters.rollup %}, rollup: {{ filters.rollup }}{% endif %}){% else %}{{ filters.aggregation or 'avg' }}({{ filters.metric }}{% if filters.rollup %}, rollup: {{ filters.rollup }}{% endif %}){% endif %}, ts = start(){% if filters.by %}, by: { {{ filters.by }} }{% endif %}{% if filters.metric_filter %}, filter: { {{ filters.metric_filter }} }{% endif %}, interval: {{ filters.interval or (([time.step_s, 60] | max) ~ 's') }}
+            {% if filters.series_limit %}| limit {{ filters.series_limit | int }}
+            {% endif %}
+      - *grail_poll
+    filters:
+      - {column: metric, required: true, description: "Grail metric key", examples: ['dt.service.request.response_time']}
+      - {column: aggregation, description: "avg (default) | sum | min | max | count | countDistinct", examples: [avg]}
+      - {column: percentile, type: DOUBLE, description: "Use percentile(metric, p) instead of aggregation, e.g. 95"}
+      - {column: rollup, description: "Time rollup for percentile/gauge: avg | sum | min | max | total"}
+      - {column: by, description: "Comma-separated split dimensions, e.g. dt.entity.service", examples: ['dt.entity.service']}
+      - {column: metric_filter, description: "DQL condition on dimensions, e.g. dt.entity.service == \"SERVICE-5D53A2A6A1F2C3B4\"", examples: ['dt.entity.service == "SERVICE-5D53A2A6A1F2C3B4"']}
+      - {column: interval, description: "Bucket size (DQL duration; snapped to 1,2,3,5,10,15,30 min / 1..24 h)"}
+      - {column: series_limit, type: BIGINT, description: "Max series returned"}
+    time: {column: ts, default_lookback: 1h, max_window: 90d, retention: 450d, control_lookback: 24h}
+    response:
+      rows_path: "$.result.records[*]"
+      expand:
+        - {zip: {t: ts, v: value}, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.t", transform: auto_time, description: "Bucket start"}
+      - {name: value, type: DOUBLE, path: "@p.v", description: "Aggregated value (null = no data); unit of the metric"}
+      - {name: dimensions, type: JSON, expr: "dict(_ | dictsort | rejectattr('0', 'in', ['value', 'ts', 'timeframe', 'interval']) | list)", description: "Split dimension values, e.g. dimensions->>'dt.entity.service'"}
+      - {name: entity_id, expr: "_['dt.entity.service'] or _['dt.entity.host'] or _['dt.entity.process_group_instance'] or _['dt.entity.process_group'] or _['dt.smartscape.service'] or _['dt.smartscape.host']", description: "Service/host/process entity id when split by one"}
+      - {name: metric, filter_only: true}
+      - {name: aggregation, filter_only: true}
+      - {name: percentile, type: DOUBLE, filter_only: true}
+      - {name: rollup, filter_only: true}
+      - {name: by, filter_only: true}
+      - {name: metric_filter, filter_only: true}
+      - {name: interval, filter_only: true}
+      - {name: series_limit, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Grail metric keys differ from classic ones (dt.service.request.response_time, dt.service.request.count, dt.service.request.failure_count, dt.host.cpu.usage, dt.kubernetes.container.restarts ...). An unknown key returns 0 series."
+      - "dt.service.request.response_time is in MICROseconds."
+      - "percentile needs rollup for gauge/count metrics (e.g. rollup: avg)."
+      - "Without `by` you get one series aggregated over all dimensions."
+    examples:
+      - sql: >-
+          SELECT entity_id, max(value) / 1000 AS peak_p95_ms, arg_max(ts, value) AS peak_at
+          FROM dynatrace_grail_metrics
+          WHERE metric = 'dt.service.request.response_time' AND percentile = 95 AND by = 'dt.entity.service'
+          GROUP BY entity_id ORDER BY peak_p95_ms DESC LIMIT 10
+        description: Services with the worst p95 latency peak in the window.
+      - sql: >-
+          SELECT ts, value FROM dynatrace_grail_metrics
+          WHERE metric = 'dt.service.request.failure_count' AND aggregation = 'sum'
+            AND metric_filter = 'dt.entity.service == "SERVICE-5D53A2A6A1F2C3B4"' ORDER BY ts
+        description: Failure count curve for one service.
+    fixtures:
+      - file: metrics.json
+        note: "Documented QueryPollResponse envelope; records shaped as the documented timeseries output (timeframe, interval, split dimension, value array) plus the start() timestamp array the table requests."
+        filters: {metric: dt.service.request.response_time, percentile: 95, by: dt.entity.service}
+        expect_rows: 6
+        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 212000.5, entity_id: SERVICE-5D53A2A6A1F2C3B4, dimensions: '{"dt.entity.service":"SERVICE-5D53A2A6A1F2C3B4"}'}
+    docs_url: https://docs.dynatrace.com/docs/platform/grail/dynatrace-query-language/commands/metric-commands
+
+roles:
+  logs:
+    table: dynatrace_grail_logs
+    filters:
+      service: "{{ service or '' }}"
+      level: "{{ 'ERROR' if error_only else '' }}"
+    columns: {ts: ts, service: service, message: message, level: level, host: host, pod: pod, namespace: namespace, trace_id: trace_id}
+    query_language: dql
+  log_counts:
+    table: dynatrace_grail_log_counts
+    filters:
+      service: "{{ service or '' }}"
+      level: "{{ 'ERROR' if error_only else '' }}"
+    columns: {ts: ts, value: value, group: group_value}
+  traces:
+    table: dynatrace_grail_spans
+    filters:
+      service: "{{ service or '' }}"
+      failed: "{{ 'true' if error_only else '' }}"
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, duration_ms: duration_ms, status_code: status_code, resource: resource}
+  trace_detail:
+    table: dynatrace_grail_spans
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, duration_ms: duration_ms, resource: resource}
+    notes: "Filter trace_id = '<32 hex>' to get the whole trace oldest-first."
+  metrics:
+    table: dynatrace_grail_metrics
+    query_language: dql
+    columns: {metric: metric, ts: ts, value: value, labels: dimensions}
+  incidents:
+    table: dynatrace_grail_problems
+    columns: {id: id, ts: ts, title: title, state: status, severity: severity, service: service}
+  active_alerts:
+    table: dynatrace_grail_problems
+    filters: {status: ACTIVE}
+    columns: {id: id, ts: ts, title: title, state: status, severity: severity, service: service}
+  alert_history:
+    table: dynatrace_grail_events
+    columns: {id: id, ts: ts, title: title, state: status}
+  change_events:
+    table: dynatrace_grail_changes
+    filters: {service: "{{ service or '' }}"}
+    columns: {ts: ts, service: service, title: title, version: version, url: url, env: env}
+    notes: "0 rows means no CI/CD integration sends SDLC events (or no Davis deployment events), not that nothing was deployed."
+  services:
+    table: dynatrace_grail_entities
+    filters: {type: SERVICE}
+    columns: {id: entity_id, service: name, tags: tags}
+    notes: "Latest Dynatrace (Smartscape on Grail) only."
+  hosts:
+    table: dynatrace_grail_entities
+    filters: {type: HOST}
+    columns: {id: entity_id, host: name, tags: tags}
+    notes: "Latest Dynatrace (Smartscape on Grail) only."
+  service_map:
+    table: dynatrace_grail_topology
+    filters: {start_name: "{{ service or '' }}", relationship: calls}
+    columns: {source_id: start_id, source: start_name, target_id: neighbor_id, target: neighbor_name}
+    notes: "direction = 'backward' for callers; relationship runs_on / belongs_to for infrastructure. Latest Dynatrace only."

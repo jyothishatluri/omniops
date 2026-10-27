@@ -1,0 +1,4 @@
+{
+  "message": "1. Successfully queried the CloudWatch metrics API.\n2. Successfully queried the CloudWatch logs API.",
+  "status": "OK"
+}

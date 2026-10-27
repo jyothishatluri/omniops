@@ -1,0 +1,33 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "alertsByGrouping": {
+      "buckets": [
+        {
+          "doc_count": 5,
+          "key": "Host-f43kkddfyc"
+        }
+      ],
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0
+    },
+    "missingFields": {
+      "doc_count": 0
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 5
+    }
+  },
+  "timed_out": false,
+  "took": 0
+}

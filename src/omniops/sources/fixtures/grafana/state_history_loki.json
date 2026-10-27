@@ -1,0 +1,94 @@
+{
+  "schema": {
+    "name": "states",
+    "fields": [
+      {
+        "name": "time",
+        "type": "time",
+        "typeInfo": {
+          "frame": "time.Time"
+        }
+      },
+      {
+        "name": "line",
+        "type": "other",
+        "typeInfo": {
+          "frame": "json.RawMessage"
+        }
+      },
+      {
+        "name": "labels",
+        "type": "other",
+        "typeInfo": {
+          "frame": "json.RawMessage"
+        }
+      }
+    ]
+  },
+  "data": {
+    "values": [
+      [
+        1790854920000,
+        1790855700000
+      ],
+      [
+        {
+          "schemaVersion": 1,
+          "previous": "Pending",
+          "current": "Alerting",
+          "values": {
+            "B": 0.12,
+            "C": 1
+          },
+          "condition": "C",
+          "dashboardUID": "",
+          "panelID": 0,
+          "fingerprint": "6d1f4a2b9c3e8f07",
+          "ruleTitle": "PaymentServiceHighErrorRate",
+          "ruleID": 3,
+          "ruleUID": "pay-err-rate",
+          "labels": {
+            "alertname": "PaymentServiceHighErrorRate",
+            "service": "payment-service",
+            "severity": "critical"
+          }
+        },
+        {
+          "schemaVersion": 1,
+          "previous": "Alerting",
+          "current": "Normal",
+          "values": {
+            "B": 0.01,
+            "C": 0
+          },
+          "condition": "C",
+          "dashboardUID": "",
+          "panelID": 0,
+          "fingerprint": "6d1f4a2b9c3e8f07",
+          "ruleTitle": "PaymentServiceHighErrorRate",
+          "ruleID": 3,
+          "ruleUID": "pay-err-rate",
+          "labels": {
+            "alertname": "PaymentServiceHighErrorRate",
+            "service": "payment-service",
+            "severity": "critical"
+          }
+        }
+      ],
+      [
+        {
+          "folderUID": "a1b2c3d4",
+          "from": "state-history",
+          "group": "payment-alerts",
+          "orgID": "1"
+        },
+        {
+          "folderUID": "a1b2c3d4",
+          "from": "state-history",
+          "group": "payment-alerts",
+          "orgID": "1"
+        }
+      ]
+    ]
+  }
+}

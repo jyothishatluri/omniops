@@ -1,0 +1,53 @@
+{
+ "incidents": [
+  {
+   "assignments": [
+    {
+     "assignedBy": {
+      "userId": "u-123"
+     },
+     "assignedTo": {
+      "userId": "u-456"
+     }
+    }
+   ],
+   "contextualLabels": {
+    "applicationname": "production",
+    "subsystemname": "checkout"
+   },
+   "createdAt": "2026-10-01T11:05:00.000Z",
+   "description": "5xx ratio above 2% for checkout",
+   "displayLabels": {
+    "alert_name": "checkout error rate"
+   },
+   "duration": "2100s",
+   "events": [
+    {
+     "id": "e-1",
+     "upsertState": {
+      "isMuted": false,
+      "stateType": "UPSERT_INCIDENT_STATE_TYPE_TRIGGERED"
+     }
+    }
+   ],
+   "id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+   "isMuted": false,
+   "lastStateUpdateKey": "last_state_update_key",
+   "lastStateUpdateTime": "2026-10-01T11:40:00.000Z",
+   "metaLabels": [
+    {
+     "key": "team",
+     "value": "payments"
+    }
+   ],
+   "name": "checkout error rate",
+   "severity": "INCIDENT_SEVERITY_CRITICAL",
+   "state": "INCIDENT_STATE_TRIGGERED",
+   "status": "INCIDENT_STATUS_TRIGGERED"
+  }
+ ],
+ "pagination": {
+  "nextPageToken": "",
+  "totalSize": 1
+ }
+}

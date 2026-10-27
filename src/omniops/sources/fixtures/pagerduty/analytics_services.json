@@ -1,0 +1,78 @@
+{
+ "aggregate_unit": "day",
+ "data": [
+  {
+   "mean_assignment_count": 1,
+   "mean_engaged_seconds": 366,
+   "mean_engaged_user_count": 1,
+   "mean_seconds_to_engage": 81,
+   "mean_seconds_to_first_ack": 63,
+   "mean_seconds_to_mobilize": 41,
+   "mean_seconds_to_resolve": 380,
+   "mean_user_defined_engaged_seconds": 366,
+   "range_start": "2023-06-11T00:00:00",
+   "service_id": "PPSCXAN",
+   "service_name": "Critical Prod Service 1",
+   "team_id": "P3XUQ75",
+   "team_name": "Engineering",
+   "total_business_hour_interruptions": 81,
+   "total_engaged_seconds": 3591,
+   "total_escalation_count": 5,
+   "total_incident_count": 124,
+   "total_incidents_acknowledged": 1,
+   "total_incidents_auto_resolved": 12,
+   "total_incidents_manual_escalated": 9,
+   "total_incidents_reassigned": 1,
+   "total_incidents_timeout_escalated": 4,
+   "total_interruptions": 1,
+   "total_notifications": 342,
+   "total_off_hour_interruptions": 20,
+   "total_sleep_hour_interruptions": 21,
+   "total_snoozed_seconds": 78,
+   "total_user_defined_engaged_seconds": 3591,
+   "up_time_pct": 99.92677595628416
+  },
+  {
+   "mean_assignment_count": 12,
+   "mean_engaged_seconds": 432,
+   "mean_engaged_user_count": 1,
+   "mean_seconds_to_engage": 77,
+   "mean_seconds_to_first_ack": 32,
+   "mean_seconds_to_mobilize": 32,
+   "mean_seconds_to_resolve": 87,
+   "mean_user_defined_engaged_seconds": 432,
+   "range_start": "2023-06-10T00:00:00",
+   "service_id": "PPSCXAN",
+   "service_name": "Critical Prod Service 1",
+   "team_id": "P3XUQ75",
+   "team_name": "Engineering",
+   "total_business_hour_interruptions": 12,
+   "total_engaged_seconds": 3645,
+   "total_escalation_count": 5,
+   "total_incident_count": 124,
+   "total_incidents_acknowledged": 1,
+   "total_incidents_auto_resolved": 12,
+   "total_incidents_manual_escalated": 9,
+   "total_incidents_reassigned": 1,
+   "total_incidents_timeout_escalated": 4,
+   "total_interruptions": 1,
+   "total_notifications": 32,
+   "total_off_hour_interruptions": 42,
+   "total_sleep_hour_interruptions": 3,
+   "total_snoozed_seconds": 123,
+   "total_user_defined_engaged_seconds": 3645,
+   "up_time_pct": 99.234416
+  }
+ ],
+ "filters": {
+  "created_at_start": "2023-06-10T00:00:00Z",
+  "created_at_end": "2023-06-12T00:00:00Z",
+  "team_ids": [
+   "P3XUQ75"
+  ],
+  "service_ids": [
+   "PPSCXAN"
+  ]
+ },
+ "time_zone": "Etc/UTC"
+}

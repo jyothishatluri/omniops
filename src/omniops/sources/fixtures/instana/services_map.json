@@ -1,0 +1,26 @@
+{
+  "connections": [
+    {
+      "from": "8bfb4e1aa590eab8f08f837b97acf5803a5737ed",
+      "to": "f17e7efb3b9b2d62bfec6b07905759fb81e99797",
+      "calls": 2179,
+      "latency": 1.6103717301514455,
+      "errorRate": 0
+    }
+  ],
+  "services": [
+    {
+      "id": "f17e7efb3b9b2d62bfec6b07905759fb81e99797",
+      "label": "robot-shop",
+      "types": [
+        "MESSAGING"
+      ],
+      "technologies": [
+        "kubernetesService",
+        "rabbitMq"
+      ],
+      "snapshotIds": [],
+      "entityType": "SERVICE"
+    }
+  ]
+}

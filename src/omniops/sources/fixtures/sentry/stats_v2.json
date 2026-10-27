@@ -1,0 +1,22 @@
+{
+ "start": "2022-02-14T19:00:00Z",
+ "end": "2022-02-28T18:03:00Z",
+ "intervals": [
+  "2022-02-28T00:00:00Z"
+ ],
+ "groups": [
+  {
+   "by": {
+    "outcome": "invalid"
+   },
+   "totals": {
+    "sum(quantity)": 165665
+   },
+   "series": {
+    "sum(quantity)": [
+     165665
+    ]
+   }
+  }
+ ]
+}

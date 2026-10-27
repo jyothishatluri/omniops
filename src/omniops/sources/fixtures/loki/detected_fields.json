@@ -1,0 +1,28 @@
+{
+  "fields": [
+    {
+      "label": "level",
+      "type": "string",
+      "cardinality": 3,
+      "parsers": ["logfmt"]
+    },
+    {
+      "label": "duration",
+      "type": "duration",
+      "cardinality": 152,
+      "parsers": ["logfmt"]
+    },
+    {
+      "label": "status",
+      "type": "int",
+      "cardinality": 5,
+      "parsers": ["logfmt"]
+    }
+  ],
+  "limit": 1000,
+  "stats": {
+    "summary": {
+      "totalBytesProcessed": 1024
+    }
+  }
+}

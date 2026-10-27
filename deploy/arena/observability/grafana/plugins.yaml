@@ -1,0 +1,3 @@
+# No app plugins are provisioned; the file exists so Grafana finds every provisioning directory.
+apiVersion: 1
+apps: []

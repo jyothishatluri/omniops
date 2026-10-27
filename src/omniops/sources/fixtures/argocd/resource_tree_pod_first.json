@@ -1,0 +1,47 @@
+{
+ "nodes": [
+  {
+   "version": "v1",
+   "kind": "Pod",
+   "namespace": "batch",
+   "name": "report-generator-5c6d7f8b9-qz4lm",
+   "uid": "4e8f3d2a-6b9c-4d7e-8f1a-2b3c4d5e6f70",
+   "createdAt": "2026-10-01T11:40:12Z",
+   "resourceVersion": "48120",
+   "health": {
+    "status": "Degraded",
+    "message": "back-off 2m40s restarting failed container=main pod=report-generator-5c6d7f8b9-qz4lm_batch(4e8f3d2a-6b9c-4d7e-8f1a-2b3c4d5e6f70)"
+   },
+   "parentRefs": [
+    {
+     "group": "apps",
+     "kind": "ReplicaSet",
+     "namespace": "batch",
+     "name": "report-generator-5c6d7f8b9",
+     "uid": "b1c2d3e4-0000-4000-8000-0000000000b2"
+    }
+   ],
+   "info": [
+    {
+     "name": "Status Reason",
+     "value": "CrashLoopBackOff"
+    },
+    {
+     "name": "Node",
+     "value": "incident-bench-worker"
+    },
+    {
+     "name": "Containers",
+     "value": "0/1"
+    },
+    {
+     "name": "Restart Count",
+     "value": "6"
+    }
+   ],
+   "images": [
+    "fixture.local/report-generator:v1"
+   ]
+  }
+ ]
+}

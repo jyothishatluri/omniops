@@ -1,0 +1,33 @@
+{
+ "past_incidents": [
+  {
+   "incident": {
+    "id": "PFBE9I2",
+    "created_at": "2020-11-04T16:08:15Z",
+    "self": "https://api.pagerduty.com/incidents/PFBE9I2",
+    "title": "Things are so broken!"
+   },
+   "score": 46.8249
+  },
+  {
+   "incident": {
+    "id": "P1J6V6M",
+    "created_at": "2020-10-22T17:18:14Z",
+    "self": "https://api.pagerduty.com/incidents/P1J6V6M",
+    "title": "Things are so broken!"
+   },
+   "score": 46.8249
+  },
+  {
+   "incident": {
+    "id": "P6HPX5N",
+    "created_at": "2020-10-06T22:01:13Z",
+    "self": "https://api.pagerduty.com/incidents/P6HPX5N",
+    "title": "You forgot to feed the cat!"
+   },
+   "score": 0
+  }
+ ],
+ "total": 3,
+ "limit": 5
+}

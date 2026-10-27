@@ -1,0 +1,16 @@
+{
+  "status": "success",
+  "data": {
+    "telemetry.traces.count": 4821934,
+    "telemetry.traces.last_observed.time": "2026-06-18T09:14:22.350011Z",
+    "telemetry.traces.last_observed.time_unix": 1781774062,
+    "telemetry.logs.count": 19384726,
+    "telemetry.logs.last_observed.time": "2026-06-18T09:14:25.483198924Z",
+    "telemetry.logs.last_observed.time_unix": 1781774065,
+    "telemetry.metrics.count": 73650281,
+    "telemetry.metrics.last_observed.time": "2026-06-18T09:14:20Z",
+    "telemetry.metrics.last_observed.time_unix": 1781774060,
+    "telemetry.metrics.k8s.exists": true,
+    "telemetry.metrics.system.exists": true
+  }
+}

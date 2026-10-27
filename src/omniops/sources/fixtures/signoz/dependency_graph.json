@@ -1,0 +1,4 @@
+[
+  {"parent": "gateway", "child": "frontend", "callCount": 41200, "callRate": 68.4, "errorRate": 0.4, "p99": 184000000, "p95": 120000000, "p90": 95000000, "p75": 60000000, "p50": 31000000},
+  {"parent": "frontend", "child": "auth", "callCount": 12800, "callRate": 21.3, "errorRate": 0, "p99": 46000000, "p95": 30000000, "p90": 24000000, "p75": 15000000, "p50": 9000000}
+]

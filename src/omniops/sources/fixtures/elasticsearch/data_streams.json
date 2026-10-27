@@ -1,0 +1,69 @@
+{
+  "data_streams": [
+    {
+      "name": "my-data-stream",
+      "timestamp_field": {
+        "name": "@timestamp"
+      },
+      "indices": [
+        {
+          "index_name": ".ds-my-data-stream-2099.03.07-000001",
+          "index_uuid": "xCEhwsp8Tey0-FLNFYVwSg",
+          "prefer_ilm": true,
+          "ilm_policy": "my-lifecycle-policy",
+          "managed_by": "Index Lifecycle Management"
+        },
+        {
+          "index_name": ".ds-my-data-stream-2099.03.08-000002",
+          "index_uuid": "PA_JquKGSiKcAKBA8DJ5gw",
+          "prefer_ilm": true,
+          "ilm_policy": "my-lifecycle-policy",
+          "managed_by": "Index Lifecycle Management"
+        }
+      ],
+      "generation": 2,
+      "_meta": {
+        "my-meta-field": "foo"
+      },
+      "status": "GREEN",
+      "next_generation_managed_by": "Index Lifecycle Management",
+      "prefer_ilm": true,
+      "template": "my-index-template",
+      "ilm_policy": "my-lifecycle-policy",
+      "hidden": false,
+      "system": false,
+      "allow_custom_routing": false,
+      "replicated": false,
+      "rollover_on_write": false
+    },
+    {
+      "name": "my-data-stream-two",
+      "timestamp_field": {
+        "name": "@timestamp"
+      },
+      "indices": [
+        {
+          "index_name": ".ds-my-data-stream-two-2099.03.08-000001",
+          "index_uuid": "3liBu2SYS5axasRt6fUIpA",
+          "prefer_ilm": true,
+          "ilm_policy": "my-lifecycle-policy",
+          "managed_by": "Index Lifecycle Management"
+        }
+      ],
+      "generation": 1,
+      "_meta": {
+        "my-meta-field": "foo"
+      },
+      "status": "YELLOW",
+      "next_generation_managed_by": "Index Lifecycle Management",
+      "prefer_ilm": true,
+      "template": "my-index-template",
+      "ilm_policy": "my-lifecycle-policy",
+      "hidden": false,
+      "system": false,
+      "allow_custom_routing": false,
+      "replicated": false,
+      "rollover_on_write": false
+    }
+  ]
+}

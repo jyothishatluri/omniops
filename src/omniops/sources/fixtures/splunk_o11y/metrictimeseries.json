@@ -1,0 +1,17 @@
+{
+ "count": 0,
+ "isPartialCount": true,
+ "results": [
+  {
+   "created": 1557743430000,
+   "creator": "string",
+   "lastUpdated": 1557916230000,
+   "lastUpdatedBy": "string",
+   "metric": "string",
+   "tags": [
+    "string"
+   ],
+   "type": "GAUGE"
+  }
+ ]
+}

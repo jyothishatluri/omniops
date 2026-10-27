@@ -1,0 +1,2074 @@
+# Kubernetes API server (core/v1, apps/v1, batch/v1, discovery.k8s.io/v1, networking.k8s.io/v1,
+# storage.k8s.io/v1, autoscaling/v2, policy/v1, admissionregistration.k8s.io/v1, events.k8s.io/v1,
+# metrics.k8s.io), authenticated with a kubeconfig (client certificate or bearer token).
+# Docs: https://kubernetes.io/docs/reference/kubernetes-api/ (generated reference, v1.37, Aug 2026)
+# List semantics (limit/continue chunks, 410 Gone): https://kubernetes.io/docs/reference/using-api/api-concepts/
+# Field selectors: https://kubernetes.io/docs/concepts/overview/working-with-objects/field-selectors/
+# Pod log options (sinceTime is a PodLogOptions field accepted as a query parameter although the
+# generated OpenAPI omits it): https://github.com/kubernetes/api/blob/master/core/v1/types.go (PodLogOptions)
+source: kubernetes
+display_name: Kubernetes
+vendor: Kubernetes (CNCF)
+description: >-
+  Live Kubernetes state over the API server: pods (one row per container status), container logs
+  (incl. the previous crashed instance), events, workloads (deployments, replicasets = rollout
+  history, statefulsets, daemonsets, jobs, cronjobs), services and endpoint slices, configmaps,
+  secret metadata (key names only), network policies, storage (PVC/PV/StorageClass), quotas and
+  limit ranges, HPAs, nodes, admission webhooks and metrics.k8s.io usage.
+docs_url: https://kubernetes.io/docs/reference/kubernetes-api/
+categories: [kubernetes, k8s, infrastructure, containers, logs, events, changes]
+base_url: "{{ env.K8S_API_URL }}"
+env:
+  - {name: KUBECONFIG, description: "Path to the kubeconfig file (first entry of a ':'-separated list is used), e.g. ~/.kube/config. Setting it enables this source."}
+  - {name: KUBE_CONTEXT, description: "kubeconfig context to use (default: current-context), e.g. kind-incident-bench"}
+  - {name: KUBERNETES_CONTEXT, description: "Alias of KUBE_CONTEXT (used when KUBE_CONTEXT is unset)"}
+  - {name: K8S_API_URL, description: "API server URL, e.g. https://127.0.0.1:6443 (kind) or http://127.0.0.1:8001 ('kubectl proxy'). Default: the kubeconfig cluster server (resolved before the first request)"}
+  - {name: K8S_METRICS_API_VERSION, description: "metrics.k8s.io version served by metrics-server: v1beta1 (every metrics-server release) or v1 (stable since Kubernetes 1.37)", default: v1beta1}
+required_env: [KUBECONFIG]
+auth:
+  type: kubeconfig
+  kubeconfig: "{{ env.KUBECONFIG }}"
+  context: "{{ env.KUBE_CONTEXT or env.KUBERNETES_CONTEXT }}"
+rate_limit:
+  concurrency: 6
+  notes: >-
+    The API server applies API Priority and Fairness: overload returns HTTP 429 with Retry-After
+    (retried). Lists are chunked with limit=500 + continue (tokens expire after ~5 minutes: 410 Gone).
+    Pod logs are proxied through the kubelet - one request per pod/container.
+retention: {}
+errors:
+  - {path: "$.status", equals: "Failure", message: "$.message", hint: "the API server returned a Status object with status Failure (bad selector, forbidden or not found); fix the filter - do not retry unchanged"}
+query_languages:
+  k8s_label_selector: >-
+    Kubernetes label selector (labelSelector=): comma-separated AND of key=value, key!=value,
+    key in (a,b), key notin (a,b), key (exists), !key. Example: app.kubernetes.io/name=cart,tier!=batch.
+    Label keys with a prefix keep it (app.kubernetes.io/name).
+  k8s_field_selector: >-
+    Kubernetes field selector (fieldSelector=): comma-separated AND of field=value / field!=value
+    (no set operators). Every kind supports metadata.name and metadata.namespace. Pods also:
+    spec.nodeName, spec.restartPolicy, spec.schedulerName, spec.serviceAccountName,
+    spec.hostNetwork, status.phase, status.podIP, status.nominatedNodeName. core/v1 Events:
+    involvedObject.kind/name/namespace/uid/apiVersion/fieldPath, reason, reportingComponent,
+    source, type. events.k8s.io Events: regarding.kind/name/namespace/uid, reason, type,
+    reportingController. Secrets: type. Services: spec.clusterIP, spec.type. Namespaces:
+    status.phase. ReplicaSets: status.replicas. Jobs: status.successful. Nodes: spec.unschedulable.
+    An unsupported field is an HTTP 400, not an empty result.
+pitfalls:
+  - "Every table is a LIVE snapshot (no history) except events (kept ~1 hour after their last occurrence: kube-apiserver --event-ttl default 1h) and container logs (current + the one previous container instance, rotated by the kubelet). Deleted pods, their logs and expired events are gone - absence is not proof something never happened."
+  - "Filter namespace whenever you can: without it every table lists ALL namespaces (one chunked request, up to 10 x 500 objects). namespace IN (...) fans out one request per namespace; namespace != 'x' and LIKE list all namespaces."
+  - "name/namespace/node/phase filters with = are pushed down as fieldSelector; LIKE and other operators on them are evaluated locally after listing (allowed, but they list everything first). Labels are only pushed through label_selector (e.g. label_selector = 'app=cart'); labels->>'app' in SQL filters locally."
+  - "A list item carries no 'kind' field: every table adds a constant kind column. Quantities (cpu '250m', memory '64Mi') are kept as Kubernetes quantity strings except in the metrics tables, which also give cpu_cores / memory_bytes."
+  - "Secrets: values are never returned (kubernetes_secrets gives key names and sizes only) and annotations are reduced to key names on secrets/configmaps; on every table the kubectl.kubernetes.io/last-applied-configuration annotation is dropped because it embeds the whole object (env values, secret data). Env literal values appear ONLY in kubernetes_container_env, redacted."
+  - "HTTP 403 means the kubeconfig identity lacks RBAC 'list' on that resource (common for secrets, nodes, webhooks): it is a permission gap, not an empty cluster. HTTP 404 on metrics tables means metrics-server is not installed (or serves another K8S_METRICS_API_VERSION)."
+  - "kubeconfig auth supports client certificates and static bearer tokens. exec credential plugins (aws eks get-token, gke-gcloud-auth-plugin, kubelogin) are not executed: use a kubeconfig with a token, or 'kubectl proxy' + K8S_API_URL."
+
+tables:
+  # ------------------------------------------------------------------------------------------
+  # Pods and containers
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_pods
+    title: Pods (one row per container status)
+    description: >-
+      Pods from GET /api/v1[/namespaces/{namespace}]/pods, one row per entry of
+      status.containerStatuses (a pod with no container status yet - Pending/unscheduled - still
+      gives one row). Columns cover the pod (phase, reason e.g. Evicted, Ready condition,
+      unschedulable message, node, owner, QoS, volumes) and the container (ready, restarts, current
+      state waiting/running/terminated with reason e.g. CrashLoopBackOff / ImagePullBackOff /
+      ErrImagePull / CreateContainerConfigError / OOMKilled, last termination reason + exit code +
+      finishedAt, image, requests/limits, probes, command/args, env references). Filter on
+      namespace, pod (exact name), node, phase or label_selector. This is the first table for
+      "why is X not running / restarting".
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/pods"
+      query:
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.namespace!=' ~ filters.namespace) if filters.namespace__op == '!=' else none,
+              ('metadata.name=' ~ filters.pod) if (filters.pod and not filters.pod__op) else none,
+              ('metadata.name!=' ~ filters.pod) if filters.pod__op == '!=' else none,
+              ('spec.nodeName=' ~ filters.node) if (filters.node and not filters.node__op) else none,
+              ('status.phase=' ~ filters.phase) if (filters.phase and not filters.phase__op) else none,
+              ('status.phase!=' ~ filters.phase) if filters.phase__op == '!=' else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - &f_namespace {column: namespace, ops: ["=", "in", "!=", "like"], description: "Namespace (exact). = / IN query /namespaces/{ns}/... (IN fans out); != is pushed as fieldSelector metadata.namespace!=; LIKE lists all namespaces and filters locally", examples: [shop]}
+      - {column: pod, ops: ["=", "in", "!=", "like"], description: "Pod name (exact; pushed as fieldSelector metadata.name=). LIKE 'cart-%' is evaluated locally", examples: [cart-7d9c6b5f4-x2x9q]}
+      - {column: node, ops: ["=", "in", "like"], description: "Node name (fieldSelector spec.nodeName=)", examples: [incident-bench-worker]}
+      - {column: phase, ops: ["=", "!=", "in"], description: "Pod phase: Pending | Running | Succeeded | Failed | Unknown (fieldSelector status.phase)", examples: [Pending]}
+      - &f_label_selector {column: label_selector, description: "Kubernetes label selector sent as labelSelector, e.g. app=cart or app.kubernetes.io/name in (cart,checkout)", examples: ["app=cart"]}
+      - &f_field_selector {column: field_selector, description: "Extra raw fieldSelector terms ANDed with the pushed ones, e.g. spec.restartPolicy=Always", examples: ["spec.restartPolicy=Always"]}
+    pagination: &k8s_pages {type: cursor, cursor_path: "$.metadata.continue", cursor_param: query.continue, max_pages: 10}
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: "status.containerStatuses", as: cs, keep_empty: true}
+    columns:
+      - {name: kind, expr: "'Pod'", description: "Constant 'Pod'"}
+      - &c_namespace {name: namespace, path: metadata.namespace, description: "Namespace"}
+      - {name: pod, path: metadata.name, description: "Pod name"}
+      - {name: service, expr: "_.metadata.labels['app.kubernetes.io/name'] or _.metadata.labels.app or _.metadata.labels['k8s-app'] or _.metadata.labels['app.kubernetes.io/component'] or _.metadata.labels['app.kubernetes.io/instance']", description: "Service/app from labels app.kubernetes.io/name, app, k8s-app, app.kubernetes.io/component or instance"}
+      - {name: node, path: spec.nodeName, description: "Node the pod is bound to (null while unscheduled)"}
+      - {name: phase, path: status.phase, description: "Pending | Running | Succeeded | Failed | Unknown"}
+      - {name: pod_reason, path: status.reason, description: "Pod-level reason, e.g. Evicted, NodeLost, UnexpectedAdmissionError"}
+      - {name: pod_message, path: status.message, description: "Pod-level message (eviction reason ...)"}
+      - {name: pod_ready, type: BOOLEAN, expr: "((_.status.conditions or []) | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first) == 'True'", description: "Pod Ready condition is True"}
+      - {name: unschedulable_message, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'PodScheduled') | selectattr('status', 'equalto', 'False') | map(attribute='message') | first", description: "PodScheduled=False message, e.g. '0/3 nodes are available: 3 node(s) had volume node affinity conflict' or 'pod has unbound immediate PersistentVolumeClaims'"}
+      - {name: conditions, type: JSON, path: status.conditions, description: "Pod conditions [{type, status, reason, message, lastTransitionTime}] (PodScheduled, Initialized, ContainersReady, Ready, DisruptionTarget ...)"}
+      - {name: container, expr: "cs.name if cs else ((_.spec.containers or [{}])[0]).name", description: "Container name (status entry, or the first spec container when no status exists yet)"}
+      - {name: image, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).image or (cs.image if cs else none)", description: "Image reference from the pod spec (what the kubelet tries to pull)"}
+      - {name: image_id, path: "@cs.imageID", description: "Resolved image digest of the running/last container (empty while the pull fails)"}
+      - {name: ready, type: BOOLEAN, path: "@cs.ready", description: "Container passes its readiness probe"}
+      - {name: started, type: BOOLEAN, path: "@cs.started", description: "Container passed its startup probe / has started"}
+      - {name: restarts, type: BIGINT, path: "@cs.restartCount", description: "Container restart count (since pod creation)"}
+      - {name: state, expr: "('waiting' if cs.state.waiting is defined else ('running' if cs.state.running is defined else ('terminated' if cs.state.terminated is defined else none))) if cs else none", description: "Current state: waiting | running | terminated"}
+      - {name: reason, expr: "cs.state.waiting.reason or (cs.state.terminated.reason if cs.state.terminated.reason != 'Completed' else none) or _.status.reason or ((_.status.conditions or []) | selectattr('type', 'equalto', 'PodScheduled') | selectattr('status', 'equalto', 'False') | map(attribute='reason') | first)", description: "Why it is not healthy: waiting reason (CrashLoopBackOff, ImagePullBackOff, ErrImagePull, CreateContainerConfigError, ContainerCreating ...), else current termination reason (Error, OOMKilled; not Completed), else pod reason (Evicted), else Unschedulable"}
+      - {name: waiting_reason, path: "@cs.state.waiting.reason", description: "state.waiting.reason"}
+      - {name: waiting_message, path: "@cs.state.waiting.message", description: "state.waiting.message, e.g. 'couldn't find key ENDPOINT_URL in ConfigMap batch/config-loader-settings' or 'back-off 5m0s restarting failed container=...'"}
+      - {name: state_started_at, type: TIMESTAMP, expr: "cs.state.running.startedAt or cs.state.terminated.startedAt", description: "When the current container instance started"}
+      - {name: terminated_reason, path: "@cs.state.terminated.reason", description: "Current state terminated reason (Completed, Error, OOMKilled, ContainerCannotRun ...)"}
+      - {name: exit_code, type: BIGINT, path: "@cs.state.terminated.exitCode", description: "Current state terminated exit code"}
+      - {name: last_termination_reason, path: "@cs.lastState.terminated.reason", description: "Previous instance termination reason - OOMKilled / Error / Completed. The cause of a CrashLoopBackOff lives here"}
+      - {name: last_exit_code, type: BIGINT, path: "@cs.lastState.terminated.exitCode", description: "Previous instance exit code (137 = SIGKILL, usually OOMKilled; 1 = application error; 143 = SIGTERM)"}
+      - {name: last_signal, type: BIGINT, path: "@cs.lastState.terminated.signal", description: "Previous instance terminating signal"}
+      - {name: last_termination_message, path: "@cs.lastState.terminated.message", description: "Previous instance termination message (terminationMessagePath, or log tail with FallbackToLogsOnError)"}
+      - {name: last_started_at, type: TIMESTAMP, path: "@cs.lastState.terminated.startedAt", description: "Previous instance start"}
+      - {name: last_finished_at, type: TIMESTAMP, path: "@cs.lastState.terminated.finishedAt", description: "Previous instance termination time (the crash/OOM time)"}
+      - {name: requests, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).resources.requests", description: "Container resource requests, e.g. {\"cpu\":\"10m\",\"memory\":\"32Mi\"} (null = none set: a quota requiring requests.cpu rejects such pods)"}
+      - {name: limits, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).resources.limits", description: "Container resource limits, e.g. {\"memory\":\"64Mi\"}"}
+      - {name: liveness_probe, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).livenessProbe", description: "livenessProbe (tcpSocket/httpGet/exec/grpc + timings)"}
+      - {name: readiness_probe, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).readinessProbe", description: "readinessProbe"}
+      - {name: startup_probe, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).startupProbe", description: "startupProbe"}
+      - {name: ports, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).ports", description: "Declared container ports"}
+      - {name: command, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).command", description: "Container command (entrypoint override)"}
+      - {name: args, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).args", description: "Container args"}
+      - {name: env_names, type: JSON, expr: "(((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).env or []) | map(attribute='name') | list", description: "Names of the container's env vars (values: kubernetes_container_env)"}
+      - {name: env_refs, type: JSON, expr: "((((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).env or []) | selectattr('valueFrom', 'defined') | list) + (((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).envFrom or [])", description: "Env vars taken from ConfigMaps/Secrets/fields ({name, valueFrom:{configMapKeyRef|secretKeyRef:{name,key}}}) plus envFrom sources - references only, never values"}
+      - {name: volume_mounts, type: JSON, expr: "((_.spec.containers or []) | selectattr('name', 'equalto', (cs.name if cs else ((_.spec.containers or [{}])[0]).name)) | first).volumeMounts", description: "Container volumeMounts [{name, mountPath, readOnly, subPath}]"}
+      - {name: volumes, type: JSON, path: spec.volumes, description: "Pod volumes (emptyDir {medium, sizeLimit}, persistentVolumeClaim {claimName}, configMap, secret {secretName} ...)"}
+      - {name: init_container_statuses, type: JSON, path: status.initContainerStatuses, description: "Init container statuses (same shape as container statuses)"}
+      - {name: restart_policy, path: spec.restartPolicy, description: "Always | OnFailure | Never"}
+      - {name: service_account, path: spec.serviceAccountName}
+      - {name: qos_class, path: status.qosClass, description: "Guaranteed | Burstable | BestEffort"}
+      - {name: pod_ip, path: status.podIP}
+      - {name: host_ip, path: status.hostIP}
+      - {name: start_time, type: TIMESTAMP, path: status.startTime, description: "When the kubelet acknowledged the pod"}
+      - &c_created {name: created, type: TIMESTAMP, path: metadata.creationTimestamp, description: "metadata.creationTimestamp"}
+      - &c_deleting {name: deleting_since, type: TIMESTAMP, path: metadata.deletionTimestamp, description: "Set while the object is terminating"}
+      - &c_owner_kind {name: owner_kind, path: "metadata.ownerReferences[0].kind", description: "Controller kind (ReplicaSet, StatefulSet, DaemonSet, Job, Node ...)"}
+      - &c_owner_name {name: owner_name, path: "metadata.ownerReferences[0].name", description: "Controller name (a pod's ReplicaSet is <deployment>-<pod-template-hash>)"}
+      - &c_labels {name: labels, type: JSON, path: metadata.labels, description: "Labels; query with labels->>'app'"}
+      - &c_annotations {name: annotations, type: JSON, expr: "dict((_.metadata.annotations or {}) | dictsort | rejectattr('0', 'equalto', 'kubectl.kubernetes.io/last-applied-configuration'))", description: "Annotations (kubectl last-applied-configuration removed)"}
+      - &c_uid {name: uid, path: metadata.uid}
+      - &c_label_selector {name: label_selector, filter_only: true, description: "labelSelector sent to the API"}
+      - &c_field_selector {name: field_selector, filter_only: true, description: "Extra fieldSelector terms"}
+    max_rows: 5000
+    sort_hint: "API order (by namespace, then name); ORDER BY restarts DESC or last_finished_at DESC yourself"
+    pitfalls:
+      - "Rows are per CONTAINER: count(DISTINCT pod) for pod counts. Init containers are summarised in init_container_statuses (JSON), not as rows."
+      - "restarts is cumulative since the pod was created; a replaced pod starts at 0. A crashlooping container alternates between waiting/CrashLoopBackOff and running: read last_termination_reason / last_exit_code / last_finished_at for the cause, then kubernetes_pod_logs WHERE previous = true."
+      - "OOMKilled shows as last_termination_reason = 'OOMKilled' with last_exit_code = 137 (the container's own memory limit, not node memory). Exit code 1 with reason Error is the application exiting."
+      - "Pods blocked at admission (ResourceQuota, admission webhook, LimitRange) never exist: look at kubernetes_events (FailedCreate on the ReplicaSet/Job) and kubernetes_replicasets.failure_message instead of this table."
+      - "CreateContainerConfigError / CreateContainerError carry the missing ConfigMap/Secret key in waiting_message; ImagePullBackOff carries the image in image and the registry error in kubernetes_events (Failed / ErrImagePull)."
+    examples:
+      - sql: >-
+          SELECT namespace, pod, container, phase, reason, restarts, last_termination_reason, last_exit_code, last_finished_at, node
+          FROM kubernetes_pods
+          WHERE namespace = 'batch' AND (restarts > 0 OR NOT coalesce(ready, false) OR reason IS NOT NULL)
+          ORDER BY restarts DESC
+        description: Unhealthy containers in one namespace with the cause of the last crash.
+      - sql: >-
+          SELECT pod, container, waiting_reason, waiting_message, image, env_refs
+          FROM kubernetes_pods WHERE namespace = 'batch' AND waiting_reason IN ('CreateContainerConfigError', 'ImagePullBackOff', 'ErrImagePull')
+        description: Containers that cannot start, with the missing key / image.
+      - sql: >-
+          SELECT namespace, pod, phase, unschedulable_message, volumes
+          FROM kubernetes_pods WHERE phase = 'Pending'
+        description: Pending pods across the cluster and why the scheduler cannot place them.
+      - sql: >-
+          SELECT pod, container, limits->>'memory' AS mem_limit, requests, last_termination_reason, last_exit_code
+          FROM kubernetes_pods WHERE namespace = 'batch' AND label_selector = 'app=thumbnailer'
+        description: Memory limit of an OOM-killed worker, selected by label.
+    fixtures:
+      - file: pods_list.json
+        filters: {namespace: batch}
+        note: >-
+          Built strictly from the v1.37 API reference schema (PodList / Pod / PodSpec / PodStatus /
+          ContainerStatus / ContainerState*) - the reference has no example bodies. The OOMKilled
+          lastState (exitCode 137, reason OOMKilled) follows the kubernetes.io task 'Assign Memory
+          Resources to Containers and Pods' output; names/images follow the Arena batch faults.
+          Includes a Pending pod with no containerStatuses (keep_empty row).
+        expect_rows: 4
+        expect_columns: {kind: Pod, namespace: batch, pod: thumbnailer-6f7b9c8d5-k2v7p, service: thumbnailer, container: main, phase: Running, restarts: 4, state: waiting, reason: CrashLoopBackOff, last_termination_reason: OOMKilled, last_exit_code: 137, last_finished_at: "2026-10-01T11:52:19Z", image: "fixture.local/thumbnailer:v1", owner_kind: ReplicaSet, owner_name: thumbnailer-6f7b9c8d5, pod_ready: false, ready: false}
+      - file: pods_configerror.json
+        filters: {namespace: batch}
+        note: "Schema-built (v1.37 PodList) like pods_list.json: a container stuck in CreateContainerConfigError because the referenced ConfigMap key is missing (Arena missing-config-key)."
+        expect_rows: 1
+        expect_columns: {pod: config-loader-7b8c9d6f5-m3n4p, phase: Pending, state: waiting, waiting_reason: CreateContainerConfigError, reason: CreateContainerConfigError, waiting_message: "couldn't find key ENDPOINT_URL in ConfigMap batch/config-loader-settings", env_names: '["ENDPOINT_URL"]', env_refs: '[{"name":"ENDPOINT_URL","valueFrom":{"configMapKeyRef":{"name":"config-loader-settings","key":"ENDPOINT_URL"}}}]', restarts: 0}
+      - file: pods_pending.json
+        filters: {namespace: batch}
+        note: "Schema-built (v1.37 PodList): an unschedulable Pending pod with no containerStatuses (one keep_empty row; container/image from the spec) - Arena pending-volume-claim."
+        expect_rows: 1
+        expect_columns: {pod: archive-writer-6c7d8e9f0-r5s6t, phase: Pending, container: main, image: "fixture.local/archive-writer:v1", state: null, restarts: null, reason: Unschedulable, unschedulable_message: "0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims. preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.", volumes: '[{"name":"archive","persistentVolumeClaim":{"claimName":"archive-writer"}}]'}
+      - file: status_failure.json
+        filters: {namespace: batch}
+        note: "A metav1.Status body with status Failure (documented Status kind, https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/status/) proves the 2xx error rule fires."
+        expect_error: "unable to parse requirement"
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/#get-list
+
+  - name: kubernetes_pod_logs
+    title: Container logs (current or previous instance)
+    description: >-
+      Log lines of one container from GET /api/v1/namespaces/{namespace}/pods/{pod}/log with
+      timestamps=true (RFC3339Nano prefix parsed into ts). namespace and pod are required;
+      container is required when the pod has more than one container. previous = true returns
+      the previous (terminated) instance - the crash output of a CrashLoopBackOff / OOMKilled
+      container. The ts window becomes sinceTime (current instance); the newest tail_lines lines
+      (default 2000; previous: 500) inside it are returned.
+    kind: logs
+    request:
+      method: GET
+      path: "/api/v1/namespaces/{{ filters.namespace }}/pods/{{ filters.pod }}/log"
+      query:
+        container: "{{ filters.container }}"
+        timestamps: "true"
+        previous: "{{ 'true' if filters.previous else none }}"
+        sinceTime: "{{ none if filters.previous else (time.start | rfc3339) }}"
+        tailLines: "{{ filters.tail_lines or (500 if filters.previous else 2000) }}"
+        limitBytes: "{{ filters.limit_bytes }}"
+        stream: "{{ filters.stream }}"
+      response_format: text
+    filters:
+      - {column: namespace, required: true, description: "Namespace (exact)", examples: [batch]}
+      - {column: pod, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Pod name (exact); IN fans out one request per pod", examples: [report-generator-5c6d7f8b9-qz4lm]}
+      - {column: container, description: "Container name; required by the API for multi-container pods (HTTP 400 lists the choices)", examples: [main]}
+      - {column: previous, type: BOOLEAN, description: "true: logs of the previous terminated instance (crashloops, OOMKilled); sinceTime is not sent then", examples: ["true"]}
+      - {column: tail_lines, type: BIGINT, description: "Number of newest lines (tailLines); default 2000, or 500 with previous = true"}
+      - {column: limit_bytes, type: BIGINT, description: "Byte cap (limitBytes) - truncates the END of the log; prefer tail_lines"}
+      - {column: stream, description: "All | Stdout | Stderr (needs the PodLogsQuerySplitStreams feature; only All combines with tailLines)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, control_lookback: 1h}
+    response:
+      text:
+        regex: "^(?P<ts>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})) ?(?P<message>.*)$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: ts, transform: auto_time, description: "Line timestamp written by the container runtime (UTC)"}
+      - {name: message, expr: "_.message if _.message is not none else _.line", description: "Log line without the timestamp prefix"}
+      - {name: level, expr: "('error' if ('ERROR' in ((_.message or _.line or '') | upper) or 'FATAL' in ((_.message or _.line or '') | upper) or 'PANIC' in ((_.message or _.line or '') | upper) or 'EXCEPTION' in ((_.message or _.line or '') | upper) or 'TRACEBACK' in ((_.message or _.line or '') | upper)) else ('warn' if 'WARN' in ((_.message or _.line or '') | upper) else ('info' if 'INFO' in ((_.message or _.line or '') | upper) else ('debug' if 'DEBUG' in ((_.message or _.line or '') | upper) else none))))", description: "Heuristic level from keywords in the line (ERROR/FATAL/PANIC/EXCEPTION/TRACEBACK -> error, WARN, INFO, DEBUG); null when none"}
+      - {name: line, path: line, description: "Raw line as returned (with timestamp)"}
+      - {name: namespace, filter_only: true}
+      - {name: pod, description: "Pod name (from the request)", expr: "filters.pod"}
+      - {name: container, filter_only: true}
+      - {name: previous, type: BOOLEAN, filter_only: true}
+      - {name: tail_lines, type: BIGINT, filter_only: true}
+      - {name: limit_bytes, type: BIGINT, filter_only: true}
+      - {name: stream, filter_only: true}
+    max_rows: 20000
+    sort_hint: "oldest line first (file order); the newest tail_lines lines in the window are returned"
+    pitfalls:
+      - "Only the current and the immediately previous container instance exist on the node; a deleted or rescheduled pod's logs are gone (use the log platform for history). previous = true on a container that never restarted is HTTP 400 'previous terminated container ... not found'."
+      - "Without previous = true, sinceTime is the window start and only the NEWEST tail_lines lines after it are returned: raise tail_lines or narrow ts for chatty containers. There is no 'until' parameter: the end of the window is applied locally."
+      - "A message such as 'connection refused' is what the program printed, not proof of a network fault: scripted workers can print anything. Correlate with events, exit codes and the callee's own state."
+      - "Multi-container pods need container = '<name>' (the API answers HTTP 400 with the list of containers); container names come from kubernetes_pods.container."
+    examples:
+      - sql: >-
+          SELECT ts, message FROM kubernetes_pod_logs
+          WHERE namespace = 'batch' AND pod = 'report-generator-5c6d7f8b9-qz4lm' AND previous = true
+          ORDER BY ts
+        description: The output of the crashed previous instance of a CrashLoopBackOff container.
+      - sql: >-
+          SELECT date_trunc('minute', ts) AS minute, count(*) AS lines, count(*) FILTER (WHERE level = 'error') AS errors
+          FROM kubernetes_pod_logs
+          WHERE namespace = 'shop' AND pod = 'cart-7d9c6b5f4-x2x9q' AND container = 'cart' AND ts >= now() - INTERVAL 30 MINUTE
+          GROUP BY 1 ORDER BY 1
+        description: Error-line rate per minute for one container over the last 30 minutes.
+    fixtures:
+      - file: pod_log_previous.txt
+        filters: {namespace: batch, pod: report-generator-5c6d7f8b9-qz4lm, previous: true}
+        note: >-
+          Text body as documented for 'Read Log' (200 OK, string) with timestamps=true (an RFC3339 /
+          RFC3339Nano prefix on every line); the lines reproduce the Arena crashloop worker's
+          scripted output.
+        expect_rows: 4
+        expect_columns: {ts: "2026-10-01T11:58:01Z", message: "report-generator starting: building nightly report", pod: report-generator-5c6d7f8b9-qz4lm, previous: true, level: null}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/#get-read-log
+
+  - name: kubernetes_container_env
+    title: Container environment variables (values redacted)
+    description: >-
+      One row per env var / envFrom source of every container and init container of the selected
+      workloads (kind = deployments (default) | pods | statefulsets | daemonsets | replicasets |
+      jobs | cronjobs), read from the pod template. Literal values are returned with credentials
+      masked (URL passwords -> ***, password=/token= pairs, PEM/JWT/API tokens, and the whole
+      value when the variable name looks secret); valueFrom rows give the ConfigMap/Secret name
+      and key instead of a value. Use it to see e.g. SCRATCH_MIB=128, that DB_CONNECTION_STRING
+      embeds credentials inline, or that ENDPOINT_URL comes from ConfigMap config-loader-settings.
+      Filter namespace and workload (exact name) to keep it small.
+    kind: entities
+    python: "omniops.sources.python.kubernetes:container_env"
+    filters:
+      - *f_namespace
+      - {column: kind, default: deployments, description: "Workload kind to read: deployments (default), pods, statefulsets, daemonsets, replicasets, jobs, cronjobs (singular forms accepted)", examples: [deployments]}
+      - {column: workload, ops: ["=", "in", "!=", "like"], description: "Workload (object) name, exact (fieldSelector metadata.name)", examples: [product-catalog]}
+      - *f_label_selector
+      - *f_field_selector
+    columns:
+      - *c_namespace
+      - {name: kind, filter_only: true, description: "Requested kind (plural), e.g. deployments"}
+      - {name: workload_kind, description: "Deployment | Pod | StatefulSet | DaemonSet | ReplicaSet | Job | CronJob"}
+      - {name: workload, description: "Object name"}
+      - {name: container, description: "Container name"}
+      - {name: init_container, type: BOOLEAN, description: "true for initContainers"}
+      - {name: image, description: "Container image"}
+      - {name: position, type: BIGINT, description: "Index in env / envFrom (later env entries override earlier and envFrom)"}
+      - {name: source, description: "env | envFrom"}
+      - {name: env_name, description: "Variable name (null for envFrom rows)"}
+      - {name: value, description: "Literal value with credentials masked (*** / <redacted: N chars>); null for valueFrom/envFrom"}
+      - {name: redacted, type: BOOLEAN, description: "true when something in the value was masked"}
+      - {name: value_from, description: "configMapKeyRef | secretKeyRef | fieldRef | resourceFieldRef | fileKeyRef (env) or configMapRef | secretRef (envFrom)"}
+      - {name: ref_name, description: "Referenced ConfigMap / Secret name (container name for resourceFieldRef)"}
+      - {name: ref_key, description: "Referenced key (fieldPath / resource for field refs)"}
+      - {name: optional, type: BOOLEAN, description: "Reference marked optional (a missing non-optional key blocks container start: CreateContainerConfigError)"}
+      - {name: prefix, description: "envFrom prefix"}
+      - *c_label_selector
+      - *c_field_selector
+    max_rows: 5000
+    pitfalls:
+      - "Values are redacted heuristically and NEVER include Secret contents; do not try to reconstruct masked values. A *** inside a URL means the credential is embedded inline in the env var (so a rotated database password is NOT picked up by this workload until its spec changes)."
+      - "This is the pod TEMPLATE (desired spec); running pods keep the env they were started with until they are recreated. Use kind = 'pods' for what running pods actually have."
+      - "A configMapKeyRef / secretKeyRef row only names the key; check the key exists with kubernetes_configmaps.keys / kubernetes_secrets.key."
+    examples:
+      - sql: >-
+          SELECT container, env_name, value, redacted, value_from, ref_name, ref_key
+          FROM kubernetes_container_env WHERE namespace = 'shop' AND workload = 'product-catalog'
+        description: Environment of one deployment, credentials masked.
+      - sql: >-
+          SELECT workload, env_name, ref_name, ref_key, optional
+          FROM kubernetes_container_env
+          WHERE namespace = 'batch' AND value_from = 'configMapKeyRef'
+        description: Which ConfigMap keys the batch deployments depend on.
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/#Container
+
+  # ------------------------------------------------------------------------------------------
+  # Events
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_events
+    title: Events (core/v1)
+    description: >-
+      Cluster events from GET /api/v1[/namespaces/{namespace}]/events: reason (BackOff,
+      FailedCreate, FailedScheduling, Failed, FailedMount, Unhealthy, OOMKilling, Killing, Pulled,
+      ScalingReplicaSet ...), message, the involved object (kind/name/namespace/fieldPath), count
+      and first/last timestamps. Filter type = 'Warning', reason, object_kind / object_name
+      (pushed as fieldSelector). ts is the last occurrence. Admission failures (quota, webhook)
+      only show up here, as FailedCreate on the ReplicaSet/Job.
+    kind: events
+    request:
+      method: GET
+      path: "/api/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/events"
+      query:
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.namespace!=' ~ filters.namespace) if filters.namespace__op == '!=' else none,
+              ('type=' ~ filters.type) if (filters.type and not filters.type__op) else none,
+              ('type!=' ~ filters.type) if filters.type__op == '!=' else none,
+              ('reason=' ~ filters.reason) if (filters.reason and not filters.reason__op) else none,
+              ('reason!=' ~ filters.reason) if filters.reason__op == '!=' else none,
+              ('involvedObject.kind=' ~ filters.object_kind) if (filters.object_kind and not filters.object_kind__op) else none,
+              ('involvedObject.name=' ~ filters.object_name) if (filters.object_name and not filters.object_name__op) else none,
+              ('involvedObject.uid=' ~ filters.object_uid) if filters.object_uid else none,
+              ('reportingComponent=' ~ filters.reporting_component) if filters.reporting_component else none,
+              ('source=' ~ filters.source_component) if filters.source_component else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - *f_namespace
+      - {column: type, ops: ["=", "!="], description: "Normal | Warning (fieldSelector type=)", examples: [Warning]}
+      - {column: reason, ops: ["=", "in", "!=", "like"], description: "Event reason, exact (fieldSelector reason=), e.g. BackOff, FailedCreate, FailedScheduling, Failed, Unhealthy, FailedMount, OOMKilling", examples: [FailedCreate]}
+      - {column: object_kind, ops: ["=", "in", "like"], description: "involvedObject.kind: Pod, ReplicaSet, Deployment, Job, Node, PersistentVolumeClaim ...", examples: [ReplicaSet]}
+      - {column: object_name, ops: ["=", "in", "like"], description: "involvedObject.name (exact; a pod name or a ReplicaSet name like recommendation-5d8f7c9b6)", examples: [recommendation-5d8f7c9b6]}
+      - {column: object_uid, description: "involvedObject.uid"}
+      - {column: reporting_component, description: "reportingComponent (fieldSelector reportingComponent=), e.g. kubelet, replicaset-controller"}
+      - {column: source_component, description: "source.component (fieldSelector source=), e.g. kubelet, default-scheduler"}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    time: {column: ts, default_lookback: 1h}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.lastTimestamp or _.series.lastObservedTime or _.eventTime or _.firstTimestamp or _.metadata.creationTimestamp", description: "Last occurrence (lastTimestamp, series.lastObservedTime, eventTime, firstTimestamp, creation - first non-null)"}
+      - {name: first_seen, type: TIMESTAMP, expr: "_.firstTimestamp or _.eventTime or _.metadata.creationTimestamp", description: "First occurrence"}
+      - {name: event_time, type: TIMESTAMP, path: eventTime, description: "eventTime (MicroTime; set by events.k8s.io reporters)"}
+      - *c_namespace
+      - {name: type, path: type, description: "Normal | Warning"}
+      - {name: reason, path: reason}
+      - {name: message, path: message}
+      - {name: object_kind, path: involvedObject.kind}
+      - {name: object_name, path: involvedObject.name}
+      - {name: object_namespace, path: involvedObject.namespace}
+      - {name: object_uid, path: involvedObject.uid}
+      - {name: object_field_path, path: involvedObject.fieldPath, description: "e.g. spec.containers{main}"}
+      - {name: count, type: BIGINT, expr: "_['count'] or _.series['count'] or 1", description: "Occurrences (count, series.count; 1 for singletons)"}
+      - {name: source_component, expr: "_.source.component or _.reportingComponent", description: "Emitter: kubelet, default-scheduler, replicaset-controller, job-controller ..."}
+      - {name: source_host, path: source.host, description: "Node for kubelet events"}
+      - {name: reporting_component, path: reportingComponent}
+      - {name: reporting_instance, path: reportingInstance}
+      - {name: action, path: action}
+      - {name: related, type: JSON, path: related, description: "Secondary object"}
+      - {name: name, path: metadata.name, description: "Event object name"}
+      - *c_label_selector
+      - *c_field_selector
+    max_rows: 5000
+    sort_hint: "API order (by name, not time): ORDER BY ts DESC"
+    pitfalls:
+      - "Events expire about 1 hour after their LAST occurrence (kube-apiserver --event-ttl, default 1h). A repeating event keeps one object with a growing count; first_seen can be far older than the window."
+      - "The ts predicate is applied locally (the API has no time filter): the whole namespace's events are listed first."
+      - "Pod-creation failures (exceeded quota, missing requests.cpu, admission webhook errors) are FailedCreate events on the ReplicaSet / Job / StatefulSet - not on a pod, because the pod was never created. Filter object_kind = 'ReplicaSet' or reason = 'FailedCreate'."
+      - "Reasons are CamelCase and exact: Warning BackOff ('Back-off restarting failed container'), Failed + ErrImagePull/ImagePullBackOff, FailedScheduling, FailedMount, Unhealthy (probe failures), Killing, OOMKilling (node-level, from the kernel log)."
+    examples:
+      - sql: >-
+          SELECT ts, object_kind, object_name, reason, count, message
+          FROM kubernetes_events WHERE namespace = 'shop' AND type = 'Warning'
+          ORDER BY ts DESC LIMIT 50
+        description: Latest warnings in a namespace.
+      - sql: >-
+          SELECT ts, object_name, message FROM kubernetes_events
+          WHERE namespace = 'shop' AND reason = 'FailedCreate' ORDER BY ts DESC
+        description: Admission failures (quota / webhook) creating pods.
+      - sql: >-
+          SELECT namespace, reason, count(*) AS events, sum(count) AS occurrences, max(ts) AS last_seen
+          FROM kubernetes_events WHERE type = 'Warning' AND ts >= now() - INTERVAL 30 MINUTE
+          GROUP BY 1, 2 ORDER BY occurrences DESC
+        description: Cluster-wide warning reasons in the last 30 minutes.
+    fixtures:
+      - file: events_list.json
+        filters: {namespace: shop, type: Warning}
+        note: >-
+          Built strictly from the v1.37 core/v1 EventList / Event / ObjectReference / EventSource
+          schema (no example body in the reference). Messages follow the Arena quota-trap,
+          admission-webhook and crashloop scenarios and kubelet/replicaset-controller wording.
+        expect_rows: 3
+        expect_columns: {ts: "2026-10-01T11:58:40Z", namespace: shop, type: Warning, reason: FailedCreate, object_kind: ReplicaSet, object_name: recommendation-5d8f7c9b6, count: 7, source_component: replicaset-controller, first_seen: "2026-10-01T11:41:02Z"}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/event-v1/#get-list
+
+  - name: kubernetes_events_v1
+    title: Events (events.k8s.io/v1)
+    description: >-
+      The same event store through GET /apis/events.k8s.io/v1[/namespaces/{namespace}]/events:
+      regarding object, note, reason, reportingController, action and series (count /
+      lastObservedTime) - the fields newer controllers fill. Filter type, reason, regarding_kind,
+      regarding_name, reporting_controller (fieldSelector). Prefer kubernetes_events unless you
+      need series/action.
+    kind: events
+    request:
+      method: GET
+      path: "/apis/events.k8s.io/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/events"
+      query:
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.namespace!=' ~ filters.namespace) if filters.namespace__op == '!=' else none,
+              ('type=' ~ filters.type) if (filters.type and not filters.type__op) else none,
+              ('type!=' ~ filters.type) if filters.type__op == '!=' else none,
+              ('reason=' ~ filters.reason) if (filters.reason and not filters.reason__op) else none,
+              ('regarding.kind=' ~ filters.regarding_kind) if (filters.regarding_kind and not filters.regarding_kind__op) else none,
+              ('regarding.name=' ~ filters.regarding_name) if (filters.regarding_name and not filters.regarding_name__op) else none,
+              ('reportingController=' ~ filters.reporting_controller) if filters.reporting_controller else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - *f_namespace
+      - {column: type, ops: ["=", "!="], description: "Normal | Warning", examples: [Warning]}
+      - {column: reason, ops: ["=", "in", "like"], description: "Event reason (exact)", examples: [BackOff]}
+      - {column: regarding_kind, ops: ["=", "in", "like"], description: "regarding.kind (fieldSelector regarding.kind=)", examples: [Pod]}
+      - {column: regarding_name, ops: ["=", "in", "like"], description: "regarding.name (exact)", examples: [webhook-relay-7b9d5c6f8-h4j2k]}
+      - {column: reporting_controller, description: "reportingController, e.g. kubelet, default-scheduler"}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    time: {column: ts, default_lookback: 1h}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.series.lastObservedTime or _.deprecatedLastTimestamp or _.eventTime or _.deprecatedFirstTimestamp or _.metadata.creationTimestamp", description: "Last observation (series.lastObservedTime, deprecatedLastTimestamp, eventTime ...)"}
+      - {name: event_time, type: TIMESTAMP, path: eventTime, description: "First observation (MicroTime)"}
+      - *c_namespace
+      - {name: type, path: type}
+      - {name: reason, path: reason}
+      - {name: message, path: note, description: "note (human-readable message)"}
+      - {name: action, path: action, description: "What was done, e.g. Scheduling, Binding, Pulling"}
+      - {name: regarding_kind, path: regarding.kind}
+      - {name: regarding_name, path: regarding.name}
+      - {name: regarding_namespace, path: regarding.namespace}
+      - {name: regarding_uid, path: regarding.uid}
+      - {name: regarding_field_path, path: regarding.fieldPath}
+      - {name: related, type: JSON, path: related}
+      - {name: count, type: BIGINT, expr: "_.series['count'] or _.deprecatedCount or 1", description: "series.count / deprecatedCount / 1"}
+      - {name: reporting_controller, path: reportingController}
+      - {name: reporting_instance, path: reportingInstance}
+      - {name: name, path: metadata.name}
+      - *c_label_selector
+      - *c_field_selector
+    max_rows: 5000
+    sort_hint: "API order: ORDER BY ts DESC"
+    pitfalls:
+      - "Same objects as kubernetes_events (one storage, two API versions); do not UNION the two tables or every event is counted twice."
+      - "Field selectors use the events.k8s.io names (regarding.name, reportingController); the server translates them to the core fields."
+    examples:
+      - sql: >-
+          SELECT ts, regarding_kind, regarding_name, reason, count, message
+          FROM kubernetes_events_v1 WHERE namespace = 'batch' AND type = 'Warning' ORDER BY ts DESC
+        description: Warnings in a namespace with the regarding object.
+    fixtures:
+      - file: events_v1_list.json
+        filters: {namespace: batch, type: Warning}
+        note: "Built strictly from the v1.37 events.k8s.io/v1 EventList / Event / EventSeries schema (no example body in the reference); probe-failure wording follows the kubelet's Unhealthy events."
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:59:12Z", namespace: batch, reason: Unhealthy, regarding_kind: Pod, regarding_name: webhook-relay-7b9d5c6f8-h4j2k, count: 41, reporting_controller: kubelet, action: ""}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/events/event-v1/#get-list
+
+  # ------------------------------------------------------------------------------------------
+  # Workloads
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_deployments
+    title: Deployments
+    description: >-
+      Deployments from GET /apis/apps/v1[/namespaces/{namespace}]/deployments: desired vs
+      ready/available/updated/unavailable replicas, rollout revision, conditions (Available,
+      Progressing with ProgressDeadlineExceeded, ReplicaFailure with the FailedCreate message),
+      images, strategy and the last spec change (managedFields). Per-container spec:
+      kubernetes_workload_containers; env: kubernetes_container_env.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/apps/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/deployments"
+      query: &q_named
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.namespace!=' ~ filters.namespace) if filters.namespace__op == '!=' else none,
+              ('metadata.name=' ~ filters.name) if (filters.name and not filters.name__op) else none,
+              ('metadata.name!=' ~ filters.name) if filters.name__op == '!=' else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - *f_namespace
+      - &f_name {column: name, param: name, ops: ["=", "in", "!=", "like"], description: "Object name (exact; fieldSelector metadata.name=). LIKE is evaluated locally", examples: [recommendation]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'Deployment'"}
+      - *c_namespace
+      - &c_name {name: name, path: metadata.name, description: "Object name"}
+      - {name: replicas, type: BIGINT, path: spec.replicas, description: "Desired replicas (spec)"}
+      - {name: ready_replicas, type: BIGINT, expr: "_.status.readyReplicas or 0", description: "Pods with Ready condition (0 when absent)"}
+      - {name: available_replicas, type: BIGINT, expr: "_.status.availableReplicas or 0", description: "Pods ready for minReadySeconds"}
+      - {name: updated_replicas, type: BIGINT, expr: "_.status.updatedReplicas or 0", description: "Pods with the current template"}
+      - {name: unavailable_replicas, type: BIGINT, expr: "_.status.unavailableReplicas or 0"}
+      - {name: status_replicas, type: BIGINT, path: status.replicas, description: "Non-terminating pods targeted"}
+      - {name: revision, type: BIGINT, path: "metadata.annotations['deployment.kubernetes.io/revision']", description: "Current rollout revision (matches the ReplicaSet revision)"}
+      - {name: available, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'Available') | map(attribute='status') | first", description: "Available condition status (True/False)"}
+      - {name: progressing_reason, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'Progressing') | map(attribute='reason') | first", description: "Progressing reason: NewReplicaSetAvailable, ReplicaSetUpdated, ProgressDeadlineExceeded ..."}
+      - {name: replica_failure_message, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'ReplicaFailure') | map(attribute='message') | first", description: "ReplicaFailure condition message (pods could not be created: quota, webhook, LimitRange)"}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - {name: images, type: JSON, expr: "(_.spec.template.spec.containers or []) | map(attribute='image') | list", description: "Container images of the template"}
+      - {name: containers, type: JSON, expr: "(_.spec.template.spec.containers or []) | map(attribute='name') | list", description: "Container names"}
+      - {name: strategy, type: JSON, path: spec.strategy}
+      - {name: paused, type: BOOLEAN, path: spec.paused}
+      - {name: generation, type: BIGINT, path: metadata.generation}
+      - {name: observed_generation, type: BIGINT, path: status.observedGeneration, description: "< generation: the controller has not processed the latest spec yet"}
+      - {name: selector, type: JSON, path: spec.selector}
+      - &c_last_modified {name: last_modified, type: TIMESTAMP, expr: "(_.metadata.managedFields or []) | rejectattr('subresource', 'defined') | map(attribute='time') | select | max", description: "Latest managedFields time of a spec/metadata writer (not status): when someone last changed this object"}
+      - &c_last_manager {name: last_manager, expr: "((_.metadata.managedFields or []) | rejectattr('subresource', 'defined') | selectattr('time', 'defined') | sort(attribute='time') | last).manager", description: "Field manager of that change: kubectl-client-side-apply, kubectl-edit, argocd-controller, helm ..."}
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "ready_replicas < replicas with NO pods present usually means pods are rejected at admission: read replica_failure_message and kubernetes_events reason = 'FailedCreate'."
+      - "revision increases on every template change; kubernetes_replicasets lists the older revisions with their images and creation times (rollout history)."
+    examples:
+      - sql: >-
+          SELECT namespace, name, replicas, ready_replicas, available_replicas, progressing_reason, replica_failure_message, images
+          FROM kubernetes_deployments WHERE namespace = 'shop' AND ready_replicas < replicas
+        description: Deployments short of replicas and why.
+      - sql: >-
+          SELECT namespace, name, revision, last_modified, last_manager FROM kubernetes_deployments
+          WHERE last_modified >= now() - INTERVAL 2 HOUR ORDER BY last_modified DESC
+        description: Deployments changed in the last two hours, and by which tool.
+    fixtures:
+      - file: deployments_list.json
+        filters: {namespace: shop}
+        note: "Built strictly from the v1.37 apps/v1 DeploymentList / DeploymentSpec / DeploymentStatus / DeploymentCondition schema (no example body in the reference); the ReplicaFailure message follows the Arena quota-trap scenario."
+        expect_rows: 2
+        expect_columns: {kind: Deployment, namespace: shop, name: recommendation, replicas: 1, ready_replicas: 0, revision: 3, progressing_reason: ReplicaSetUpdated, available: "False", last_modified: "2026-10-01T09:12:00Z", last_manager: argocd-controller}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/apps/deployment-v1/#get-list
+
+  - name: kubernetes_replicasets
+    title: ReplicaSets (rollout history)
+    description: >-
+      ReplicaSets from GET /apis/apps/v1[/namespaces/{namespace}]/replicasets. Each Deployment
+      revision is one ReplicaSet (annotation deployment.kubernetes.io/revision) whose creation time
+      is when that rollout started - the rollout history with images. ReplicaFailure conditions
+      carry pod-creation errors (exceeded quota, admission webhook denied/unavailable). Filter
+      namespace, name, owner via label_selector or owner_name locally.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/apps/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/replicasets"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'ReplicaSet'"}
+      - *c_namespace
+      - *c_name
+      - *c_owner_kind
+      - *c_owner_name
+      - {name: revision, type: BIGINT, path: "metadata.annotations['deployment.kubernetes.io/revision']", description: "Deployment revision this ReplicaSet implements"}
+      - {name: change_cause, path: "metadata.annotations['kubernetes.io/change-cause']", description: "kubernetes.io/change-cause annotation when set"}
+      - {name: replicas, type: BIGINT, path: spec.replicas, description: "Desired replicas (0 for old revisions)"}
+      - {name: status_replicas, type: BIGINT, path: status.replicas}
+      - {name: ready_replicas, type: BIGINT, expr: "_.status.readyReplicas or 0"}
+      - {name: available_replicas, type: BIGINT, expr: "_.status.availableReplicas or 0"}
+      - {name: pod_template_hash, path: "metadata.labels['pod-template-hash']"}
+      - {name: images, type: JSON, expr: "(_.spec.template.spec.containers or []) | map(attribute='image') | list"}
+      - {name: failure_reason, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'ReplicaFailure') | map(attribute='reason') | first", description: "ReplicaFailure reason (FailedCreate)"}
+      - {name: failure_message, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'ReplicaFailure') | map(attribute='message') | first", description: "e.g. 'pods \"recommendation-5d8f7c9b6-\" is forbidden: failed quota: platform-limits: must specify requests.cpu'"}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - {name: title, expr: "'ReplicaSet ' ~ _.metadata.namespace ~ '/' ~ _.metadata.name ~ ' (revision ' ~ (_.metadata.annotations['deployment.kubernetes.io/revision'] or '?') ~ ') rollout of ' ~ (_.metadata.ownerReferences[0].name if _.metadata.ownerReferences else _.metadata.name) ~ ': image ' ~ ((_.spec.template.spec.containers or []) | map(attribute='image') | join(', '))", description: "Change-feed title"}
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "Old revisions are kept with replicas = 0 up to the Deployment's revisionHistoryLimit (default 10); created is when that revision was first rolled out (a rollback re-uses the old ReplicaSet and only bumps its revision)."
+    examples:
+      - sql: >-
+          SELECT owner_name AS deployment, revision, created, images, replicas, ready_replicas
+          FROM kubernetes_replicasets WHERE namespace = 'shop' AND owner_name = 'product-catalog'
+          ORDER BY revision DESC
+        description: Rollout history of a deployment (images per revision and when each started).
+      - sql: >-
+          SELECT namespace, name, failure_message FROM kubernetes_replicasets WHERE failure_message IS NOT NULL
+        description: ReplicaSets that cannot create pods (quota, webhook) cluster-wide.
+    fixtures:
+      - file: replicasets_list.json
+        filters: {namespace: shop}
+        note: "Built strictly from the v1.37 apps/v1 ReplicaSetList / ReplicaSetStatus / ReplicaSetCondition schema (no example body in the reference); the FailedCreate message follows the Arena quota-trap scenario."
+        expect_rows: 2
+        expect_columns: {kind: ReplicaSet, name: recommendation-5d8f7c9b6, owner_kind: Deployment, owner_name: recommendation, revision: 3, replicas: 1, ready_replicas: 0, failure_reason: FailedCreate, created: "2026-10-01T11:41:00Z"}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/apps/replica-set-v1/#get-list
+
+  - name: kubernetes_statefulsets
+    title: StatefulSets
+    description: >-
+      StatefulSets from GET /apis/apps/v1[/namespaces/{namespace}]/statefulsets: desired vs
+      ready/current/updated/available replicas, current vs update revision (a rollout in
+      progress when they differ), volumeClaimTemplates, images and conditions.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/apps/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/statefulsets"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'StatefulSet'"}
+      - *c_namespace
+      - *c_name
+      - {name: replicas, type: BIGINT, path: spec.replicas}
+      - {name: ready_replicas, type: BIGINT, expr: "_.status.readyReplicas or 0"}
+      - {name: current_replicas, type: BIGINT, expr: "_.status.currentReplicas or 0"}
+      - {name: updated_replicas, type: BIGINT, expr: "_.status.updatedReplicas or 0"}
+      - {name: available_replicas, type: BIGINT, expr: "_.status.availableReplicas or 0"}
+      - {name: current_revision, path: status.currentRevision}
+      - {name: update_revision, path: status.updateRevision}
+      - {name: service_name, path: spec.serviceName}
+      - {name: update_strategy, type: JSON, path: spec.updateStrategy}
+      - {name: pod_management_policy, path: spec.podManagementPolicy}
+      - {name: volume_claim_templates, type: JSON, expr: "(_.spec.volumeClaimTemplates or []) | map(attribute='spec') | list", description: "PVC template specs (storageClassName, resources.requests.storage ...)"}
+      - {name: images, type: JSON, expr: "(_.spec.template.spec.containers or []) | map(attribute='image') | list"}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - {name: generation, type: BIGINT, path: metadata.generation}
+      - {name: observed_generation, type: BIGINT, path: status.observedGeneration}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: >-
+          SELECT namespace, name, replicas, ready_replicas, current_revision, update_revision
+          FROM kubernetes_statefulsets WHERE namespace = 'datastore'
+        description: Datastore StatefulSets and whether a rollout is in progress.
+    fixtures:
+      - file: statefulsets_list.json
+        filters: {namespace: datastore}
+        note: "Built strictly from the v1.37 apps/v1 StatefulSetList / StatefulSetSpec / StatefulSetStatus schema (no example body in the reference)."
+        expect_rows: 1
+        expect_columns: {kind: StatefulSet, namespace: datastore, name: postgres, replicas: 1, ready_replicas: 1, current_revision: postgres-6d5f8c7b9d, service_name: postgres}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/apps/stateful-set-v1/#get-list
+
+  - name: kubernetes_daemonsets
+    title: DaemonSets
+    description: >-
+      DaemonSets from GET /apis/apps/v1[/namespaces/{namespace}]/daemonsets: desired / current /
+      ready / available / unavailable / misscheduled / updated pod counts per node, node selector,
+      images and update strategy.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/apps/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/daemonsets"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'DaemonSet'"}
+      - *c_namespace
+      - *c_name
+      - {name: desired_number_scheduled, type: BIGINT, path: status.desiredNumberScheduled, description: "Nodes that should run the pod"}
+      - {name: current_number_scheduled, type: BIGINT, path: status.currentNumberScheduled}
+      - {name: number_ready, type: BIGINT, expr: "_.status.numberReady or 0"}
+      - {name: number_available, type: BIGINT, expr: "_.status.numberAvailable or 0"}
+      - {name: number_unavailable, type: BIGINT, expr: "_.status.numberUnavailable or 0"}
+      - {name: number_misscheduled, type: BIGINT, path: status.numberMisscheduled}
+      - {name: updated_number_scheduled, type: BIGINT, path: status.updatedNumberScheduled}
+      - {name: node_selector, type: JSON, path: spec.template.spec.nodeSelector}
+      - {name: tolerations, type: JSON, path: spec.template.spec.tolerations}
+      - {name: update_strategy, type: JSON, path: spec.updateStrategy}
+      - {name: images, type: JSON, expr: "(_.spec.template.spec.containers or []) | map(attribute='image') | list"}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: >-
+          SELECT namespace, name, desired_number_scheduled, number_ready, number_unavailable, images
+          FROM kubernetes_daemonsets WHERE number_ready < desired_number_scheduled
+        description: DaemonSets missing pods on some nodes.
+    fixtures:
+      - file: daemonsets_list.json
+        note: "Built strictly from the v1.37 apps/v1 DaemonSetList / DaemonSetStatus schema (no example body in the reference)."
+        expect_rows: 1
+        expect_columns: {kind: DaemonSet, namespace: kube-system, name: kube-proxy, desired_number_scheduled: 3, number_ready: 3, number_unavailable: 0}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/apps/daemon-set-v1/#get-list
+
+  - name: kubernetes_jobs
+    title: Jobs
+    description: >-
+      Jobs from GET /apis/batch/v1[/namespaces/{namespace}]/jobs: derived status (Complete /
+      Failed / Suspended / Running / Pending), active / ready / succeeded / failed pod counts, start
+      and completion time, backoffLimit / activeDeadlineSeconds, the Failed condition reason
+      (BackoffLimitExceeded, DeadlineExceeded, PodFailurePolicy) and owning CronJob.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/batch/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/jobs"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'Job'"}
+      - *c_namespace
+      - *c_name
+      - {name: status, expr: "'Failed' if ((_.status.conditions or []) | selectattr('type', 'equalto', 'Failed') | selectattr('status', 'equalto', 'True') | list) else ('Complete' if ((_.status.conditions or []) | selectattr('type', 'equalto', 'Complete') | selectattr('status', 'equalto', 'True') | list) else ('Suspended' if ((_.status.conditions or []) | selectattr('type', 'equalto', 'Suspended') | selectattr('status', 'equalto', 'True') | list) else ('Running' if _.status.active else 'Pending')))", description: "Failed | Complete | Suspended | Running | Pending (from conditions and active)"}
+      - {name: active, type: BIGINT, expr: "_.status.active or 0"}
+      - {name: ready, type: BIGINT, expr: "_.status.ready or 0"}
+      - {name: succeeded, type: BIGINT, expr: "_.status.succeeded or 0"}
+      - {name: failed, type: BIGINT, expr: "_.status.failed or 0", description: "Pods that reached phase Failed"}
+      - {name: start_time, type: TIMESTAMP, path: status.startTime}
+      - {name: completion_time, type: TIMESTAMP, path: status.completionTime}
+      - {name: failure_reason, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'Failed') | map(attribute='reason') | first", description: "BackoffLimitExceeded | DeadlineExceeded | PodFailurePolicy | MaxFailedIndexesExceeded"}
+      - {name: failure_message, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'Failed') | map(attribute='message') | first"}
+      - {name: completions, type: BIGINT, path: spec.completions}
+      - {name: parallelism, type: BIGINT, path: spec.parallelism}
+      - {name: backoff_limit, type: BIGINT, path: spec.backoffLimit}
+      - {name: active_deadline_s, type: BIGINT, path: spec.activeDeadlineSeconds}
+      - {name: suspend, type: BOOLEAN, path: spec.suspend}
+      - {name: images, type: JSON, expr: "(_.spec.template.spec.containers or []) | map(attribute='image') | list"}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - *c_owner_kind
+      - *c_owner_name
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "A Job that is still running with a long transaction (e.g. a maintenance job holding a database lock) looks healthy here (status Running): correlate start_time with the onset."
+      - "Finished Jobs are deleted after ttlSecondsAfterFinished (and CronJob history limits); their pods and logs go with them."
+    examples:
+      - sql: >-
+          SELECT namespace, name, status, active, failed, start_time, completion_time, failure_reason
+          FROM kubernetes_jobs WHERE namespace = 'batch' ORDER BY start_time DESC
+        description: Recent jobs in a namespace (who was running at the onset).
+    fixtures:
+      - file: jobs_list.json
+        filters: {namespace: batch}
+        note: "Built strictly from the v1.37 batch/v1 JobList / JobSpec / JobStatus / JobCondition schema (no example body in the reference); names follow the Arena pg-lock-hold and stale-db-credentials jobs."
+        expect_rows: 2
+        expect_columns: {kind: Job, namespace: batch, name: catalog-maintenance, status: Running, active: 1, start_time: "2026-10-01T11:40:05Z", backoff_limit: 0}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/batch/job-v1/#get-list
+
+  - name: kubernetes_cronjobs
+    title: CronJobs
+    description: >-
+      CronJobs from GET /apis/batch/v1[/namespaces/{namespace}]/cronjobs: schedule, time zone,
+      suspend, concurrency policy, last schedule / last successful time and the currently active
+      Jobs.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/batch/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/cronjobs"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'CronJob'"}
+      - *c_namespace
+      - *c_name
+      - {name: schedule, path: spec.schedule, description: "Cron expression"}
+      - {name: time_zone, path: spec.timeZone}
+      - {name: suspend, type: BOOLEAN, path: spec.suspend}
+      - {name: concurrency_policy, path: spec.concurrencyPolicy, description: "Allow | Forbid | Replace"}
+      - {name: last_schedule_time, type: TIMESTAMP, path: status.lastScheduleTime}
+      - {name: last_successful_time, type: TIMESTAMP, path: status.lastSuccessfulTime}
+      - {name: active_jobs, type: JSON, expr: "(_.status.active or []) | map(attribute='name') | list", description: "Names of running Jobs"}
+      - {name: active_count, type: BIGINT, expr: "(_.status.active or []) | length"}
+      - {name: images, type: JSON, expr: "(_.spec.jobTemplate.spec.template.spec.containers or []) | map(attribute='image') | list"}
+      - {name: successful_jobs_history_limit, type: BIGINT, path: spec.successfulJobsHistoryLimit}
+      - {name: failed_jobs_history_limit, type: BIGINT, path: spec.failedJobsHistoryLimit}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT namespace, name, schedule, suspend, last_schedule_time, last_successful_time, active_jobs FROM kubernetes_cronjobs"
+        description: All CronJobs and when they last ran / succeeded.
+    fixtures:
+      - file: cronjobs_list.json
+        note: "Built strictly from the v1.37 batch/v1 CronJobList / CronJobSpec / CronJobStatus schema (no example body in the reference)."
+        expect_rows: 1
+        expect_columns: {kind: CronJob, namespace: batch, name: nightly-report, schedule: "0 2 * * *", active_count: 1, last_schedule_time: "2026-10-01T02:00:00Z"}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/batch/cron-job-v1/#get-list
+
+  - name: kubernetes_workload_containers
+    title: Workload container specs (pod templates)
+    description: >-
+      One row per container (and init container rows are separate entries of
+      spec.template.spec.initContainers - not included) of the pod TEMPLATE of deployments
+      (default), statefulsets, daemonsets, replicasets or jobs: image, requests/limits, probes,
+      ports, command/args, env references, volume mounts, plus the template's volumes, node
+      selector and tolerations. Use it when pods do not exist (admission failures, scaled to 0)
+      or to compare the desired spec with running pods.
+    kind: entities
+    request:
+      method: GET
+      path: "{{ '/apis/batch/v1' if (filters.kind or 'deployments') | lower in ['jobs', 'job'] else '/apis/apps/v1' }}{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/{{ {'deployment': 'deployments', 'statefulset': 'statefulsets', 'daemonset': 'daemonsets', 'replicaset': 'replicasets', 'job': 'jobs'}.get((filters.kind or 'deployments') | lower, (filters.kind or 'deployments') | lower) }}"
+      query:
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.namespace!=' ~ filters.namespace) if filters.namespace__op == '!=' else none,
+              ('metadata.name=' ~ filters.workload) if (filters.workload and not filters.workload__op) else none,
+              ('metadata.name!=' ~ filters.workload) if filters.workload__op == '!=' else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - *f_namespace
+      - {column: kind, default: deployments, description: "deployments (default) | statefulsets | daemonsets | replicasets | jobs (CronJob templates: use the Jobs they create)", examples: [deployments]}
+      - {column: workload, ops: ["=", "in", "!=", "like"], description: "Workload name (exact; fieldSelector metadata.name)", examples: [recommendation]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: "spec.template.spec.containers", as: c}
+    columns:
+      - *c_namespace
+      - {name: kind, filter_only: true, description: "Requested kind (plural)"}
+      - {name: workload, path: metadata.name}
+      - {name: container, path: "@c.name"}
+      - {name: image, path: "@c.image"}
+      - {name: image_pull_policy, path: "@c.imagePullPolicy"}
+      - {name: requests, type: JSON, path: "@c.resources.requests", description: "null = no requests (rejected by a ResourceQuota that requires requests.cpu)"}
+      - {name: limits, type: JSON, path: "@c.resources.limits"}
+      - {name: cpu_request, path: "@c.resources.requests.cpu"}
+      - {name: memory_request, path: "@c.resources.requests.memory"}
+      - {name: cpu_limit, path: "@c.resources.limits.cpu"}
+      - {name: memory_limit, path: "@c.resources.limits.memory"}
+      - {name: liveness_probe, type: JSON, path: "@c.livenessProbe"}
+      - {name: readiness_probe, type: JSON, path: "@c.readinessProbe"}
+      - {name: startup_probe, type: JSON, path: "@c.startupProbe"}
+      - {name: ports, type: JSON, path: "@c.ports"}
+      - {name: command, type: JSON, path: "@c.command"}
+      - {name: args, type: JSON, path: "@c.args"}
+      - {name: env_names, type: JSON, expr: "(c.env or []) | map(attribute='name') | list"}
+      - {name: env_refs, type: JSON, expr: "((c.env or []) | selectattr('valueFrom', 'defined') | list) + (c.envFrom or [])", description: "valueFrom / envFrom references only (values: kubernetes_container_env)"}
+      - {name: volume_mounts, type: JSON, path: "@c.volumeMounts"}
+      - {name: security_context, type: JSON, path: "@c.securityContext"}
+      - {name: volumes, type: JSON, path: spec.template.spec.volumes, description: "Template volumes (emptyDir medium/sizeLimit, PVC claimName, configMap, secret ...)"}
+      - {name: node_selector, type: JSON, path: spec.template.spec.nodeSelector}
+      - {name: tolerations, type: JSON, path: spec.template.spec.tolerations}
+      - {name: affinity, type: JSON, path: spec.template.spec.affinity}
+      - {name: service_account, path: spec.template.spec.serviceAccountName}
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "Template (desired) spec only: pods created before the last change still run the old spec until replaced."
+      - "/dev/shm is the runtime's 64Mi tmpfs unless the template mounts an emptyDir with medium: Memory at /dev/shm - check volumes and volume_mounts."
+    examples:
+      - sql: >-
+          SELECT workload, container, cpu_request, memory_request, cpu_limit, memory_limit
+          FROM kubernetes_workload_containers WHERE namespace = 'shop' AND cpu_request IS NULL
+        description: Shop containers without a CPU request (blocked by a quota requiring requests.cpu when recreated).
+      - sql: >-
+          SELECT workload, container, readiness_probe, liveness_probe, ports
+          FROM kubernetes_workload_containers WHERE namespace = 'batch' AND workload = 'webhook-relay'
+        description: Probe configuration of a workload whose probes fail.
+    fixtures:
+      - file: deployments_list.json
+        filters: {namespace: shop}
+        note: "Same deployments body (v1.37 schema-built): one row per template container."
+        expect_rows: 2
+        expect_columns: {namespace: shop, workload: recommendation, container: recommendation, image: "ghcr.io/open-telemetry/demo:2.0.2-recommendation", cpu_request: null, memory_limit: 500Mi, kind: deployments}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/apps/deployment-v1/#DeploymentSpec
+
+  # ------------------------------------------------------------------------------------------
+  # Networking
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_services
+    title: Services
+    description: >-
+      Services from GET /api/v1[/namespaces/{namespace}]/services: type, clusterIP, ports, pod
+      selector, external name and load-balancer ingress. A Service referenced by a webhook or a
+      client but absent here explains 'service not found' / connection errors; endpoints are in
+      kubernetes_endpointslices.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/services"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'Service'"}
+      - *c_namespace
+      - *c_name
+      - {name: type, path: spec.type, description: "ClusterIP | NodePort | LoadBalancer | ExternalName"}
+      - {name: cluster_ip, path: spec.clusterIP, description: "None for headless services"}
+      - {name: ports, type: JSON, path: spec.ports, description: "[{name, port, targetPort, protocol, nodePort}]"}
+      - {name: selector, type: JSON, path: spec.selector, description: "Pod selector (null: endpoints managed manually)"}
+      - {name: external_name, path: spec.externalName}
+      - {name: load_balancer_ingress, type: JSON, path: status.loadBalancer.ingress}
+      - {name: session_affinity, path: spec.sessionAffinity}
+      - {name: external_traffic_policy, path: spec.externalTrafficPolicy}
+      - {name: internal_traffic_policy, path: spec.internalTrafficPolicy}
+      - {name: publish_not_ready_addresses, type: BOOLEAN, path: spec.publishNotReadyAddresses}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT namespace, name, type, cluster_ip, ports, selector FROM kubernetes_services WHERE namespace = 'shop'"
+        description: Services of a namespace with ports and selectors.
+      - sql: "SELECT count(*) AS present FROM kubernetes_services WHERE namespace = 'platform-ops' AND name = 'pod-policy-webhook'"
+        description: Does the Service a webhook points at exist?
+    fixtures:
+      - file: services_list.json
+        filters: {namespace: shop}
+        note: "Built strictly from the v1.37 core/v1 ServiceList / ServiceSpec / ServicePort schema (no example body in the reference)."
+        expect_rows: 2
+        expect_columns: {kind: Service, namespace: shop, name: cart, type: ClusterIP, cluster_ip: 10.96.41.12}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/service-v1/#get-list
+
+  - name: kubernetes_endpointslices
+    title: EndpointSlices (service backends)
+    description: >-
+      Service backends from GET /apis/discovery.k8s.io/v1[/namespaces/{namespace}]/endpointslices,
+      one row per endpoint (a slice with no endpoints still gives one row): service, address,
+      ready / serving / terminating, backing pod, node, zone and ports. Filter service (label
+      kubernetes.io/service-name). No ready endpoints = clients get connection refused / no
+      upstream.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/discovery.k8s.io/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/endpointslices"
+      query:
+        limit: 500
+        labelSelector: "{{ [('kubernetes.io/service-name=' ~ filters.service) if (filters.service and not filters.service__op) else none, filters.label_selector] | select | join(',') }}"
+        fieldSelector: >-
+          {{ [('metadata.namespace!=' ~ filters.namespace) if filters.namespace__op == '!=' else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - *f_namespace
+      - {column: service, ops: ["=", "in", "like"], description: "Owning Service name (labelSelector kubernetes.io/service-name=)", examples: [cart]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: endpoints, as: ep, keep_empty: true}
+    columns:
+      - *c_namespace
+      - {name: service, path: "metadata.labels['kubernetes.io/service-name']"}
+      - {name: endpointslice, path: metadata.name}
+      - {name: address_type, path: addressType, description: "IPv4 | IPv6 | FQDN"}
+      - {name: address, expr: "((ep.addresses or []) | join(',')) if ep else none", description: "Endpoint address(es); null for a slice without endpoints"}
+      - {name: ready, type: BOOLEAN, path: "@ep.conditions.ready", description: "Ready to receive traffic (null = unknown, treat as ready)"}
+      - {name: serving, type: BOOLEAN, path: "@ep.conditions.serving"}
+      - {name: terminating, type: BOOLEAN, path: "@ep.conditions.terminating"}
+      - {name: target_kind, path: "@ep.targetRef.kind"}
+      - {name: pod, path: "@ep.targetRef.name", description: "Backing pod"}
+      - {name: node, path: "@ep.nodeName"}
+      - {name: zone, path: "@ep.zone"}
+      - {name: hostname, path: "@ep.hostname"}
+      - {name: ports, type: JSON, path: ports, description: "[{name, port, protocol, appProtocol}]"}
+      - {name: managed_by, path: "metadata.labels['endpointslice.kubernetes.io/managed-by']"}
+      - *c_created
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "A service with a selector that matches no ready pod has a slice with zero endpoints (one row, address null); a service that does not exist has no slice at all (0 rows)."
+      - "NetworkPolicy denials do NOT show here: endpoints can be ready while traffic is blocked (see kubernetes_networkpolicies)."
+    examples:
+      - sql: >-
+          SELECT service, count(*) FILTER (WHERE ready) AS ready, count(address) AS endpoints
+          FROM kubernetes_endpointslices WHERE namespace = 'shop' GROUP BY 1 ORDER BY ready
+        description: Ready backends per service.
+    fixtures:
+      - file: endpointslices_list.json
+        filters: {namespace: shop}
+        note: "Built strictly from the v1.37 discovery.k8s.io/v1 EndpointSliceList / Endpoint / EndpointConditions / EndpointPort schema (no example body in the reference). The second slice has no endpoints (keep_empty row)."
+        expect_rows: 3
+        expect_columns: {namespace: shop, service: cart, address: 10.244.1.17, ready: true, pod: cart-7d9c6b5f4-x2x9q, node: incident-bench-worker, address_type: IPv4}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/discovery/endpoint-slice-v1/#get-list
+
+  - name: kubernetes_networkpolicies
+    title: NetworkPolicies
+    description: >-
+      NetworkPolicies from GET /apis/networking.k8s.io/v1[/namespaces/{namespace}]/networkpolicies:
+      selected pods, policy types and ingress/egress rules, with flags for policies that deny all
+      ingress/egress to the selected pods. A policy selecting a service's pods with no allowing
+      rule cuts its callers off while the pods stay Ready.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/networking.k8s.io/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/networkpolicies"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'NetworkPolicy'"}
+      - *c_namespace
+      - *c_name
+      - {name: pod_selector, type: JSON, path: spec.podSelector, description: "Pods the policy applies to ({} = every pod in the namespace)"}
+      - {name: policy_types, type: JSON, path: spec.policyTypes, description: "[Ingress] / [Egress] / both"}
+      - {name: ingress, type: JSON, path: spec.ingress, description: "Allowed ingress rules [{from:[podSelector|namespaceSelector|ipBlock], ports}]"}
+      - {name: egress, type: JSON, path: spec.egress, description: "Allowed egress rules"}
+      - {name: ingress_rule_count, type: BIGINT, expr: "(_.spec.ingress or []) | length"}
+      - {name: egress_rule_count, type: BIGINT, expr: "(_.spec.egress or []) | length"}
+      - {name: denies_all_ingress, type: BOOLEAN, expr: "'Ingress' in (_.spec.policyTypes or ['Ingress']) and not _.spec.ingress", description: "Ingress policy type with no allow rules: all ingress to the selected pods is dropped"}
+      - {name: denies_all_egress, type: BOOLEAN, expr: "'Egress' in (_.spec.policyTypes or []) and not _.spec.egress"}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "Policies are additive allow-lists: once any policy selects a pod for Ingress, only traffic matching some policy's rules is allowed. Enforcement depends on the CNI (Calico, Cilium and recent kind releases' kindnet enforce it; flannel alone does not): a policy object proves intent, the callers' timeouts prove effect."
+    examples:
+      - sql: >-
+          SELECT namespace, name, pod_selector, policy_types, ingress, denies_all_ingress, created
+          FROM kubernetes_networkpolicies WHERE namespace = 'shop'
+        description: Network policies in a namespace and whether they block all ingress.
+    fixtures:
+      - file: networkpolicies_list.json
+        filters: {namespace: shop}
+        note: "Built strictly from the v1.37 networking.k8s.io/v1 NetworkPolicyList / NetworkPolicySpec schema (no example body in the reference); mirrors the Arena netpol-isolation policy."
+        expect_rows: 1
+        expect_columns: {kind: NetworkPolicy, namespace: shop, name: restrict-cart-ingress, denies_all_ingress: true, ingress_rule_count: 0, created: "2026-10-01T11:40:00Z"}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/networking/network-policy-v1/#get-list
+
+  - name: kubernetes_ingresses
+    title: Ingresses
+    description: >-
+      Ingresses from GET /apis/networking.k8s.io/v1[/namespaces/{namespace}]/ingresses: class,
+      hosts, rules (path -> service:port), TLS and load-balancer address.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/networking.k8s.io/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/ingresses"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'Ingress'"}
+      - *c_namespace
+      - *c_name
+      - {name: ingress_class, path: spec.ingressClassName}
+      - {name: hosts, type: JSON, expr: "(_.spec.rules or []) | map(attribute='host') | select | list"}
+      - {name: rules, type: JSON, path: spec.rules, description: "[{host, http:{paths:[{path, pathType, backend:{service:{name, port}}}]}}]"}
+      - {name: tls, type: JSON, path: spec.tls}
+      - {name: default_backend, type: JSON, path: spec.defaultBackend}
+      - {name: load_balancer_ingress, type: JSON, path: status.loadBalancer.ingress}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT namespace, name, ingress_class, hosts, rules FROM kubernetes_ingresses"
+        description: Ingress routes in the cluster.
+    fixtures:
+      - file: ingresses_list.json
+        note: "Built strictly from the v1.37 networking.k8s.io/v1 IngressList / IngressSpec / IngressRule schema (no example body in the reference)."
+        expect_rows: 1
+        expect_columns: {kind: Ingress, namespace: shop, name: frontend, ingress_class: nginx, hosts: '["shop.example.test"]'}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/networking/ingress-v1/#get-list
+
+  # ------------------------------------------------------------------------------------------
+  # Configuration
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_configmaps
+    title: ConfigMaps (with data)
+    description: >-
+      ConfigMaps from GET /api/v1[/namespaces/{namespace}]/configmaps with their data as JSON
+      (data->>'KEY'), the list of keys (data + binaryData), and when / by which field manager the
+      object last changed (managedFields) - feature-flag and app-config changes show up as a new
+      last_modified. Filter namespace and name.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/configmaps"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - {column: name, ops: ["=", "in", "!=", "like"], description: "ConfigMap name (exact; fieldSelector metadata.name=)", examples: [flagd-config]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'ConfigMap'"}
+      - *c_namespace
+      - *c_name
+      - {name: data, type: JSON, path: data, description: "Key -> string value. A value that is itself JSON (flagd flags) is a string: json_extract(data->>'demo.flagd.json', '$.flags')"}
+      - {name: keys, type: JSON, expr: "((_.data or {}) | list) + ((_.binaryData or {}) | list)", description: "All key names (data and binaryData)"}
+      - {name: key_count, type: BIGINT, expr: "((_.data or {}) | length) + ((_.binaryData or {}) | length)"}
+      - {name: binary_keys, type: JSON, expr: "(_.binaryData or {}) | list", description: "binaryData key names (values not returned)"}
+      - {name: immutable, type: BOOLEAN, path: immutable}
+      - *c_last_modified
+      - *c_last_manager
+      - {name: title, expr: "'ConfigMap ' ~ _.metadata.namespace ~ '/' ~ _.metadata.name ~ ' changed by ' ~ (((_.metadata.managedFields or []) | rejectattr('subresource', 'defined') | selectattr('time', 'defined') | sort(attribute='time') | last).manager or 'unknown') ~ ' (keys: ' ~ ((_.data or {}) | list | join(', ')) ~ ')'", description: "Change-feed title"}
+      - *c_created
+      - *c_owner_kind
+      - *c_owner_name
+      - *c_labels
+      - &c_annotation_keys {name: annotation_keys, type: JSON, expr: "(_.metadata.annotations or {}) | list", description: "Annotation names only (values omitted: last-applied-configuration duplicates the data)"}
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "Listing all namespaces returns every ConfigMap's data (kube-root-ca.crt in each namespace, dashboards ...): filter namespace or name."
+      - "last_modified is the newest managedFields entry: it changes on ANY write by that manager, not only on data changes; created never changes."
+      - "Running pods read env-var values from a ConfigMap only at container start; mounted ConfigMap files refresh after ~1 minute; flagd watches its file. A changed value is not proof every consumer picked it up."
+    examples:
+      - sql: >-
+          SELECT name, keys, data->>'ENDPOINT_URL' AS endpoint_url FROM kubernetes_configmaps
+          WHERE namespace = 'batch' AND name = 'config-loader-settings'
+        description: Does a ConfigMap contain the key a container references?
+      - sql: >-
+          SELECT name, last_modified, last_manager, data FROM kubernetes_configmaps
+          WHERE namespace = 'shop' AND name = 'flagd-config'
+        description: Current feature-flag configuration and when it last changed.
+      - sql: >-
+          SELECT namespace, name, last_modified, last_manager FROM kubernetes_configmaps
+          WHERE last_modified >= now() - INTERVAL 3 HOUR ORDER BY last_modified DESC
+        description: ConfigMaps changed in the last three hours.
+    fixtures:
+      - file: configmaps_list.json
+        filters: {namespace: batch}
+        note: "Built strictly from the v1.37 core/v1 ConfigMapList / ConfigMap / ManagedFieldsEntry schema (no example body in the reference); mirrors the Arena missing-config-key ConfigMap (LOG_LEVEL and REGION only)."
+        expect_rows: 1
+        expect_columns: {kind: ConfigMap, namespace: batch, name: config-loader-settings, keys: '["LOG_LEVEL","REGION"]', key_count: 2, last_modified: "2026-10-01T11:39:58Z", last_manager: kubectl-client-side-apply}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/config-map-v1/#get-list
+
+  - name: kubernetes_secrets
+    title: Secrets (metadata and key names only)
+    description: >-
+      Secret METADATA from GET /api/v1[/namespaces/{namespace}]/secrets: one row per data key
+      (secret, type, key, approximate value size) - values are never returned, and annotations are
+      reduced to their names. Use it to check that a Secret / key a workload references exists,
+      or when a Secret was last changed. A Secret with no keys gives one row with key null.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/secrets"
+      query:
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.namespace!=' ~ filters.namespace) if filters.namespace__op == '!=' else none,
+              ('metadata.name=' ~ filters.name) if (filters.name and not filters.name__op) else none,
+              ('metadata.name!=' ~ filters.name) if filters.name__op == '!=' else none,
+              ('type=' ~ filters.type) if (filters.type and not filters.type__op) else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - *f_namespace
+      - {column: name, ops: ["=", "in", "!=", "like"], description: "Secret name (exact)", examples: [catalog-database]}
+      - {column: type, ops: ["=", "!="], description: "Secret type (fieldSelector type=): Opaque, kubernetes.io/tls, kubernetes.io/dockerconfigjson, kubernetes.io/service-account-token ...", examples: [Opaque]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {entries: data, as: e, keep_empty: true}
+    columns:
+      - {name: kind, expr: "'Secret'"}
+      - *c_namespace
+      - *c_name
+      - {name: type, path: type}
+      - {name: key, path: "@e.key", description: "Data key name (value never returned)"}
+      - {name: value_bytes, type: BIGINT, expr: "((((e.value or '') | length) * 3) // 4 - (e.value or '').count('=')) if e else none", description: "Decoded size of the value in bytes, from the base64 length (0 = empty value); the value itself is never returned"}
+      - {name: key_count, type: BIGINT, expr: "(_.data or {}) | length"}
+      - {name: immutable, type: BOOLEAN, path: immutable}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_owner_kind
+      - *c_owner_name
+      - *c_labels
+      - *c_annotation_keys
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "Listing secrets needs RBAC list on secrets (often denied: HTTP 403). The API sends values to the engine; the engine maps only key names and sizes - never ask for values."
+      - "A changed Secret does not update env vars of running pods (only mounted files, after a delay). Credentials embedded literally in env (see kubernetes_container_env) do not come from any Secret."
+    examples:
+      - sql: "SELECT name, type, key, value_bytes, last_modified FROM kubernetes_secrets WHERE namespace = 'shop' AND name = 'catalog-database'"
+        description: Which keys a Secret has and when it last changed.
+    fixtures:
+      - file: secrets_list.json
+        filters: {namespace: shop}
+        note: "Built strictly from the v1.37 core/v1 SecretList / Secret schema (no example body in the reference). Data values are placeholder base64 of the word 'redacted' - no real secret material."
+        expect_rows: 3
+        expect_columns: {kind: Secret, namespace: shop, name: catalog-database, type: Opaque, key: url, value_bytes: 8, key_count: 1, annotation_keys: '["kubectl.kubernetes.io/last-applied-configuration"]'}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/secret-v1/#get-list
+
+  # ------------------------------------------------------------------------------------------
+  # Storage
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_persistentvolumeclaims
+    title: PersistentVolumeClaims
+    description: >-
+      PVCs from GET /api/v1[/namespaces/{namespace}]/persistentvolumeclaims: phase (Pending /
+      Bound / Lost), requested StorageClass, bound volume, requested vs actual capacity, access
+      modes, conditions and the provisioner / selected-node annotations. A Pending claim whose
+      storage_class does not exist in kubernetes_storageclasses never binds.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/persistentvolumeclaims"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - {column: name, ops: ["=", "in", "!=", "like"], description: "PVC name (exact)", examples: [archive-writer]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'PersistentVolumeClaim'"}
+      - *c_namespace
+      - *c_name
+      - {name: phase, path: status.phase, description: "Pending | Bound | Lost"}
+      - {name: storage_class, path: spec.storageClassName, description: "Requested StorageClass (null = cluster default at creation time)"}
+      - {name: volume_name, path: spec.volumeName, description: "Bound PersistentVolume"}
+      - {name: requested, path: spec.resources.requests.storage, description: "Requested size, e.g. 1Gi"}
+      - {name: capacity, path: status.capacity.storage, description: "Actual size once bound"}
+      - {name: access_modes, type: JSON, path: spec.accessModes}
+      - {name: volume_mode, path: spec.volumeMode}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - {name: provisioner, expr: "_.metadata.annotations['volume.kubernetes.io/storage-provisioner'] or _.metadata.annotations['volume.beta.kubernetes.io/storage-provisioner']", description: "Provisioner the claim waits for"}
+      - {name: selected_node, path: "metadata.annotations['volume.kubernetes.io/selected-node']", description: "Node chosen for WaitForFirstConsumer provisioning"}
+      - *c_created
+      - *c_owner_kind
+      - *c_owner_name
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "Pending with a WaitForFirstConsumer StorageClass is normal until a pod uses the claim; the reason is in kubernetes_events on the PVC (ProvisioningFailed, ExternalProvisioning, WaitForFirstConsumer) and on the pod (FailedScheduling)."
+      - "Bound does not mean usable: a local PV with nodeAffinity no node satisfies leaves the pod Pending with 'volume node affinity conflict' (check kubernetes_persistentvolumes.node_affinity and kubernetes_nodes.labels)."
+    examples:
+      - sql: >-
+          SELECT namespace, name, phase, storage_class, requested, volume_name
+          FROM kubernetes_persistentvolumeclaims WHERE phase <> 'Bound'
+        description: Claims that are not bound, with the StorageClass they need.
+    fixtures:
+      - file: pvcs_list.json
+        filters: {namespace: batch}
+        note: "Built strictly from the v1.37 core/v1 PersistentVolumeClaimList / PersistentVolumeClaimSpec / PersistentVolumeClaimStatus schema (no example body in the reference); mirrors the Arena pending-volume-claim and volume-affinity-conflict claims."
+        expect_rows: 2
+        expect_columns: {kind: PersistentVolumeClaim, namespace: batch, name: archive-writer, phase: Pending, storage_class: gp3-archive, requested: 1Gi, volume_name: null}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/persistent-volume-claim-v1/#get-list
+
+  - name: kubernetes_persistentvolumes
+    title: PersistentVolumes
+    description: >-
+      PVs from GET /api/v1/persistentvolumes (cluster-scoped): phase (Available / Bound / Released
+      / Failed), claim, StorageClass, capacity, reclaim policy, volume source (local, hostPath,
+      csi, nfs ...) and nodeAffinity - which nodes can mount it.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/persistentvolumes
+      query: &q_cluster_named
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.name=' ~ filters.name) if (filters.name and not filters.name__op) else none,
+              ('metadata.name!=' ~ filters.name) if filters.name__op == '!=' else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - {column: name, ops: ["=", "in", "!=", "like"], description: "PV name (exact)", examples: [index-store]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'PersistentVolume'"}
+      - *c_name
+      - {name: phase, path: status.phase, description: "Pending | Available | Bound | Released | Failed"}
+      - {name: reason, path: status.reason}
+      - {name: message, path: status.message}
+      - {name: claim_namespace, path: spec.claimRef.namespace}
+      - {name: claim_name, path: spec.claimRef.name}
+      - {name: storage_class, path: spec.storageClassName}
+      - {name: capacity, path: spec.capacity.storage}
+      - {name: access_modes, type: JSON, path: spec.accessModes}
+      - {name: reclaim_policy, path: spec.persistentVolumeReclaimPolicy, description: "Retain | Delete | Recycle"}
+      - {name: volume_mode, path: spec.volumeMode}
+      - {name: source_type, expr: "'local' if _.spec.local else ('hostPath' if _.spec.hostPath else ('csi' if _.spec.csi else ('nfs' if _.spec.nfs else none)))", description: "local | hostPath | csi | nfs (others: see spec)"}
+      - {name: local_path, expr: "_.spec.local.path or _.spec.hostPath.path"}
+      - {name: csi_driver, path: spec.csi.driver}
+      - {name: node_affinity, type: JSON, path: spec.nodeAffinity.required, description: "Required node selector terms; a pod using this PV can only run on matching nodes"}
+      - {name: last_phase_transition, type: TIMESTAMP, path: status.lastPhaseTransitionTime}
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: >-
+          SELECT name, phase, claim_namespace, claim_name, storage_class, source_type, node_affinity
+          FROM kubernetes_persistentvolumes WHERE name = 'index-store'
+        description: Where a volume can be mounted (nodeAffinity) and which claim holds it.
+    fixtures:
+      - file: pvs_list.json
+        note: "Built strictly from the v1.37 core/v1 PersistentVolumeList / PersistentVolumeSpec (local, nodeAffinity) schema (no example body in the reference); mirrors the Arena volume-affinity-conflict PV."
+        expect_rows: 1
+        expect_columns: {kind: PersistentVolume, name: index-store, phase: Bound, claim_namespace: batch, claim_name: index-store, source_type: local, local_path: /mnt/nvme-archive/index, reclaim_policy: Retain}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/persistent-volume-v1/#get-list
+
+  - name: kubernetes_storageclasses
+    title: StorageClasses
+    description: >-
+      StorageClasses from GET /apis/storage.k8s.io/v1/storageclasses: provisioner, reclaim
+      policy, volume binding mode (Immediate / WaitForFirstConsumer), expansion, parameters and
+      which one is the default. A PVC naming a class missing here stays Pending forever.
+    kind: entities
+    request:
+      method: GET
+      path: /apis/storage.k8s.io/v1/storageclasses
+      query: *q_cluster_named
+    filters:
+      - {column: name, ops: ["=", "in", "!=", "like"], description: "StorageClass name (exact)", examples: [standard]}
+      - *f_label_selector
+      - *f_field_selector
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'StorageClass'"}
+      - *c_name
+      - {name: provisioner, path: provisioner, description: "e.g. rancher.io/local-path, ebs.csi.aws.com, kubernetes.io/no-provisioner"}
+      - {name: reclaim_policy, path: reclaimPolicy}
+      - {name: volume_binding_mode, path: volumeBindingMode}
+      - {name: allow_volume_expansion, type: BOOLEAN, path: allowVolumeExpansion}
+      - {name: is_default, type: BOOLEAN, expr: "(_.metadata.annotations['storageclass.kubernetes.io/is-default-class'] or '') == 'true'"}
+      - {name: parameters, type: JSON, path: parameters}
+      - {name: allowed_topologies, type: JSON, path: allowedTopologies}
+      - {name: mount_options, type: JSON, path: mountOptions}
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT name, provisioner, volume_binding_mode, is_default FROM kubernetes_storageclasses"
+        description: Available storage classes (does gp3-archive exist?).
+    fixtures:
+      - file: storageclasses_list.json
+        note: "Built strictly from the v1.37 storage.k8s.io/v1 StorageClassList / StorageClass schema (no example body in the reference); values of kind's default local-path class."
+        expect_rows: 1
+        expect_columns: {kind: StorageClass, name: standard, provisioner: rancher.io/local-path, volume_binding_mode: WaitForFirstConsumer, is_default: true}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/storage/storage-class-v1/#get-list
+
+  # ------------------------------------------------------------------------------------------
+  # Policy and capacity
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_resourcequotas
+    title: ResourceQuotas (one row per resource)
+    description: >-
+      ResourceQuotas from GET /api/v1[/namespaces/{namespace}]/resourcequotas, one row per quota'd
+      resource (requests.cpu, limits.memory, pods, count/...): hard limit vs used. A quota on
+      requests.cpu / limits.memory also REJECTS pods that do not declare that request/limit
+      (FailedCreate 'must specify requests.cpu'), even with plenty of headroom.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/resourcequotas"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - {column: name, ops: ["=", "in", "!=", "like"], description: "ResourceQuota name (exact)", examples: [platform-limits]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {entries: spec.hard, as: h, keep_empty: true}
+    columns:
+      - {name: kind, expr: "'ResourceQuota'"}
+      - *c_namespace
+      - *c_name
+      - {name: resource, path: "@h.key", description: "Quota'd resource, e.g. requests.cpu, limits.memory, pods, count/deployments.apps"}
+      - {name: hard, expr: "(_.status.hard or {})[h.key] or h.value if h else none", description: "Enforced limit (status.hard, else spec.hard)"}
+      - {name: used, expr: "(_.status.used or {})[h.key] if h else none", description: "Current usage"}
+      - {name: scopes, type: JSON, path: spec.scopes}
+      - {name: scope_selector, type: JSON, path: spec.scopeSelector}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT namespace, name, resource, hard, used, created FROM kubernetes_resourcequotas WHERE namespace = 'shop'"
+        description: Quotas in a namespace with usage.
+    fixtures:
+      - file: resourcequotas_list.json
+        filters: {namespace: shop}
+        note: "Built strictly from the v1.37 core/v1 ResourceQuotaList / ResourceQuotaSpec / ResourceQuotaStatus schema (no example body in the reference); mirrors the Arena quota-trap quota."
+        expect_rows: 2
+        expect_columns: {kind: ResourceQuota, namespace: shop, name: platform-limits, resource: requests.cpu, hard: "8", used: 950m}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/resource-quota-v1/#get-list
+
+  - name: kubernetes_limitranges
+    title: LimitRanges (one row per limit item)
+    description: >-
+      LimitRanges from GET /api/v1[/namespaces/{namespace}]/limitranges, one row per limit item
+      (type Container / Pod / PersistentVolumeClaim): default limits and requests injected into
+      containers that declare none, and min/max that reject pods at admission.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/limitranges"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: spec.limits, as: l}
+    columns:
+      - {name: kind, expr: "'LimitRange'"}
+      - *c_namespace
+      - *c_name
+      - {name: type, path: "@l.type", description: "Container | Pod | PersistentVolumeClaim"}
+      - {name: default_limits, type: JSON, path: "@l.default", description: "Default limits injected when a container sets none"}
+      - {name: default_requests, type: JSON, path: "@l.defaultRequest"}
+      - {name: max, type: JSON, path: "@l.max"}
+      - {name: min, type: JSON, path: "@l.min"}
+      - {name: max_limit_request_ratio, type: JSON, path: "@l.maxLimitRequestRatio"}
+      - *c_created
+      - *c_labels
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT namespace, name, type, default_limits, default_requests, max, min FROM kubernetes_limitranges"
+        description: Admission defaults and bounds per namespace.
+    fixtures:
+      - file: limitranges_list.json
+        note: "Built strictly from the v1.37 core/v1 LimitRangeList / LimitRangeItem schema (no example body in the reference)."
+        expect_rows: 1
+        expect_columns: {kind: LimitRange, namespace: batch, name: batch-defaults, type: Container, default_limits: '{"memory":"256Mi"}'}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/limit-range-v1/#get-list
+
+  - name: kubernetes_horizontalpodautoscalers
+    title: HorizontalPodAutoscalers (autoscaling/v2)
+    description: >-
+      HPAs from GET /apis/autoscaling/v2[/namespaces/{namespace}]/horizontalpodautoscalers:
+      target workload, min/max/current/desired replicas, metric targets vs current values,
+      conditions (AbleToScale, ScalingActive, ScalingLimited - at max replicas) and last scale time.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/autoscaling/v2{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/horizontalpodautoscalers"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'HorizontalPodAutoscaler'"}
+      - *c_namespace
+      - *c_name
+      - {name: target_kind, path: spec.scaleTargetRef.kind}
+      - {name: target_name, path: spec.scaleTargetRef.name}
+      - {name: min_replicas, type: BIGINT, path: spec.minReplicas}
+      - {name: max_replicas, type: BIGINT, path: spec.maxReplicas}
+      - {name: current_replicas, type: BIGINT, path: status.currentReplicas}
+      - {name: desired_replicas, type: BIGINT, path: status.desiredReplicas}
+      - {name: metrics, type: JSON, path: spec.metrics, description: "Targets, e.g. [{type: Resource, resource:{name: cpu, target:{type: Utilization, averageUtilization: 70}}}]"}
+      - {name: current_metrics, type: JSON, path: status.currentMetrics}
+      - {name: scaling_limited, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'ScalingLimited') | map(attribute='status') | first", description: "True = pinned at min/max"}
+      - {name: scaling_active, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'ScalingActive') | map(attribute='status') | first", description: "False = metrics unavailable (FailedGetResourceMetric)"}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - {name: last_scale_time, type: TIMESTAMP, path: status.lastScaleTime}
+      - {name: behavior, type: JSON, path: spec.behavior}
+      - *c_created
+      - *c_labels
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: >-
+          SELECT namespace, name, target_name, current_replicas, desired_replicas, max_replicas, scaling_limited, last_scale_time
+          FROM kubernetes_horizontalpodautoscalers
+        description: Autoscalers and whether they are pinned at their maximum.
+    fixtures:
+      - file: hpas_list.json
+        note: "Built strictly from the v1.37 autoscaling/v2 HorizontalPodAutoscalerList / Spec / Status / MetricStatus schema (no example body in the reference)."
+        expect_rows: 1
+        expect_columns: {kind: HorizontalPodAutoscaler, namespace: shop, name: frontend, target_kind: Deployment, target_name: frontend, max_replicas: 5, current_replicas: 5, scaling_limited: "True"}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/autoscaling/horizontal-pod-autoscaler-v2/#get-list
+
+  - name: kubernetes_poddisruptionbudgets
+    title: PodDisruptionBudgets
+    description: >-
+      PDBs from GET /apis/policy/v1[/namespaces/{namespace}]/poddisruptionbudgets: minAvailable /
+      maxUnavailable, current vs desired healthy pods and allowed disruptions (0 blocks evictions
+      and node drains).
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/policy/v1{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/poddisruptionbudgets"
+      query: *q_named
+    filters:
+      - *f_namespace
+      - *f_name
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'PodDisruptionBudget'"}
+      - *c_namespace
+      - *c_name
+      - {name: min_available, path: spec.minAvailable}
+      - {name: max_unavailable, path: spec.maxUnavailable}
+      - {name: selector, type: JSON, path: spec.selector}
+      - {name: current_healthy, type: BIGINT, path: status.currentHealthy}
+      - {name: desired_healthy, type: BIGINT, path: status.desiredHealthy}
+      - {name: disruptions_allowed, type: BIGINT, path: status.disruptionsAllowed}
+      - {name: expected_pods, type: BIGINT, path: status.expectedPods}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - *c_created
+      - *c_labels
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT namespace, name, min_available, current_healthy, disruptions_allowed FROM kubernetes_poddisruptionbudgets WHERE disruptions_allowed = 0"
+        description: PDBs currently blocking evictions.
+    fixtures:
+      - file: pdbs_list.json
+        note: "Built strictly from the v1.37 policy/v1 PodDisruptionBudgetList / Spec / Status schema (no example body in the reference)."
+        expect_rows: 1
+        expect_columns: {kind: PodDisruptionBudget, namespace: datastore, name: postgres, min_available: "1", disruptions_allowed: 0}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/policy/pod-disruption-budget-v1/#get-list
+
+  # ------------------------------------------------------------------------------------------
+  # Cluster
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_nodes
+    title: Nodes
+    description: >-
+      Nodes from GET /api/v1/nodes: Ready condition (status, reason, message, last heartbeat),
+      pressure conditions (MemoryPressure, DiskPressure, PIDPressure), unschedulable/cordoned,
+      taints, capacity vs allocatable (cpu, memory, pods, ephemeral-storage), labels (zone,
+      instance type, custom labels such as storage-tier), kubelet / OS / runtime versions.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/nodes
+      query:
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.name=' ~ filters.node) if (filters.node and not filters.node__op) else none,
+              ('spec.unschedulable=' ~ (filters.unschedulable | string | lower)) if (filters.unschedulable is not none and filters.unschedulable is defined and not filters.unschedulable__op) else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - {column: node, ops: ["=", "in", "like"], description: "Node name (exact; fieldSelector metadata.name=)", examples: [incident-bench-worker], variants: hostname}
+      - {column: unschedulable, type: BOOLEAN, description: "Cordoned nodes (fieldSelector spec.unschedulable=true)"}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'Node'"}
+      - {name: node, path: metadata.name}
+      - {name: ready, type: BOOLEAN, expr: "((_.status.conditions or []) | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first) == 'True'", description: "Ready condition is True"}
+      - {name: ready_reason, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'Ready') | map(attribute='reason') | first", description: "KubeletReady, KubeletNotReady, NodeStatusUnknown ..."}
+      - {name: ready_message, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'Ready') | map(attribute='message') | first"}
+      - {name: last_heartbeat, type: TIMESTAMP, expr: "(_.status.conditions or []) | selectattr('type', 'equalto', 'Ready') | map(attribute='lastHeartbeatTime') | first"}
+      - {name: memory_pressure, type: BOOLEAN, expr: "((_.status.conditions or []) | selectattr('type', 'equalto', 'MemoryPressure') | map(attribute='status') | first) == 'True'"}
+      - {name: disk_pressure, type: BOOLEAN, expr: "((_.status.conditions or []) | selectattr('type', 'equalto', 'DiskPressure') | map(attribute='status') | first) == 'True'"}
+      - {name: pid_pressure, type: BOOLEAN, expr: "((_.status.conditions or []) | selectattr('type', 'equalto', 'PIDPressure') | map(attribute='status') | first) == 'True'"}
+      - {name: unschedulable, type: BOOLEAN, expr: "_.spec.unschedulable or false", description: "Cordoned"}
+      - {name: taints, type: JSON, path: spec.taints}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - {name: cpu_capacity, path: status.capacity.cpu}
+      - {name: memory_capacity, path: status.capacity.memory}
+      - {name: cpu_allocatable, path: status.allocatable.cpu}
+      - {name: memory_allocatable, path: status.allocatable.memory}
+      - {name: pods_allocatable, type: BIGINT, path: status.allocatable.pods}
+      - {name: ephemeral_storage_allocatable, path: "status.allocatable['ephemeral-storage']"}
+      - {name: allocatable, type: JSON, path: status.allocatable}
+      - {name: internal_ip, expr: "(_.status.addresses or []) | selectattr('type', 'equalto', 'InternalIP') | map(attribute='address') | first"}
+      - {name: zone, path: "metadata.labels['topology.kubernetes.io/zone']"}
+      - {name: instance_type, path: "metadata.labels['node.kubernetes.io/instance-type']"}
+      - {name: kubelet_version, path: status.nodeInfo.kubeletVersion}
+      - {name: os_image, path: status.nodeInfo.osImage}
+      - {name: kernel_version, path: status.nodeInfo.kernelVersion}
+      - {name: container_runtime, path: status.nodeInfo.containerRuntimeVersion}
+      - {name: architecture, path: status.nodeInfo.architecture}
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "allocatable is capacity minus system reservations; actual usage is in kubernetes_node_metrics (memory working set), not here."
+      - "Custom placement labels (e.g. storage-tier=nvme-archive) required by a PV nodeAffinity or nodeSelector must appear in labels; check labels->>'storage-tier'."
+    examples:
+      - sql: "SELECT node, ready, ready_reason, memory_pressure, disk_pressure, unschedulable, taints FROM kubernetes_nodes"
+        description: Node health at a glance.
+      - sql: "SELECT node, labels->>'storage-tier' AS storage_tier, zone FROM kubernetes_nodes"
+        description: Which nodes carry a placement label.
+    fixtures:
+      - file: nodes_list.json
+        note: >-
+          Built from the v1.37 core/v1 NodeList / NodeStatus / NodeCondition / NodeSystemInfo
+          schema; capacity/addresses follow the kubectl JSONPath reference example input and kind
+          node defaults (no example body in the API reference).
+        expect_rows: 2
+        expect_columns: {kind: Node, node: incident-bench-control-plane, ready: true, ready_reason: KubeletReady, memory_pressure: false, unschedulable: false, cpu_capacity: "4", pods_allocatable: 110, internal_ip: 172.18.0.3, kubelet_version: v1.35.0}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/node-v1/#get-list
+
+  - name: kubernetes_namespaces
+    title: Namespaces
+    description: Namespaces from GET /api/v1/namespaces with phase (Active / Terminating), conditions (stuck finalizers) and labels (pod-security, team ...).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/namespaces
+      query:
+        limit: 500
+        labelSelector: "{{ filters.label_selector }}"
+        fieldSelector: >-
+          {{ [('metadata.name=' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else none,
+              ('status.phase=' ~ filters.phase) if (filters.phase and not filters.phase__op) else none,
+              filters.field_selector] | select | join(',') }}
+    filters:
+      - {column: namespace, ops: ["=", "in", "like"], description: "Namespace name (exact)", examples: [shop]}
+      - {column: phase, ops: ["=", "!="], description: "Active | Terminating", examples: [Active]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: kind, expr: "'Namespace'"}
+      - {name: namespace, path: metadata.name}
+      - {name: phase, path: status.phase}
+      - {name: conditions, type: JSON, path: status.conditions}
+      - *c_deleting
+      - *c_created
+      - *c_labels
+      - *c_annotations
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT namespace, phase, created, labels FROM kubernetes_namespaces ORDER BY namespace"
+        description: All namespaces.
+    fixtures:
+      - file: namespaces_list.json
+        note: "Built strictly from the v1.37 core/v1 NamespaceList / NamespaceStatus schema (no example body in the reference)."
+        expect_rows: 3
+        expect_columns: {kind: Namespace, namespace: batch, phase: Active}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/core/namespace-v1/#get-list
+
+  - name: kubernetes_validating_webhooks
+    title: Validating admission webhooks
+    description: >-
+      One row per webhook of every ValidatingWebhookConfiguration (GET
+      /apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations): failurePolicy
+      (Fail blocks matching requests when the webhook is unreachable), target service
+      namespace/name/port/path or URL, rules (operations x resources), namespace/object selectors
+      and timeout. A Fail-policy webhook whose service is missing blocks every matching CREATE.
+    kind: entities
+    request:
+      method: GET
+      path: /apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations
+      query: *q_cluster_named
+    filters:
+      - {column: name, ops: ["=", "in", "!=", "like"], description: "Configuration name (exact)", examples: [pod-policy]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: webhooks, as: w, keep_empty: true}
+    columns:
+      - {name: kind, expr: "'ValidatingWebhookConfiguration'"}
+      - {name: name, path: metadata.name, description: "Configuration name"}
+      - &c_webhook {name: webhook, path: "@w.name", description: "Webhook name (e.g. pod-policy.platform-ops.svc)"}
+      - &c_failure_policy {name: failure_policy, expr: "(w.failurePolicy or 'Fail') if w else none", description: "Fail (default) | Ignore"}
+      - &c_service_namespace {name: service_namespace, path: "@w.clientConfig.service.namespace"}
+      - &c_service_name {name: service_name, path: "@w.clientConfig.service.name"}
+      - &c_service_port {name: service_port, type: BIGINT, expr: "(w.clientConfig.service.port or 443) if (w and w.clientConfig.service) else none", description: "Service port (default 443)"}
+      - &c_service_path {name: service_path, path: "@w.clientConfig.service.path"}
+      - &c_url {name: url, path: "@w.clientConfig.url", description: "External webhook URL (instead of a service)"}
+      - &c_rules {name: rules, type: JSON, path: "@w.rules", description: "[{operations, apiGroups, apiVersions, resources, scope}]"}
+      - &c_operations {name: operations, type: JSON, expr: "(w.rules or []) | map(attribute='operations') | select | sum(start=[]) | unique | list", description: "Union of intercepted operations (CREATE, UPDATE, DELETE, CONNECT, *)"}
+      - &c_resources {name: resources, type: JSON, expr: "(w.rules or []) | map(attribute='resources') | select | sum(start=[]) | unique | list", description: "Union of intercepted resources (pods, deployments, */* ...)"}
+      - &c_namespace_selector {name: namespace_selector, type: JSON, path: "@w.namespaceSelector"}
+      - &c_object_selector {name: object_selector, type: JSON, path: "@w.objectSelector"}
+      - &c_match_conditions {name: match_conditions, type: JSON, path: "@w.matchConditions"}
+      - &c_side_effects {name: side_effects, path: "@w.sideEffects"}
+      - &c_timeout_s {name: timeout_s, type: BIGINT, expr: "(w.timeoutSeconds or 10) if w else none", description: "Call timeout (default 10 s)"}
+      - &c_match_policy {name: match_policy, path: "@w.matchPolicy"}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    pitfalls:
+      - "Check the target service exists and has ready endpoints (kubernetes_services / kubernetes_endpointslices with service_namespace/service_name); 'failed calling webhook ... service \"x\" not found' appears in FailedCreate events."
+      - "Webhooks only affect NEW requests: existing pods keep running; the damage appears when pods are recreated (rollouts, evictions, deleted pods)."
+    examples:
+      - sql: >-
+          SELECT name, webhook, failure_policy, service_namespace, service_name, operations, resources, namespace_selector
+          FROM kubernetes_validating_webhooks
+        description: All validating webhooks and what they intercept.
+    fixtures:
+      - file: validatingwebhooks_list.json
+        note: "Built strictly from the v1.37 admissionregistration.k8s.io/v1 ValidatingWebhookConfigurationList / ValidatingWebhook / WebhookClientConfig / RuleWithOperations schema (no example body in the reference); mirrors the Arena admission-webhook-outage configuration."
+        expect_rows: 1
+        expect_columns: {kind: ValidatingWebhookConfiguration, name: pod-policy, webhook: pod-policy.platform-ops.svc, failure_policy: Fail, service_namespace: platform-ops, service_name: pod-policy-webhook, service_port: 443, operations: '["CREATE"]', resources: '["pods"]', timeout_s: 5}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/admissionregistration/validating-webhook-configuration-v1/#get-list
+
+  - name: kubernetes_mutating_webhooks
+    title: Mutating admission webhooks
+    description: >-
+      One row per webhook of every MutatingWebhookConfiguration (GET
+      /apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations): failurePolicy, target
+      service or URL, rules, selectors, timeout and reinvocation policy (sidecar injectors, policy
+      engines).
+    kind: entities
+    request:
+      method: GET
+      path: /apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations
+      query: *q_cluster_named
+    filters:
+      - {column: name, ops: ["=", "in", "!=", "like"], description: "Configuration name (exact)", examples: [sidecar-injector]}
+      - *f_label_selector
+      - *f_field_selector
+    pagination: *k8s_pages
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: webhooks, as: w, keep_empty: true}
+    columns:
+      - {name: kind, expr: "'MutatingWebhookConfiguration'"}
+      - {name: name, path: metadata.name, description: "Configuration name"}
+      - *c_webhook
+      - *c_failure_policy
+      - *c_service_namespace
+      - *c_service_name
+      - *c_service_port
+      - *c_service_path
+      - *c_url
+      - *c_rules
+      - *c_operations
+      - *c_resources
+      - *c_namespace_selector
+      - *c_object_selector
+      - *c_match_conditions
+      - *c_side_effects
+      - *c_timeout_s
+      - *c_match_policy
+      - {name: reinvocation_policy, path: "@w.reinvocationPolicy", description: "Never | IfNeeded"}
+      - *c_last_modified
+      - *c_last_manager
+      - *c_created
+      - *c_labels
+      - *c_uid
+      - *c_label_selector
+      - *c_field_selector
+    examples:
+      - sql: "SELECT name, webhook, failure_policy, service_namespace, service_name, operations, resources FROM kubernetes_mutating_webhooks"
+        description: All mutating webhooks and what they intercept.
+    fixtures:
+      - file: mutatingwebhooks_list.json
+        note: "Built strictly from the v1.37 admissionregistration.k8s.io/v1 MutatingWebhookConfigurationList / MutatingWebhook schema (no example body in the reference)."
+        expect_rows: 1
+        expect_columns: {kind: MutatingWebhookConfiguration, name: sidecar-injector, webhook: inject.sidecar.example.com, failure_policy: Ignore, service_name: sidecar-injector, reinvocation_policy: Never, operations: '["CREATE"]'}
+    docs_url: https://kubernetes.io/docs/reference/kubernetes-api/admissionregistration/mutating-webhook-configuration-v1/#get-list
+
+  # ------------------------------------------------------------------------------------------
+  # metrics.k8s.io (metrics-server)
+  # ------------------------------------------------------------------------------------------
+  - name: kubernetes_pod_metrics
+    title: Pod resource usage (metrics.k8s.io)
+    description: >-
+      Current CPU and memory usage per container from GET
+      /apis/metrics.k8s.io/{v1beta1|v1}[/namespaces/{namespace}]/pods (metrics-server; one sample
+      over the last window, typically 15-30 s). cpu_cores and memory_bytes are parsed from the
+      quantity strings (memory = working set). For history use Prometheus/cAdvisor metrics.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/metrics.k8s.io/{{ env.K8S_METRICS_API_VERSION or 'v1beta1' }}{{ ('/namespaces/' ~ filters.namespace) if (filters.namespace and not filters.namespace__op) else '' }}/pods"
+      query:
+        labelSelector: "{{ filters.label_selector }}"
+    filters:
+      - {column: namespace, ops: ["=", "in", "like"], description: "Namespace (exact)", examples: [batch]}
+      - *f_label_selector
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: containers, as: c}
+    columns:
+      - *c_namespace
+      - {name: pod, path: metadata.name}
+      - {name: container, path: "@c.name"}
+      - {name: ts, type: TIMESTAMP, path: timestamp, description: "End of the measurement window"}
+      - {name: window, path: window, description: "Measurement window, e.g. 30s"}
+      - {name: cpu, path: "@c.usage.cpu", description: "Raw quantity, e.g. 9559630n (nanocores)"}
+      - {name: memory, path: "@c.usage.memory", description: "Raw quantity, e.g. 22244Ki (working set)"}
+      - &c_cpu_cores {name: cpu_cores, type: DOUBLE, expr: "((c.usage.cpu[:-1]|float / 1000000000) if c.usage.cpu.endswith('n') else (c.usage.cpu[:-1]|float / 1000000) if c.usage.cpu.endswith('u') else (c.usage.cpu[:-1]|float / 1000) if c.usage.cpu.endswith('m') else c.usage.cpu|float) if c.usage.cpu else none", description: "CPU in cores (1.0 = one vCPU)"}
+      - &c_memory_bytes {name: memory_bytes, type: DOUBLE, expr: "((c.usage.memory[:-2]|float * 1024) if c.usage.memory.endswith('Ki') else (c.usage.memory[:-2]|float * 1048576) if c.usage.memory.endswith('Mi') else (c.usage.memory[:-2]|float * 1073741824) if c.usage.memory.endswith('Gi') else (c.usage.memory[:-2]|float * 1099511627776) if c.usage.memory.endswith('Ti') else (c.usage.memory[:-1]|float * 1000) if c.usage.memory.endswith('k') else (c.usage.memory[:-1]|float * 1000000) if c.usage.memory.endswith('M') else (c.usage.memory[:-1]|float * 1000000000) if c.usage.memory.endswith('G') else (c.usage.memory[:-1]|float / 1000) if c.usage.memory.endswith('m') else c.usage.memory|float) if c.usage.memory else none", description: "Memory working set in bytes"}
+      - *c_labels
+      - *c_label_selector
+    pitfalls:
+      - "Needs metrics-server (APIService v1beta1.metrics.k8s.io): HTTP 404 / 503 'the server is currently unable to handle the request' means it is missing or unhealthy. Containers that crash before their first scrape have no row."
+      - "One instantaneous sample - compare memory_bytes with kubernetes_pods.limits->>'memory'; a container near its limit before an OOMKilled restart does not stay visible after it."
+    examples:
+      - sql: >-
+          SELECT pod, container, round(cpu_cores, 3) AS cpu, round(memory_bytes / 1048576, 1) AS mem_mib
+          FROM kubernetes_pod_metrics WHERE namespace = 'batch' ORDER BY memory_bytes DESC
+        description: Current memory/CPU per container in a namespace.
+    fixtures:
+      - file: pod_metrics_list.json
+        filters: {namespace: kube-system}
+        note: "PodMetricsList wrapping the PodMetrics sample response from kubernetes.io 'Resource metrics pipeline' (kube-scheduler-minikube: cpu 9559630n, memory 22244Ki); list envelope per the metrics.k8s.io v1beta1 reference."
+        expect_rows: 1
+        expect_columns: {namespace: kube-system, pod: kube-scheduler-minikube, container: kube-scheduler, ts: "2022-01-27T19:24:31Z", cpu: 9559630n, cpu_cores: 0.00955963, memory_bytes: 22777856.0, window: 30s}
+    docs_url: https://kubernetes.io/docs/reference/external-api/metrics.v1beta1/
+
+  - name: kubernetes_node_metrics
+    title: Node resource usage (metrics.k8s.io)
+    description: >-
+      Current CPU and memory usage per node from GET /apis/metrics.k8s.io/{v1beta1|v1}/nodes
+      (metrics-server), with cpu_cores and memory_bytes parsed from the quantities. Compare with
+      kubernetes_nodes allocatable.
+    kind: entities
+    request:
+      method: GET
+      path: "/apis/metrics.k8s.io/{{ env.K8S_METRICS_API_VERSION or 'v1beta1' }}/nodes"
+      query:
+        labelSelector: "{{ filters.label_selector }}"
+    filters:
+      - *f_label_selector
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {explode: ".", as: c}
+    columns:
+      - {name: node, path: metadata.name}
+      - {name: ts, type: TIMESTAMP, path: timestamp}
+      - {name: window, path: window}
+      - {name: cpu, path: usage.cpu}
+      - {name: memory, path: usage.memory}
+      - *c_cpu_cores
+      - *c_memory_bytes
+      - *c_label_selector
+    pitfalls:
+      - "Needs metrics-server; memory is the working set (what the kubelet uses for eviction), not total RSS + cache."
+    examples:
+      - sql: >-
+          SELECT m.node, round(m.cpu_cores, 2) AS cpu_used, n.cpu_allocatable, round(m.memory_bytes / 1073741824, 2) AS mem_gib, n.memory_allocatable
+          FROM kubernetes_node_metrics m JOIN kubernetes_nodes n ON n.node = m.node
+        description: Node usage next to allocatable capacity.
+    fixtures:
+      - file: node_metrics_list.json
+        note: "NodeMetricsList wrapping the NodeMetrics sample response from kubernetes.io 'Resource metrics pipeline' (minikube: cpu 487558164n, memory 732212Ki); list envelope per the metrics.k8s.io v1beta1 reference."
+        expect_rows: 1
+        expect_columns: {node: minikube, ts: "2022-01-27T18:48:33Z", cpu: 487558164n, cpu_cores: 0.487558164, memory_bytes: 749785088.0}
+    docs_url: https://kubernetes.io/docs/reference/external-api/metrics.v1beta1/
+
+roles:
+  k8s_state:
+    - table: kubernetes_pods
+      columns: {pod: pod, namespace: namespace, kind: kind, phase: phase, ready: ready, restarts: restarts, waiting: waiting_reason, reason: reason, terminated: last_termination_reason, exit_code: last_exit_code, node: node, container: container, message: waiting_message, service: service}
+      notes: "One row per container; last_termination_reason/last_exit_code explain crashloops and OOMKills; unschedulable_message explains Pending pods."
+    - table: kubernetes_deployments
+      columns: {pod: name, namespace: namespace, kind: kind, replicas: replicas, ready_replicas: ready_replicas, message: replica_failure_message}
+    - table: kubernetes_statefulsets
+      columns: {pod: name, namespace: namespace, kind: kind, replicas: replicas, ready_replicas: ready_replicas}
+    - table: kubernetes_daemonsets
+      columns: {pod: name, namespace: namespace, kind: kind, replicas: desired_number_scheduled, ready_replicas: number_ready}
+    - table: kubernetes_persistentvolumeclaims
+      columns: {pod: name, namespace: namespace, kind: kind, phase: phase}
+    - table: kubernetes_jobs
+      columns: {pod: name, namespace: namespace, kind: kind, phase: status, message: failure_message}
+  k8s_events:
+    table: kubernetes_events
+    filters: {type: Warning}
+    columns: {ts: ts, namespace: namespace, type: type, reason: reason, message: message, object: object_name, kind: object_kind, count: count}
+    notes: "Admission failures appear as FailedCreate on ReplicaSets/Jobs; events expire ~1h after their last occurrence."
+  k8s_logs:
+    table: kubernetes_pod_logs
+    columns: {ts: ts, message: message, level: level, namespace: namespace, pod: pod, container: container, previous: previous}
+    notes: "namespace + pod required; previous = true for the crashed instance."
+  hosts:
+    table: kubernetes_nodes
+    columns: {host: node, health: ready, ts: last_heartbeat}
+  change_events:
+    - table: kubernetes_replicasets
+      columns: {ts: created, service: owner_name, title: title, version: revision, url: name}
+      notes: "Each ReplicaSet is one Deployment revision; created = when that rollout started."
+    - table: kubernetes_configmaps
+      columns: {ts: last_modified, service: name, title: title, author: last_manager}
+      notes: "ConfigMap writes (feature flags, app config) by field manager; last_modified is the newest non-status managedFields time."

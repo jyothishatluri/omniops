@@ -1,0 +1,20 @@
+{
+ "series_count_total": 120000,
+ "labels": [
+  {
+   "label_name": "job",
+   "label_values_count": 2,
+   "series_count": 9000,
+   "cardinality": [
+    {
+     "label_value": "checkout",
+     "series_count": 8000
+    },
+    {
+     "label_value": "cart",
+     "series_count": 1000
+    }
+   ]
+  }
+ ]
+}

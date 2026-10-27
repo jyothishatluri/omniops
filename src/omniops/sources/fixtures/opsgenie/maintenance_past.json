@@ -1,0 +1,14 @@
+{
+    "data": [
+        {
+            "id": "9aa71390-fe1c-425a-ad52-f1cfbdf56091",
+            "status": "past",
+            "time": {
+                "type": "for-1-hour"
+            },
+            "description": "Maintenance Description"
+        }
+    ],
+    "took": 1.166,
+    "requestId": "df1e7f69-a0e8-4081-875d-56b5fdba094a"
+}

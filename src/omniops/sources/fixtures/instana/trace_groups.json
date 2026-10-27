@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "name": "GET /api/cart-total",
+      "timestamp": 1688542673148,
+      "cursor": {
+        "@class": ".IngestionOffsetCursor",
+        "ingestionTime": 1688543264000,
+        "offset": 1
+      },
+      "metrics": {
+        "latency.sum": [
+          [
+            1688543260000,
+            31
+          ]
+        ]
+      }
+    }
+  ],
+  "canLoadMore": true,
+  "totalHits": 2595,
+  "totalRepresentedItemCount": 2595,
+  "totalRetainedItemCount": 2595,
+  "adjustedTimeframe": {
+    "windowSize": 600000,
+    "to": 1687939110000
+  }
+}

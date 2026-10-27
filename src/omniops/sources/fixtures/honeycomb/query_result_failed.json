@@ -1,0 +1,24 @@
+{
+ "query": {
+  "calculations": [
+   {
+    "op": "COUNT"
+   }
+  ],
+  "orders": [
+   {
+    "op": "COUNT",
+    "order": "descending"
+   }
+  ],
+  "limit": 10000,
+  "time_range": 7200
+ },
+ "complete": true,
+ "id": "klm901",
+ "error": "we had trouble fetching your results! try again?",
+ "links": {
+  "query_url": "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/klm901",
+  "graph_image_url": "https://ui.honeycomb.io/myteam/datasets/test-via-curl/result/klm901/snapshot"
+ }
+}

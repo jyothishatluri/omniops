@@ -1,0 +1,93 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "Computer",
+          "type": "string"
+        },
+        {
+          "name": "Heartbeats",
+          "type": "long"
+        },
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "Category",
+          "type": "string"
+        },
+        {
+          "name": "OSType",
+          "type": "string"
+        },
+        {
+          "name": "OSName",
+          "type": "string"
+        },
+        {
+          "name": "Version",
+          "type": "string"
+        },
+        {
+          "name": "ComputerIP",
+          "type": "string"
+        },
+        {
+          "name": "Resource",
+          "type": "string"
+        },
+        {
+          "name": "ResourceGroup",
+          "type": "string"
+        },
+        {
+          "name": "ResourceType",
+          "type": "string"
+        },
+        {
+          "name": "_ResourceId",
+          "type": "string"
+        },
+        {
+          "name": "SubscriptionId",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "web-vm-02",
+          41,
+          "2026-10-01T11:41:02.5530000Z",
+          "Azure Monitor Agent",
+          "Linux",
+          "Ubuntu",
+          "1.33.2",
+          "20.51.10.4",
+          "web-vm-02",
+          "rg-shop-prod",
+          "virtualMachines",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.compute/virtualmachines/web-vm-02",
+          "11111111-2222-3333-4444-555555555555"
+        ],
+        [
+          "web-vm-01",
+          60,
+          "2026-10-01T11:59:31.1180000Z",
+          "Azure Monitor Agent",
+          "Linux",
+          "Ubuntu",
+          "1.33.2",
+          "20.51.10.3",
+          "web-vm-01",
+          "rg-shop-prod",
+          "virtualMachines",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.compute/virtualmachines/web-vm-01",
+          "11111111-2222-3333-4444-555555555555"
+        ]
+      ]
+    }
+  ]
+}

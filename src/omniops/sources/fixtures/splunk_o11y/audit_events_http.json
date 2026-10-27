@@ -1,0 +1,43 @@
+{
+ "count": 2,
+ "offset": 0,
+ "limit": 1000,
+ "results": [
+  {
+   "id": "E-xyz123abc",
+   "tsId": "E-abc456def",
+   "timestamp": 1733443200000,
+   "metadata": {
+    "sf_eventCategory": "AUDIT",
+    "sf_eventType": "HttpRequest"
+   },
+   "properties": {
+    "sf_userId": "E-user123",
+    "sf_email": "user@example.com",
+    "sf_requestMethod": "POST",
+    "sf_requestUri": "/v2/detector",
+    "sf_responseStatus": 200,
+    "sf_clientIp": "203.0.113.42",
+    "sf_organizationId": "E-org123"
+   }
+  },
+  {
+   "id": "E-def789ghi",
+   "tsId": "E-ghi012jkl",
+   "timestamp": 1733442800000,
+   "metadata": {
+    "sf_eventCategory": "AUDIT",
+    "sf_eventType": "HttpRequest"
+   },
+   "properties": {
+    "sf_userId": "E-user456",
+    "sf_email": "admin@example.com",
+    "sf_requestMethod": "DELETE",
+    "sf_requestUri": "/v2/dashboard/DBxyz789",
+    "sf_responseStatus": 204,
+    "sf_clientIp": "198.51.100.10",
+    "sf_organizationId": "E-org123"
+   }
+  }
+ ]
+}

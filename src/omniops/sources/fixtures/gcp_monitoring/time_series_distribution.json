@@ -1,0 +1,28 @@
+{
+  "timeSeries": [
+    {
+      "metric": {"type": "run.googleapis.com/request_latencies", "labels": {"response_code_class": "5xx"}},
+      "resource": {
+        "type": "cloud_run_revision",
+        "labels": {"project_id": "my-project", "service_name": "checkout", "revision_name": "checkout-00042-xyz", "location": "us-central1", "configuration_name": "checkout"}
+      },
+      "metricKind": "DELTA",
+      "valueType": "DISTRIBUTION",
+      "points": [
+        {
+          "interval": {"startTime": "2026-10-20T14:01:00Z", "endTime": "2026-10-20T14:02:00Z"},
+          "value": {
+            "distributionValue": {
+              "count": "42",
+              "mean": 3512.4,
+              "sumOfSquaredDeviation": 1250000.5,
+              "bucketOptions": {"exponentialBuckets": {"numFiniteBuckets": 64, "growthFactor": 1.4, "scale": 1}},
+              "bucketCounts": ["0", "0", "0", "2", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "40"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "unit": "ms"
+}

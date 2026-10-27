@@ -1,0 +1,23 @@
+{
+ "kind": "StorageClassList",
+ "apiVersion": "storage.k8s.io/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "standard",
+    "uid": "8e4e1f20-0000-4000-8000-000000000024",
+    "creationTimestamp": "2026-09-30T20:00:00Z",
+    "annotations": {
+     "storageclass.kubernetes.io/is-default-class": "true"
+    }
+   },
+   "provisioner": "rancher.io/local-path",
+   "reclaimPolicy": "Delete",
+   "volumeBindingMode": "WaitForFirstConsumer"
+  }
+ ]
+}

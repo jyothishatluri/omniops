@@ -1,0 +1,99 @@
+{
+  "page": 1,
+  "perPage": 20,
+  "total": 3,
+  "userActions": [
+    {
+      "action": "create",
+      "comment_id": null,
+      "created_at": "2023-10-20T01:17:22.150Z",
+      "created_by": {
+        "email": null,
+        "full_name": null,
+        "profile_uid": "u_mGBROF_q5bmFCATbLXAcCwKa0k8JvONAwSruelyKA5E_0",
+        "username": "elastic"
+      },
+      "id": "b4cd0770-07c9-11ed-a5fd-47154cb8767e",
+      "owner": "cases",
+      "payload": {
+        "assignees": [],
+        "category": null,
+        "connector": {
+          "fields": null,
+          "id": "none",
+          "name": "none",
+          "type": ".none"
+        },
+        "customFields": [
+          {
+            "key": "d312efda-ec2b-42ec-9e2c-84981795c581",
+            "type": "text",
+            "value": "My field value"
+          },
+          {
+            "key": "fcc6840d-eb14-42df-8aaf-232201a705ec",
+            "type": "toggle",
+            "value": null
+          }
+        ],
+        "description": "A case description.",
+        "owner": "cases",
+        "settings": {
+          "syncAlerts": false
+        },
+        "severity": "low",
+        "status": "open",
+        "tags": [
+          "tag 1"
+        ],
+        "title": "Case title 1"
+      },
+      "type": "create_case",
+      "version": "WzM1ODg4LDFd"
+    },
+    {
+      "action": "create",
+      "comment_id": "578608d0-03b1-11ed-920c-974bfa104448",
+      "created_at": "2023-10-14T20:12:53.354Z",
+      "created_by": {
+        "email": null,
+        "full_name": null,
+        "profile_uid": "u_mGBROF_q5bmFCATbLXAcCwKa0k8JvONAwSruelyKA5E_0",
+        "username": "elastic"
+      },
+      "id": "57af14a0-03b1-11ed-920c-974bfa104448",
+      "owner": "cases",
+      "payload": {
+        "comment": {
+          "comment": "A new comment",
+          "owner": "cases",
+          "type": "user"
+        }
+      },
+      "type": "comment",
+      "version": "WzM1ODg4LDFa"
+    },
+    {
+      "action": "add",
+      "comment_id": null,
+      "created_at": "2023-10-20T01:10:28.238Z",
+      "created_by": {
+        "email": null,
+        "full_name": null,
+        "profile_uid": "u_mGBROF_q5bmFCATbLXAcCwKa0k8JvONAwSruelyKA5E_0",
+        "username": "elastic"
+      },
+      "id": "573c6980-6123-11ed-aa41-81a0a61fe447",
+      "owner": "cases",
+      "payload": {
+        "assignees": [
+          {
+            "uid": "u_mGBROF_q5bmFCATbLXAcCwKa0k8JvONAwSruelyKA5E_0"
+          }
+        ]
+      },
+      "type": "assignees",
+      "version": "WzM1ODg4LDFb"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "timeSeries": [
+    {"metric": {"labels": {"instance_name": "your-first-instance"}, "type": "compute.googleapis.com/instance/cpu/utilization"}},
+    {"metric": {"labels": {"instance_name": "your-second-instance"}, "type": "compute.googleapis.com/instance/cpu/utilization"}}
+  ]
+}

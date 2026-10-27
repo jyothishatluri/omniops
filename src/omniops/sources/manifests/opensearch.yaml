@@ -1,0 +1,1041 @@
+# OpenSearch REST API (2.x / 3.x, self-managed or Amazon OpenSearch Service with fine-grained
+# access control / internal users). Logs search, PPL / SQL plugin, aggregations, Alerting plugin
+# monitors and alerts, Trace Analytics (Data Prepper otel-v1-apm-* indices), cluster inventory.
+# Research notes, endpoint table and doc links: docs/sources/opensearch.md
+source: opensearch
+display_name: OpenSearch
+vendor: OpenSearch Project (Linux Foundation)
+description: >-
+  OpenSearch search / PPL / SQL / aggregation APIs over log and trace-analytics indices, the
+  Alerting plugin (monitors and alerts) and index/cluster inventory.
+docs_url: https://docs.opensearch.org/latest/api-reference/
+categories: [logs, traces, alerts, metrics, inventory]
+base_url: "{{ env.OPENSEARCH_URL }}"
+env:
+  - {name: OPENSEARCH_URL, description: "Base URL incl. port, e.g. https://search-mydomain-abc.us-east-1.es.amazonaws.com or https://localhost:9200"}
+  - {name: OPENSEARCH_USERNAME, description: "Basic-auth user (security plugin internal user / FGAC master user)"}
+  - {name: OPENSEARCH_PASSWORD, description: "Basic-auth password", secret: true}
+  - {name: OPENSEARCH_TOKEN, description: "Bearer token (JWT / on-behalf-of token) used when no username is set", secret: true}
+  - {name: OPENSEARCH_LOGS_INDEX, description: "Default log index pattern(s)", default: "logs-*,ss4o_logs-*"}
+  - {name: OPENSEARCH_TRACES_INDEX, description: "Data Prepper span index pattern", default: "otel-v1-apm-span-*"}
+  - {name: OPENSEARCH_SERVICE_MAP_INDEX, description: "Data Prepper service-map index pattern", default: "otel-v1-apm-service-map*"}
+  - {name: OPENSEARCH_DASHBOARDS_URL, description: "Optional OpenSearch Dashboards URL for UI deep links"}
+required_env: [OPENSEARCH_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Basic ' ~ ((env.OPENSEARCH_USERNAME ~ ':' ~ (env.OPENSEARCH_PASSWORD or '')) | b64)) if env.OPENSEARCH_USERNAME
+      else (('Bearer ' ~ env.OPENSEARCH_TOKEN) if env.OPENSEARCH_TOKEN else None) }}
+headers:
+  Content-Type: application/json
+rate_limit:
+  concurrency: 4
+  notes: >-
+    No request quota in OpenSearch itself; overload returns 429 (rejected execution / search
+    backpressure). Amazon OpenSearch Service domains also return 429 when the search thread pool queue is full.
+retention: {logs: "set by ISM policies (no default deletion)", traces: "set by Data Prepper ISM policy (raw-span-policy rolls over; deletion is opt-in)", alert_history: "60d (plugins.alerting.alert_history_retention_period)"}
+errors:
+  - {path: "$._shards.failures", non_empty: true, message: "$._shards.failures[0].reason.reason", hint: "some shards failed (mapping conflict or bad query): results are PARTIAL"}
+  - {path: "$.timed_out", equals: true, message: "$.timed_out", hint: "search timed out: results are partial; narrow the window"}
+ui_base_url: "{{ env.OPENSEARCH_DASHBOARDS_URL }}"
+query_languages:
+  lucene_query_string: >-
+    OpenSearch query_string (Lucene) syntax with default operator AND: field:value,
+    field:"phrase", wildcards, ranges status:[500 TO 599], AND/OR/NOT, _exists_:field. Dynamically
+    mapped strings are text + .keyword: exact matches on such fields need field.keyword.
+  ppl: >-
+    Piped Processing Language: source=<index> | where <cond> | stats count() by span(@timestamp, 1m) as ts, serviceName
+    | sort - count() | head 20. String literals in single or double quotes, equality is =.
+    fields / eval / dedup / top / rare / parse / patterns are available. Alias time buckets "as ts".
+  opensearch_sql: >-
+    OpenSearch SQL plugin dialect: SELECT ... FROM <index> WHERE ... GROUP BY ... ORDER BY ... LIMIT n.
+    Index names with '-' or '*' must be backquoted: FROM `logs-*`. Nested / dotted fields are addressed as a.b.
+pitfalls:
+  - "An unknown field or a wrong index pattern returns 0 hits, not an error: check opensearch_indices first and use field.keyword for exact matches on dynamically mapped strings."
+  - "Log schemas vary by shipper: Fluent Bit (log, kubernetes.pod_name, kubernetes.namespace_name), Data Prepper OTel (body, severityText, traceId, resource.attributes.service@name - dots in attribute names become @), Simple Schema for Observability (ss4o_*: body, severity.text, traceId), Logstash/ECS (message, log.level, service.name). The canonical columns coalesce all of them."
+  - "Data Prepper span durations are durationInNanos (NANOseconds); duration_ms columns are converted."
+  - "Amazon OpenSearch Service domains with IAM-only access (no fine-grained access control internal users) require SigV4 signing, which this manifest does not do: use an FGAC internal user or a proxy."
+
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_search
+    title: Document / log search (_search, Query DSL)
+    description: >-
+      Search documents (logs, events) with the Query DSL. One row per hit, newest first; time
+      range pushed down on @timestamp (or time_field). Optional pushdown: query (Lucene
+      query_string), service, host, level, trace_id, index_pattern. Canonical columns coalesce
+      ECS, Fluent Bit, Data Prepper OTel and SS4O field names; other _source keys become columns.
+    kind: logs
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.OPENSEARCH_LOGS_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: "{{ [limit or 500, 1000] | min }}"
+        track_total_hits: false
+        sort:
+          - "{{ filters.time_field or '@timestamp' }}": {order: desc, unmapped_type: date}
+        query:
+          bool:
+            filter:
+              - range:
+                  "{{ filters.time_field or '@timestamp' }}":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND', 'analyze_wildcard': true} } if filters.query else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'service.name': filters.service | as_list} }, {'terms': {'service.name.keyword': filters.service | as_list} }, {'terms': {'serviceName': filters.service | as_list} }, {'terms': {'resource.attributes.service@name': filters.service | as_list} }, {'terms': {'resource.attributes.service.name': filters.service | as_list} }], 'minimum_should_match': 1} } if filters.service else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'host.name': filters.host | as_list} }, {'terms': {'host.name.keyword': filters.host | as_list} }, {'terms': {'hostname': filters.host | as_list} }, {'terms': {'kubernetes.host': filters.host | as_list} }, {'terms': {'resource.attributes.host@name': filters.host | as_list} }], 'minimum_should_match': 1} } if filters.host else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'log.level': filters.level | as_list} }, {'terms': {'log.level.keyword': filters.level | as_list} }, {'terms': {'level': filters.level | as_list} }, {'terms': {'level.keyword': filters.level | as_list} }, {'terms': {'severityText': filters.level | as_list} }, {'terms': {'severity.text': filters.level | as_list} }], 'minimum_should_match': 1} } if filters.level else None }}"
+              - "{{ {'bool': {'should': [{'terms': {'trace.id': filters.trace_id | as_list} }, {'terms': {'traceId': filters.trace_id | as_list} }, {'terms': {'trace_id': filters.trace_id | as_list} }], 'minimum_should_match': 1} } if filters.trace_id else None }}"
+        fields:
+          - "@timestamp"
+          - "{{ filters.time_field }}"
+          - message
+          - log
+          - body
+          - log.level
+          - level
+          - severityText
+          - severity.text
+          - service.name
+          - serviceName
+          - resource.attributes.service@name
+          - host.name
+          - hostname
+          - kubernetes.host
+          - kubernetes.pod_name
+          - kubernetes.namespace_name
+          - kubernetes.container_name
+          - kubernetes.pod.name
+          - kubernetes.namespace
+          - trace.id
+          - traceId
+          - span.id
+          - spanId
+    filters:
+      - {column: query, description: "Lucene query_string (default operator AND)", examples: ['log:"connection refused" AND kubernetes.namespace_name:prod']}
+      - {column: index_pattern, description: "Index pattern(s), comma separated (default OPENSEARCH_LOGS_INDEX)", examples: ["logs-*"]}
+      - {column: time_field, description: "Date field for range and sort (default @timestamp; Data Prepper OTel logs use 'time')", examples: ["@timestamp"]}
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "service.name / serviceName / resource.attributes.service@name (exact)", examples: ["cartservice"]}
+      - {column: host, ops: ["=", "in"], fan_out: false, variants: hostname, description: "host.name / hostname / kubernetes.host (exact)", examples: ["ip-10-0-1-23"]}
+      - {column: level, ops: ["=", "in"], fan_out: false, description: "log.level / level / severityText / severity.text (exact, case-sensitive)", examples: ["ERROR"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "trace.id / traceId", examples: ["0000000000000000856bfa5aeba5ec77"]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    pagination: {type: cursor, cursor_path: "$.hits.hits[-1].sort", cursor_param: body.search_after, max_pages: 3}
+    response:
+      rows_path: "$.hits.hits[*]"
+      dynamic: "_source"
+      dynamic_max_columns: 60
+    columns:
+      - name: ts
+        type: TIMESTAMP
+        transform: auto_time
+        expr: >-
+          ((_['fields'] or {})[filters.time_field or '@timestamp'] or [none])[0] or _['_source'][filters.time_field or '@timestamp']
+          or _['_source']['@timestamp'] or _['_source']['time']
+      - {name: index, path: "_index"}
+      - {name: id, path: "_id"}
+      - name: message
+        description: "message / log (Fluent Bit) / body (OTel, SS4O)"
+        expr: >-
+          ((_['fields'] or {})['message'] or [none])[0] or _['_source']['message'] or ((_['fields'] or {})['log'] or [none])[0]
+          or (_['_source']['log'] if _['_source']['log'] is string else none) or ((_['fields'] or {})['body'] or [none])[0]
+          or (_['_source']['body'] if _['_source']['body'] is string else none)
+      - name: level
+        expr: >-
+          ((_['fields'] or {})['log.level'] or [none])[0] or _['_source']['log']['level'] or ((_['fields'] or {})['level'] or [none])[0]
+          or ((_['fields'] or {})['severityText'] or [none])[0] or ((_['fields'] or {})['severity.text'] or [none])[0]
+          or _['_source']['level'] or _['_source']['severityText'] or _['_source']['severity']['text']
+      - name: service
+        expr: >-
+          ((_['fields'] or {})['service.name'] or [none])[0] or _['_source']['service']['name'] or ((_['fields'] or {})['serviceName'] or [none])[0]
+          or _['_source']['serviceName'] or ((_['fields'] or {})['resource.attributes.service@name'] or [none])[0]
+          or _['_source']['resource.attributes.service@name'] or _['_source']['resource']['attributes']['service@name']
+      - name: host
+        expr: >-
+          ((_['fields'] or {})['host.name'] or [none])[0] or _['_source']['host']['name'] or ((_['fields'] or {})['hostname'] or [none])[0]
+          or _['_source']['hostname'] or ((_['fields'] or {})['kubernetes.host'] or [none])[0] or _['_source']['kubernetes']['host']
+      - name: pod
+        expr: >-
+          ((_['fields'] or {})['kubernetes.pod_name'] or [none])[0] or _['_source']['kubernetes']['pod_name']
+          or ((_['fields'] or {})['kubernetes.pod.name'] or [none])[0] or _['_source']['kubernetes']['pod']['name']
+      - name: namespace
+        expr: >-
+          ((_['fields'] or {})['kubernetes.namespace_name'] or [none])[0] or _['_source']['kubernetes']['namespace_name']
+          or ((_['fields'] or {})['kubernetes.namespace'] or [none])[0]
+      - name: container
+        expr: >-
+          ((_['fields'] or {})['kubernetes.container_name'] or [none])[0] or _['_source']['kubernetes']['container_name']
+      - name: trace_id
+        expr: >-
+          ((_['fields'] or {})['trace.id'] or [none])[0] or ((_['fields'] or {})['traceId'] or [none])[0] or _['_source']['traceId']
+          or _['_source']['trace']['id']
+      - name: span_id
+        expr: >-
+          ((_['fields'] or {})['span.id'] or [none])[0] or ((_['fields'] or {})['spanId'] or [none])[0] or _['_source']['spanId']
+      - {name: doc, type: JSON, path: "_source"}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: time_field, filter_only: true}
+    max_rows: 3000
+    sort_hint: "newest first"
+    pitfalls:
+      - "Exact filters on dynamically mapped strings need the .keyword sub-field; the canonical filters already try both."
+      - "Use opensearch_log_counts for volume over time instead of COUNT(*) here (this table returns at most a few thousand hits)."
+    examples:
+      - sql: >-
+          SELECT ts, service, pod, level, message FROM opensearch_search
+          WHERE service = 'cartservice' AND level = 'ERROR'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Error logs of a service during the incident.
+      - sql: >-
+          SELECT namespace, pod, count(*) AS n FROM opensearch_search
+          WHERE query = 'log:"OOMKilled" OR log:"Out of memory"' AND index_pattern = 'logs-*' GROUP BY namespace, pod ORDER BY n DESC
+        description: Pods logging out-of-memory messages.
+    fixtures:
+      - file: search_response.json
+        filters: {time_field: year}
+        note: "Verbatim example response of the OpenSearch Search API reference (movies index; no timestamp field, so time_field=year is used to exercise the ts path)."
+        expect_rows: 2
+        expect_columns: {index: movies, id: "1", doc: {not_null: true}}
+      - file: search_fields_response.json
+        filters: {time_field: publication_date}
+        note: "Verbatim example response from 'Retrieve specific fields' (fields option with a date field, _source disabled)."
+        expect_rows: 2
+        expect_columns: {ts: "2021-01-01T00:00:00Z", index: my_index, id: "1"}
+      - file: search_timed_out.json
+        filters: {time_field: year}
+        note: "The Search API reference example response with timed_out set to true (documented: 'If true, the returned results may be partial or empty'): must raise instead of returning partial hits as if complete."
+        expect_error: "search timed out"
+    docs_url: https://docs.opensearch.org/latest/api-reference/search-apis/search/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_ppl
+    title: PPL query (POST /_plugins/_ppl)
+    description: >-
+      Run a Piped Processing Language query. One row per result row; every output column becomes
+      a SQL column and the full row is in `result` (JSON keyed by PPL column names). The analysis
+      window is applied as a Query DSL range `filter` on @timestamp (or time_field; time_field =
+      'none' disables it for indices without a time field).
+    kind: generic
+    request:
+      method: POST
+      path: /_plugins/_ppl
+      query:
+        format: jdbc
+      body:
+        query: "{{ filters.query }}"
+        filter: "{{ None if filters.time_field == 'none' else {'range': {(filters.time_field or '@timestamp'): {'gte': (time.start | rfc3339_ms), 'lte': (time.end | rfc3339_ms), 'format': 'strict_date_optional_time'} } } }}"
+    filters:
+      - {column: query, required: true, description: "PPL query starting with source=<index>", examples: ["source=logs-* | where level = 'ERROR' | stats count() as errors by span(@timestamp, 1m) as ts, serviceName"]}
+      - {column: time_field, description: "Date field for the window filter (default @timestamp; 'startTime' for otel-v1-apm-span-*; 'none' to disable)", examples: ["@timestamp"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, reapply: false}
+    response:
+      rows_path: "$"
+      expand:
+        - {columnar: {columns: "$.schema", data: "$.datarows", orientation: row}, as: r}
+      dynamic: "@r"
+      dynamic_max_columns: 60
+      errors:
+        - {path: "$.error.reason", non_empty: true, message: "$.error.details", hint: "PPL error: fix the query, do not retry unchanged"}
+    columns:
+      - name: ts
+        type: TIMESTAMP
+        transform: auto_time
+        description: "From output column @timestamp / ts / timestamp / time / startTime if present"
+        expr: "r['@timestamp'] or r['ts'] or r['timestamp'] or r['time'] or r['startTime']"
+      - {name: result, type: JSON, path: "@r", description: "Full result row keyed by PPL column name: result->>'count()'"}
+      - {name: query, filter_only: true}
+      - {name: time_field, filter_only: true}
+    max_rows: 10000
+    pitfalls:
+      - "The range filter targets @timestamp by default; on indices whose time field differs (Data Prepper spans: startTime; OTel logs: time) set time_field or every query returns 0 rows."
+      - "Results are capped by plugins.query.size_limit (10000 in current releases); aggregate with stats instead of fetching raw rows."
+      - "Aggregation columns are named after the expression (count(), avg(durationInNanos)) unless aliased with 'as'; alias time buckets as ts."
+      - "Timestamps come back as 'yyyy-MM-dd HH:mm:ss[.SSS]' strings in UTC."
+      - "The ts predicate only sets the server-side window filter (reapply: false); aggregate rows without a time column (ts = null) are kept."
+    examples:
+      - sql: >-
+          SELECT ts, result->>'serviceName' AS service, CAST(result->>'errors' AS BIGINT) AS errors FROM opensearch_ppl
+          WHERE query = 'source=otel-v1-apm-span-* | where status.code = 2 | stats count() as errors by span(startTime, 1m) as ts, serviceName'
+            AND time_field = 'startTime' ORDER BY ts
+        description: Error spans per minute and service from trace analytics data.
+      - sql: >-
+          SELECT result->>'kubernetes.pod_name' AS pod, CAST(result->>'c' AS BIGINT) AS c FROM opensearch_ppl
+          WHERE query = 'source=logs-* | where match(log, "timeout") | stats count() as c by kubernetes.pod_name | sort - c | head 10'
+        description: Pods with the most timeout log lines.
+    fixtures:
+      - file: ppl_response.json
+        note: "Verbatim JDBC-format example response from the SQL/PPL 'Response formats' page (the _sql and _ppl endpoints share the jdbc format: schema + datarows)."
+        expect_rows: 2
+        expect_columns: {firstname: Nanette, lastname: Bates, age: 28, ts: null}
+    docs_url: https://docs.opensearch.org/latest/sql-and-ppl/sql-and-ppl-api/index/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_sql
+    title: SQL plugin query (POST /_plugins/_sql)
+    description: >-
+      Run an OpenSearch SQL query (JDBC format). One row per result row with dynamic columns and
+      the full row in `result`. The window is applied as a range `filter` like opensearch_ppl.
+    kind: generic
+    request:
+      method: POST
+      path: /_plugins/_sql
+      query:
+        format: jdbc
+      body:
+        query: "{{ filters.query }}"
+        filter: "{{ None if filters.time_field == 'none' else {'range': {(filters.time_field or '@timestamp'): {'gte': (time.start | rfc3339_ms), 'lte': (time.end | rfc3339_ms), 'format': 'strict_date_optional_time'} } } }}"
+    filters:
+      - {column: query, required: true, description: "SQL query; backquote index patterns: FROM `logs-*`", examples: ["SELECT serviceName, COUNT(*) AS errors FROM `otel-v1-apm-span-*` WHERE status.code = 2 GROUP BY serviceName"]}
+      - {column: time_field, description: "Date field for the window filter (default @timestamp; 'none' disables)", examples: ["startTime"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, reapply: false}
+    response:
+      rows_path: "$"
+      expand:
+        - {columnar: {columns: "$.schema", data: "$.datarows", orientation: row}, as: r}
+      dynamic: "@r"
+      dynamic_max_columns: 60
+      errors:
+        - {path: "$.error.reason", non_empty: true, message: "$.error.details", hint: "SQL error: fix the query, do not retry unchanged"}
+    columns:
+      - name: ts
+        type: TIMESTAMP
+        transform: auto_time
+        expr: "r['@timestamp'] or r['ts'] or r['timestamp'] or r['time'] or r['startTime']"
+      - {name: result, type: JSON, path: "@r"}
+      - {name: query, filter_only: true}
+      - {name: time_field, filter_only: true}
+    max_rows: 10000
+    pitfalls:
+      - "No cursor pagination here (fetch_size pages omit the schema); keep result sets under plugins.query.size_limit with LIMIT / GROUP BY."
+      - "Index names containing '-' or '*' must be backquoted."
+    examples:
+      - sql: >-
+          SELECT result->>'serviceName' AS service, CAST(result->>'errors' AS BIGINT) AS errors FROM opensearch_sql
+          WHERE query = 'SELECT serviceName, COUNT(*) AS errors FROM `otel-v1-apm-span-*` WHERE status.code = 2 GROUP BY serviceName'
+            AND time_field = 'startTime'
+        description: Error span count per service in the window.
+    fixtures:
+      - file: sql_response.json
+        note: "Verbatim example response of the SQL and PPL API reference (POST /_plugins/_sql)."
+        expect_rows: 4
+        expect_columns: {account_number: 1, firstname: Amber, balance: 39225, lastname: Duke}
+    docs_url: https://docs.opensearch.org/latest/sql-and-ppl/sql-and-ppl-api/index/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_log_counts
+    title: Document counts over time (date_histogram [+ terms])
+    description: >-
+      Count matching documents per time bucket (empty buckets included) and optionally per top-N
+      value of group_by (a keyword field, e.g. serviceName, kubernetes.namespace_name.keyword).
+      One row per (bucket, group).
+    kind: timeseries
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.OPENSEARCH_LOGS_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 0
+        track_total_hits: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "{{ filters.time_field or '@timestamp' }}":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND', 'analyze_wildcard': true} } if filters.query else None }}"
+        aggs:
+          h:
+            date_histogram:
+              field: "{{ filters.time_field or '@timestamp' }}"
+              fixed_interval: "{{ time.step_s }}s"
+              min_doc_count: 0
+              extended_bounds:
+                min: "{{ time.start | epoch_ms }}"
+                max: "{{ time.end | epoch_ms }}"
+            aggs: "{{ {'g': {'terms': {'field': filters.group_by, 'size': (filters.top or 10) | int} } } if filters.group_by else None }}"
+    filters:
+      - {column: query, description: "Lucene query_string selecting documents", examples: ['level:ERROR']}
+      - {column: index_pattern, description: "Index pattern (default OPENSEARCH_LOGS_INDEX)", examples: ["logs-*"]}
+      - {column: time_field, description: "Date field (default @timestamp)"}
+      - {column: group_by, description: "keyword field to split by (top-N per bucket)", examples: ["kubernetes.namespace_name.keyword"]}
+      - {column: top, type: BIGINT, description: "Top-N groups per bucket (default 10)"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, target_points: 120, min_step: 10s}
+    response:
+      rows_path: "$.aggregations.h.buckets[*]"
+      expand:
+        - {explode: "g.buckets", as: g, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "key", transform: epoch_ms}
+      - {name: group_key, path: "@g.key"}
+      - {name: value, type: BIGINT, expr: "g.doc_count if g else _['doc_count']", description: "Documents in bucket / group"}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: time_field, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+    zero_fill: true
+    pitfalls:
+      - "group_by on a text field fails (fielddata disabled): use the .keyword sub-field."
+      - "Top-N groups are chosen per bucket."
+    examples:
+      - sql: >-
+          SELECT ts, group_key AS namespace, value AS errors FROM opensearch_log_counts
+          WHERE query = 'log:error OR level:ERROR' AND group_by = 'kubernetes.namespace_name.keyword' ORDER BY ts
+        description: Error log volume per namespace over time.
+    fixtures:
+      - file: date_histogram.json
+        note: "Date histogram docs example response (aggregation renamed logs_per_month -> h)."
+        expect_rows: 2
+        expect_columns: {ts: "2025-03-01T00:00:00Z", value: 4, group_key: null}
+      - file: date_histogram_grouped.json
+        filters: {group_by: serviceName}
+        note: "Documented date_histogram buckets with a documented terms sub-aggregation (g) in each bucket; values illustrative."
+        expect_rows: 3
+        expect_columns: {ts: "2025-03-01T00:00:00Z", group_key: cartservice, value: 3}
+    docs_url: https://docs.opensearch.org/latest/aggregations/bucket/date-histogram/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_metric_histogram
+    title: Numeric field statistic over time (date_histogram + metric)
+    description: >-
+      avg | min | max | sum | cardinality | value_count | percentiles of a numeric field per time
+      bucket, optionally per top-N group_by value. Use for latency (durationInNanos), payload
+      sizes, numeric log fields or metric documents.
+    kind: timeseries
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.OPENSEARCH_LOGS_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 0
+        track_total_hits: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "{{ filters.time_field or '@timestamp' }}":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND', 'analyze_wildcard': true} } if filters.query else None }}"
+        aggs:
+          h:
+            date_histogram:
+              field: "{{ filters.time_field or '@timestamp' }}"
+              fixed_interval: "{{ time.step_s }}s"
+              min_doc_count: 0
+              extended_bounds:
+                min: "{{ time.start | epoch_ms }}"
+                max: "{{ time.end | epoch_ms }}"
+            aggs:
+              m: "{{ None if filters.group_by else {(filters.agg or 'avg'): ({'field': filters.metric_field, 'percents': [(filters.percentile or 95) | float]} if filters.agg == 'percentiles' else {'field': filters.metric_field})} }}"
+              g: "{{ {'terms': {'field': filters.group_by, 'size': (filters.top or 10) | int}, 'aggs': {'m': {(filters.agg or 'avg'): ({'field': filters.metric_field, 'percents': [(filters.percentile or 95) | float]} if filters.agg == 'percentiles' else {'field': filters.metric_field})} } } if filters.group_by else None }}"
+    filters:
+      - {column: metric_field, required: true, description: "Numeric field", examples: ["durationInNanos"]}
+      - {column: agg, description: "avg (default) | min | max | sum | cardinality | value_count | percentiles", examples: ["avg"]}
+      - {column: percentile, type: DOUBLE, description: "Percentile when agg = 'percentiles' (default 95)"}
+      - {column: index_pattern, description: "Index pattern (default OPENSEARCH_LOGS_INDEX)", examples: ["otel-v1-apm-span-*"]}
+      - {column: query, description: "Lucene query_string", examples: ['serviceName:cartservice']}
+      - {column: group_by, description: "keyword field to split by", examples: ["serviceName"]}
+      - {column: top, type: BIGINT}
+      - {column: time_field, description: "Date field (default @timestamp; startTime for spans)", examples: ["startTime"]}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, target_points: 120, min_step: 10s}
+    response:
+      rows_path: "$.aggregations.h.buckets[*]"
+      expand:
+        - {explode: "g.buckets", as: g, keep_empty: true}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "key", transform: epoch_ms}
+      - {name: group_key, path: "@g.key"}
+      - name: value
+        type: DOUBLE
+        expr: >-
+          ((g['m'].get('value') if g['m'].get('value') is number else ((g['m'].get('values') or {}).values() | list | first)) if g['m'] is mapping else none) if g
+          else ((_['m'].get('value') if _['m'].get('value') is number else ((_['m'].get('values') or {}).values() | list | first)) if _['m'] is mapping else none)
+      - {name: doc_count, type: BIGINT, expr: "g.doc_count if g else _['doc_count']"}
+      - {name: metric_field, filter_only: true}
+      - {name: agg, filter_only: true}
+      - {name: percentile, type: DOUBLE, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+      - {name: time_field, filter_only: true}
+    pitfalls:
+      - "Values are in the field's own unit (durationInNanos is nanoseconds: divide by 1e6 for ms)."
+      - "Empty buckets have value null, not 0."
+    examples:
+      - sql: >-
+          SELECT ts, group_key AS service, value / 1e6 AS p95_ms FROM opensearch_metric_histogram
+          WHERE index_pattern = 'otel-v1-apm-span-*' AND time_field = 'startTime' AND metric_field = 'durationInNanos'
+            AND agg = 'percentiles' AND percentile = 95 AND group_by = 'serviceName' AND query = 'parentSpanId:""' ORDER BY ts
+        description: p95 root-span latency per service over time.
+    fixtures:
+      - file: metric_histogram.json
+        filters: {metric_field: durationInNanos}
+        note: "Documented date_histogram buckets with the documented single-value metric sub-aggregation shape ({value}); values illustrative."
+        expect_rows: 2
+        expect_columns: {ts: "2025-03-01T00:00:00Z", value: 412.5, doc_count: 4}
+    docs_url: https://docs.opensearch.org/latest/aggregations/bucket/date-histogram/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_top_terms
+    title: Top values of a field (terms aggregation)
+    description: Most frequent values of a keyword field in the window, count-descending. One row per value.
+    kind: generic
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.OPENSEARCH_LOGS_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 0
+        track_total_hits: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "{{ filters.time_field or '@timestamp' }}":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND', 'analyze_wildcard': true} } if filters.query else None }}"
+        aggs:
+          t:
+            terms:
+              field: "{{ filters.field }}"
+              size: "{{ [(filters.top or limit or 20) | int, 500] | min }}"
+    filters:
+      - {column: field, required: true, description: "keyword field to rank (use .keyword for dynamic strings)", examples: ["kubernetes.pod_name.keyword"]}
+      - {column: top, type: BIGINT, description: "Number of values (default 20)"}
+      - {column: query, description: "Lucene query_string", examples: ['log:error']}
+      - {column: index_pattern, examples: ["logs-*"]}
+      - {column: time_field, description: "Date field (default @timestamp)"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.aggregations.t.buckets[*]"
+    columns:
+      - {name: term, path: "key"}
+      - {name: doc_count, type: BIGINT, path: "doc_count"}
+      - {name: other_doc_count, type: BIGINT, path: "$.aggregations.t.sum_other_doc_count"}
+      - {name: field, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+      - {name: time_field, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT term AS pod, doc_count FROM opensearch_top_terms
+          WHERE field = 'kubernetes.pod_name.keyword' AND query = 'log:error' ORDER BY doc_count DESC LIMIT 10
+        description: Pods producing the most error lines.
+    fixtures:
+      - file: terms.json
+        filters: {field: response.keyword}
+        note: "Terms aggregation docs example response (response_codes -> t, elided '...' removed)."
+        expect_rows: 3
+        expect_columns: {term: "200", doc_count: 12832, other_doc_count: 0}
+    docs_url: https://docs.opensearch.org/latest/aggregations/bucket/terms/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_alerting_monitors
+    title: Alerting monitors (GET /_plugins/_alerting/monitors/_search)
+    description: >-
+      Alerting plugin monitor definitions: type (query / bucket / document / cluster metrics),
+      enabled, schedule, searched indices and query, triggers with severity and condition.
+      One row per monitor. Filter by name, enabled or monitor_type.
+    kind: entities
+    request:
+      method: GET
+      path: /_plugins/_alerting/monitors/_search
+      body:
+        size: 200
+        query:
+          bool:
+            filter:
+              - "{{ {'ids': {'values': filters.id | as_list} } if filters.id else None }}"
+              - "{{ {'match_phrase': {'monitor.name': filters.name} } if filters.name else None }}"
+              - "{{ {'term': {'monitor.enabled': filters.enabled} } if (filters.enabled is defined and filters.enabled is not none) else None }}"
+              - "{{ {'term': {'monitor.monitor_type': filters.monitor_type} } if filters.monitor_type else None }}"
+              - exists: {field: monitor.name}
+    filters:
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "Monitor id (opensearch_alerts.monitor_id)", examples: ["eGQi7GcBRS7-AJEqfAnr"]}
+      - {column: name, description: "Monitor name (phrase)", examples: ["my-monitor-name"]}
+      - {column: enabled, type: BOOLEAN, examples: ["true"]}
+      - {column: monitor_type, description: "query_level_monitor | bucket_level_monitor | doc_level_monitor | cluster_metrics_monitor", examples: ["query_level_monitor"]}
+    response:
+      rows_path: "$.hits.hits[*]"
+    columns:
+      - {name: id, path: "_id"}
+      - {name: name, expr: "_['_source']['monitor']['name'] or _['_source']['name']"}
+      - {name: monitor_type, expr: "_['_source']['monitor']['monitor_type'] or _['_source']['monitor_type'] or 'query_level_monitor'", description: "Older monitors without monitor_type are query-level"}
+      - {name: enabled, type: BOOLEAN, expr: "_['_source']['monitor']['enabled'] if _['_source']['monitor'] is mapping else _['_source']['enabled']"}
+      - name: schedule
+        description: "e.g. '1 MINUTES' or cron expression"
+        expr: >-
+          (((_['_source']['monitor'] or _['_source'])['schedule']['period']['interval'] ~ ' ' ~ (_['_source']['monitor'] or _['_source'])['schedule']['period']['unit'])
+          if (_['_source']['monitor'] or _['_source'])['schedule']['period'] is mapping
+          else (_['_source']['monitor'] or _['_source'])['schedule']['cron']['expression'])
+      - {name: indices, type: JSON, expr: "(_['_source']['monitor']['inputs'] or _['_source']['inputs'] or [{}])[0]['search']['indices']"}
+      - {name: search_query, type: JSON, expr: "(_['_source']['monitor']['inputs'] or _['_source']['inputs'] or [{}])[0]['search']['query']"}
+      - {name: triggers, type: JSON, expr: "_['_source']['monitor']['triggers'] or _['_source']['triggers']"}
+      - name: severity
+        description: "Severity of the first trigger (1 = highest .. 5)"
+        expr: >-
+          ((_['_source']['monitor']['triggers'] or _['_source']['triggers'] or [{}])[0]['severity'])
+          or ((_['_source']['monitor']['triggers'] or _['_source']['triggers'] or [{}])[0]['query_level_trigger']['severity'])
+          or ((_['_source']['monitor']['triggers'] or _['_source']['triggers'] or [{}])[0]['bucket_level_trigger']['severity'])
+          or ((_['_source']['monitor']['triggers'] or _['_source']['triggers'] or [{}])[0]['document_level_trigger']['severity'])
+      - {name: last_update_time, type: TIMESTAMP, transform: epoch_ms, expr: "_['_source']['monitor']['last_update_time'] or _['_source']['last_update_time']"}
+      - {name: enabled_time, type: TIMESTAMP, transform: epoch_ms, expr: "_['_source']['monitor']['enabled_time'] or _['_source']['enabled_time']"}
+      - {name: doc, type: JSON, path: "_source"}
+    pitfalls:
+      - "Bucket-level and document-level monitors nest triggers as bucket_level_trigger / document_level_trigger objects; the raw definition is in triggers."
+      - "last_update_time shows recent edits to a monitor (a changed threshold explains new noise)."
+    examples:
+      - sql: "SELECT id, name, monitor_type, schedule, indices, triggers FROM opensearch_alerting_monitors WHERE name = 'my-monitor-name'"
+        description: Definition of the monitor behind an alert.
+      - sql: "SELECT name, severity, last_update_time FROM opensearch_alerting_monitors WHERE enabled = true ORDER BY last_update_time DESC"
+        description: Enabled monitors, most recently edited first.
+      - sql: "SELECT name, monitor_type, indices, search_query, triggers FROM opensearch_alerting_monitors WHERE id = 'eGQi7GcBRS7-AJEqfAnr'"
+        description: The monitor behind an alert (join from opensearch_alerts.monitor_id).
+    fixtures:
+      - file: alerting_monitors_search.json
+        note: "Verbatim example response of 'Search monitors' in the OpenSearch Alerting API reference."
+        expect_rows: 1
+        expect_columns: {id: eGQi7GcBRS7-AJEqfAnr, name: my-monitor-name, enabled: true, schedule: "1 MINUTES", severity: "1", last_update_time: "2018-12-26T20:09:35Z", monitor_type: query_level_monitor}
+    docs_url: https://docs.opensearch.org/latest/observing-your-data/alerting/api/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_alerts
+    title: Alerting plugin alerts (GET /_plugins/_alerting/monitors/alerts)
+    description: >-
+      Alerts produced by monitors with state (ACTIVE, ACKNOWLEDGED, COMPLETED, ERROR, DELETED),
+      severity, trigger, start/end/acknowledged times and error message. One row per alert,
+      newest first. Filter by state, severity, monitor_id or a search string.
+    kind: alerts
+    request:
+      method: GET
+      path: /_plugins/_alerting/monitors/alerts
+      query:
+        alertState: "{{ filters.state or 'ALL' }}"
+        severityLevel: "{{ filters.severity or 'ALL' }}"
+        monitorId: "{{ filters.monitor_id }}"
+        searchString: "{{ filters.search }}"
+        sortString: start_time
+        sortOrder: desc
+    filters:
+      - {column: state, description: "ACTIVE | ACKNOWLEDGED | COMPLETED | ERROR | DELETED (default ALL)", examples: ["ACTIVE"]}
+      - {column: severity, description: "Trigger severity 1 (highest) .. 5", examples: ["1"]}
+      - {column: monitor_id, description: "Monitor id", examples: ["awUMa3gBKo1jAh6qu47E"]}
+      - {column: search, description: "Search string over alert fields", examples: ["Example_monitor_name"]}
+    pagination: {type: offset, offset_param: query.startIndex, limit_param: query.size, page_size: 500, total_path: "$.totalAlerts", max_pages: 4}
+    response:
+      rows_path: "$.alerts[*]"
+    columns:
+      - {name: id, path: "id"}
+      - {name: ts, type: TIMESTAMP, path: "start_time", transform: epoch_ms, description: "Alert start (UTC)"}
+      - {name: end_ts, type: TIMESTAMP, path: "end_time", transform: epoch_ms}
+      - {name: acknowledged_at, type: TIMESTAMP, path: "acknowledged_time", transform: epoch_ms}
+      - {name: last_notification_at, type: TIMESTAMP, path: "last_notification_time", transform: epoch_ms}
+      - {name: state, path: "state"}
+      - {name: severity, path: "severity"}
+      - {name: monitor_id, path: "monitor_id"}
+      - {name: title, path: "monitor_name"}
+      - {name: trigger_name, path: "trigger_name"}
+      - {name: trigger_id, path: "trigger_id"}
+      - {name: message, path: "error_message", description: "Error message for ERROR alerts"}
+      - {name: bucket_keys, type: JSON, path: "agg_alert_content.bucket_keys", description: "Bucket-level monitors: the group the alert is about"}
+      - {name: alert_history, type: JSON, path: "alert_history"}
+      - {name: action_results, type: JSON, path: "action_execution_results"}
+      - {name: search, filter_only: true}
+    sort_hint: "newest start_time first"
+    pitfalls:
+      - "state ERROR means the monitor failed to run (bad query, missing index): a monitoring blind spot, not an application error."
+      - "COMPLETED alerts are kept only while alert history is enabled (plugins.alerting.alert_history_enabled, default true) and for plugins.alerting.alert_history_retention_period (default 60d) in .opendistro-alerting-alert-history-* indices."
+    examples:
+      - sql: "SELECT ts, title, trigger_name, severity, state FROM opensearch_alerts WHERE state = 'ACTIVE' ORDER BY ts"
+        description: Currently active alerts, oldest first.
+      - sql: "SELECT title, count(*) AS n, min(ts) AS first, max(ts) AS last FROM opensearch_alerts WHERE ts >= TIMESTAMP '2026-10-01 00:00:00' GROUP BY title ORDER BY n DESC"
+        description: Alert history per monitor today.
+    fixtures:
+      - file: alerting_alerts.json
+        note: "Verbatim example response of 'Get alerts' in the OpenSearch Alerting API reference."
+        expect_rows: 1
+        expect_columns: {id: eQURa3gBKo1jAh6qUo49, state: ACTIVE, title: Example_monitor_name, trigger_name: Example_trigger_name, severity: "1", ts: "2021-03-25T20:26:40Z", end_ts: null}
+    docs_url: https://docs.opensearch.org/latest/observing-your-data/alerting/api/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_trace_spans
+    title: Trace analytics spans (otel-v1-apm-span-*)
+    description: >-
+      OpenTelemetry spans ingested by Data Prepper for OpenSearch Trace Analytics. One row per span.
+      Filter on trace_id for a whole trace (oldest first) or on service / resource / status_code /
+      duration_ms to find slow or failed operations. Time pushdown on startTime.
+    kind: spans
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.OPENSEARCH_TRACES_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: "{{ [limit or 500, 1000] | min }}"
+        track_total_hits: false
+        sort:
+          - startTime: {order: "{{ 'asc' if filters.trace_id else 'desc' }}", unmapped_type: date}
+        query:
+          bool:
+            filter:
+              - range:
+                  startTime:
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+                    format: strict_date_optional_time
+              - "{{ {'terms': {'traceId': filters.trace_id | as_list} } if filters.trace_id else None }}"
+              - "{{ {'terms': {'serviceName': filters.service | as_list} } if filters.service else None }}"
+              - "{{ {'terms': {'name': filters.name | as_list} } if filters.name else None }}"
+              - "{{ {'terms': {'status.code': filters.status_code | as_list} } if (filters.status_code is defined and filters.status_code is not none) else None }}"
+              - "{{ {'terms': {'kind': filters.kind | as_list} } if filters.kind else None }}"
+              - "{{ {'terms': {'traceGroup': filters.trace_group | as_list} } if filters.trace_group else None }}"
+              - "{{ {'range': {'durationInNanos': {'gte': ((filters.duration_ms | float) * 1000000) | int} } } if filters.duration_ms else None }}"
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND'} } if filters.query else None }}"
+    filters:
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "traceId (32 hex chars)", examples: ["0000000000000000856bfa5aeba5ec77"]}
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "serviceName", examples: ["cartservice"]}
+      - {column: resource, param: name, ops: ["=", "in"], fan_out: false, description: "Span name (operation), exact", examples: ["/getcart"]}
+      - {column: status_code, type: BIGINT, ops: ["=", "in"], fan_out: false, description: "OTel status: 0 unset, 1 ok, 2 error", examples: ["2"]}
+      - {column: kind, ops: ["=", "in"], fan_out: false, description: "SPAN_KIND_SERVER | SPAN_KIND_CLIENT | SPAN_KIND_INTERNAL | SPAN_KIND_PRODUCER | SPAN_KIND_CONSUMER", examples: ["SPAN_KIND_SERVER"]}
+      - {column: trace_group, ops: ["=", "in"], fan_out: false, description: "Root span name of the trace", examples: ["/cart"]}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">="], description: "Minimum span duration in ms (pushed as >=)", examples: ["500"]}
+      - {column: query, description: "Lucene query_string, e.g. span.attributes.http@status_code:500", examples: ['span.attributes.http@method:GET']}
+      - {column: index_pattern, description: "Default OPENSEARCH_TRACES_INDEX", examples: ["otel-v1-apm-span-*"]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    pagination: {type: cursor, cursor_path: "$.hits.hits[-1].sort", cursor_param: body.search_after, max_pages: 3}
+    response:
+      rows_path: "$.hits.hits[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "_source.startTime", transform: auto_time, description: "Span start"}
+      - {name: end_ts, type: TIMESTAMP, path: "_source.endTime", transform: auto_time}
+      - {name: trace_id, path: "_source.traceId"}
+      - {name: span_id, path: "_source.spanId"}
+      - {name: parent_id, path: "_source.parentSpanId", description: "Empty for root spans"}
+      - {name: service, path: "_source.serviceName"}
+      - {name: resource, path: "_source.name", description: "Span name / operation"}
+      - {name: kind, path: "_source.kind"}
+      - {name: duration_ms, type: DOUBLE, path: "_source.durationInNanos", transform: ns_to_ms}
+      - {name: status_code, type: BIGINT, expr: "_['_source']['status.code'] if _['_source']['status.code'] is defined else _['_source']['status']['code']", description: "0 unset, 1 ok, 2 error"}
+      - {name: status_message, expr: "_['_source']['status.message'] if _['_source']['status.message'] is defined else _['_source']['status']['message']"}
+      - {name: trace_group, path: "_source.traceGroup", description: "Root span name of the trace"}
+      - {name: trace_group_duration_ms, type: DOUBLE, transform: ns_to_ms, expr: "_['_source']['traceGroupFields.durationInNanos'] if _['_source']['traceGroupFields.durationInNanos'] is defined else _['_source']['traceGroupFields']['durationInNanos']"}
+      - {name: doc, type: JSON, path: "_source", description: "Full span incl. span.attributes.* (dots in attribute names stored as @)"}
+      - {name: query, filter_only: true}
+      - {name: index_pattern, filter_only: true}
+    sort_hint: "newest first; oldest first when trace_id is filtered"
+    pitfalls:
+      - "Attribute keys have dots replaced by @ (span.attributes.http@status_code, resource.attributes.service@name)."
+      - "status.code 2 = error; HTTP status codes are in span.attributes.http@status_code, not status.code."
+      - "Spans arrive asynchronously: the newest minute of a trace can be incomplete."
+    examples:
+      - sql: >-
+          SELECT ts, service, resource, kind, duration_ms, status_code, parent_id, span_id FROM opensearch_trace_spans
+          WHERE trace_id = '0000000000000000856bfa5aeba5ec77' ORDER BY ts
+        description: Whole trace waterfall.
+      - sql: >-
+          SELECT service, resource, count(*) AS errors, avg(duration_ms) AS avg_ms FROM opensearch_trace_spans
+          WHERE status_code = 2 GROUP BY service, resource ORDER BY errors DESC LIMIT 20
+        description: Which operations produce error spans in the window.
+    fixtures:
+      - file: trace_spans.json
+        note: "Data Prepper trace-analytics example span document (otel-v1-apm-span index template doc) wrapped in the documented OpenSearch _search response envelope."
+        expect_rows: 1
+        expect_columns: {ts: "2021-05-18T18:58:44Z", trace_id: "0000000000000000856bfa5aeba5ec77", span_id: fe0e3811627189df, service: cartservice, resource: /getcart, duration_ms: 65.0, status_code: 0, trace_group: /cart, trace_group_duration_ms: 387.0}
+    ui_link: "{{ (env.OPENSEARCH_DASHBOARDS_URL ~ '/app/observability-traces#/traces/' ~ filters.trace_id) if env.OPENSEARCH_DASHBOARDS_URL and filters.trace_id else '' }}"
+    docs_url: https://github.com/opensearch-project/data-prepper/blob/main/docs/schemas/trace-analytics/otel-v1-apm-span-index-template.md
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_service_map
+    title: Trace analytics service map (otel-v1-apm-service-map*)
+    description: >-
+      Service relationships computed by Data Prepper: one row per (service, span kind,
+      destination or target) edge. CLIENT rows give the callee in destination_*; SERVER rows give
+      the operation served in target_*.
+    kind: entities
+    request:
+      method: POST
+      path: "/{{ filters.index_pattern or env.OPENSEARCH_SERVICE_MAP_INDEX }}/_search"
+      query:
+        ignore_unavailable: "true"
+        allow_no_indices: "true"
+      body:
+        size: 1000
+        query:
+          bool:
+            filter:
+              - "{{ {'terms': {'serviceName': filters.service | as_list} } if filters.service else None }}"
+              - "{{ {'terms': {'destination.domain': filters.destination_service | as_list} } if filters.destination_service else None }}"
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, examples: ["inventory"]}
+      - {column: destination_service, ops: ["=", "in"], fan_out: false, description: "Called service", examples: ["database"]}
+      - {column: index_pattern, examples: ["otel-v1-apm-service-map*"]}
+    response:
+      rows_path: "$.hits.hits[*]"
+    columns:
+      - {name: service, path: "_source.serviceName"}
+      - {name: kind, path: "_source.kind"}
+      - {name: destination_service, path: "_source.destination.domain"}
+      - {name: destination_resource, path: "_source.destination.resource"}
+      - {name: target_service, path: "_source.target.domain"}
+      - {name: target_resource, path: "_source.target.resource"}
+      - {name: trace_group, path: "_source.traceGroupName"}
+      - {name: index_pattern, filter_only: true}
+    pitfalls:
+      - "The map has no time dimension or call counts: use opensearch_trace_spans / opensearch_ppl for volumes and error rates per edge."
+    examples:
+      - sql: "SELECT service, destination_service, destination_resource FROM opensearch_service_map WHERE service = 'inventory' AND kind = 'SPAN_KIND_CLIENT'"
+        description: Downstream dependencies of a service.
+    fixtures:
+      - file: service_map.json
+        note: "The two Data Prepper service-map example documents (otel-v1-apm-service-map index template doc) wrapped in the documented _search envelope."
+        expect_rows: 2
+        expect_columns: {service: inventory, kind: SPAN_KIND_CLIENT, destination_service: database, destination_resource: updateItem, target_service: null, trace_group: client_checkout}
+    docs_url: https://github.com/opensearch-project/data-prepper/blob/main/docs/schemas/trace-analytics/otel-v1-apm-service-map-index-template.md
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_indices
+    title: Indices (_cat/indices)
+    description: Index inventory with health, doc counts and size in bytes. Check that log/trace indices exist and are fresh.
+    kind: entities
+    request:
+      method: GET
+      path: "/_cat/indices/{{ filters.index_pattern or '*' }}"
+      query:
+        format: json
+        bytes: b
+        h: "health,status,index,uuid,pri,rep,docs.count,docs.deleted,store.size,pri.store.size,creation.date.string"
+        s: index
+        health: "{{ filters.health }}"
+        expand_wildcards: "{{ 'all' if filters.include_hidden else 'open' }}"
+    filters:
+      - {column: index_pattern, examples: ["otel-v1-apm-span-*"]}
+      - {column: health, description: "green | yellow | red", examples: ["red"]}
+      - {column: include_hidden, type: BOOLEAN}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: index, path: "index"}
+      - {name: health, path: "health"}
+      - {name: status, path: "status"}
+      - {name: uuid, path: "uuid"}
+      - {name: primaries, type: BIGINT, path: "pri"}
+      - {name: replicas, type: BIGINT, path: "rep"}
+      - {name: docs_count, type: BIGINT, path: "['docs.count']"}
+      - {name: store_size, path: "['store.size']", description: "Bytes (bytes=b) as string"}
+      - {name: created_at, type: TIMESTAMP, path: "['creation.date.string']"}
+      - {name: index_pattern, filter_only: true}
+      - {name: include_hidden, type: BOOLEAN, filter_only: true}
+    examples:
+      - sql: "SELECT index, health, docs_count, created_at FROM opensearch_indices WHERE index_pattern = 'otel-v1-apm-span-*' ORDER BY created_at DESC"
+        description: Are span indices rolling over (is trace ingestion alive)?
+    fixtures:
+      - file: cat_indices.json
+        note: "Built from the documented cat indices '?v' example row (movies) keyed by its documented column headers, i.e. the format=json shape."
+        expect_rows: 1
+        expect_columns: {index: movies, health: green, docs_count: 1, primaries: 1}
+      - file: cat_indices_system.json
+        note: "Verbatim format=json example of the cat indices API (system=true, h=index,system,system.description)."
+        expect_rows: 1
+        expect_columns: {index: .tasks}
+    docs_url: https://docs.opensearch.org/latest/api-reference/cat/cat-indices/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_cluster_health
+    title: Cluster health (GET /_cluster/health)
+    description: Cluster status and shard allocation; check when searches fail or are partial.
+    kind: entities
+    request:
+      method: GET
+      path: "/_cluster/health{{ ('/' ~ filters.index_pattern) if filters.index_pattern else '' }}"
+    filters:
+      - {column: index_pattern, examples: ["logs-*"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: cluster_name, path: "cluster_name"}
+      - {name: status, path: "status"}
+      - {name: number_of_nodes, type: BIGINT, path: "number_of_nodes"}
+      - {name: number_of_data_nodes, type: BIGINT, path: "number_of_data_nodes"}
+      - {name: active_shards_percent, type: DOUBLE, path: "active_shards_percent_as_number"}
+      - {name: unassigned_shards, type: BIGINT, path: "unassigned_shards"}
+      - {name: pending_tasks, type: BIGINT, path: "number_of_pending_tasks"}
+      - {name: index_pattern, filter_only: true}
+    examples:
+      - sql: "SELECT status, unassigned_shards, number_of_data_nodes FROM opensearch_cluster_health"
+        description: Is the search cluster healthy?
+    fixtures:
+      - file: cluster_health.json
+        note: "Verbatim example response of the OpenSearch cluster health API reference."
+        expect_rows: 1
+        expect_columns: {cluster_name: opensearch-cluster, status: yellow, unassigned_shards: 110}
+    docs_url: https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_nodes
+    title: Nodes (_cat/nodes)
+    description: >-
+      One row per node: roles, elected cluster manager, JVM heap / RAM / CPU percent, load
+      averages, disk used percent, uptime and version. Check when searches are slow, rejected
+      (429) or time out: the search cluster itself may be overloaded.
+    kind: entities
+    request:
+      method: GET
+      path: /_cat/nodes
+      query:
+        format: json
+        h: "ip,name,node.role,node.roles,cluster_manager,heap.percent,ram.percent,cpu,load_1m,load_5m,load_15m,disk.used_percent,uptime,version"
+        s: name
+    response:
+      rows_path: "$"
+    columns:
+      - {name: name, path: "name"}
+      - {name: ip, path: "ip"}
+      - {name: roles, path: "['node.roles']", description: "Role names, e.g. data,ingest,ml / cluster_manager"}
+      - {name: role_letters, path: "['node.role']", description: "Abbreviated roles, e.g. di, dimr"}
+      - {name: is_cluster_manager, type: BOOLEAN, expr: "(_['cluster_manager'] or _['master']) == '*'", description: "Elected cluster manager (master)"}
+      - {name: heap_percent, type: DOUBLE, path: "['heap.percent']"}
+      - {name: ram_percent, type: DOUBLE, path: "['ram.percent']"}
+      - {name: cpu_percent, type: DOUBLE, path: "cpu"}
+      - {name: load_1m, type: DOUBLE, path: "load_1m"}
+      - {name: load_5m, type: DOUBLE, path: "load_5m"}
+      - {name: load_15m, type: DOUBLE, path: "load_15m"}
+      - {name: disk_used_percent, type: DOUBLE, path: "['disk.used_percent']", description: "Disk used % (85/90/95% default watermarks; flood stage blocks writes)"}
+      - {name: uptime, path: "uptime"}
+      - {name: version, path: "version"}
+    pitfalls:
+      - "cat values are strings; this table casts the percentages. Amazon OpenSearch Service exposes _cat/nodes, but node names are opaque ids."
+    examples:
+      - sql: "SELECT name, roles, heap_percent, cpu_percent, disk_used_percent, uptime FROM opensearch_nodes ORDER BY heap_percent DESC"
+        description: Nodes under memory pressure or recently restarted.
+    fixtures:
+      - file: cat_nodes.json
+        note: "Built from the documented cat nodes example (GET /_cat/nodes?v text table) keyed by its documented column headers, i.e. the format=json shape; the documented header row merges 'cpu load_1m', so the value is mapped to cpu and load_1m is absent."
+        expect_rows: 1
+        expect_columns: {name: data-e5b89ad7, ip: 10.11.1.225, roles: "data,ingest,ml", role_letters: di, is_cluster_manager: false, heap_percent: 31.0, ram_percent: 32.0, cpu_percent: 0.0, load_5m: 0.0}
+    docs_url: https://docs.opensearch.org/latest/api-reference/cat/cat-nodes/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_data_streams
+    title: Data streams (GET /_data_stream)
+    description: >-
+      Data streams with health, backing indices, ISM policy and template. Use to find the right
+      index pattern and the current write index (is the stream rolling over?).
+    kind: entities
+    request:
+      method: GET
+      path: "/_data_stream{{ ('/' ~ filters.name) if filters.name else '' }}"
+    filters:
+      - {column: name, description: "Data stream name or wildcard (default all)", examples: ["logs-*"]}
+    response:
+      rows_path: "$.data_streams[*]"
+    columns:
+      - {name: name, path: "name"}
+      - {name: status, path: "status", description: "GREEN | YELLOW | RED"}
+      - {name: timestamp_field, path: "timestamp_field.name"}
+      - {name: generation, type: BIGINT, path: "generation"}
+      - {name: backing_indices, type: BIGINT, path: "indices", transform: length}
+      - {name: write_index, path: "indices[-1].index_name", description: "Current write index (last backing index)"}
+      - {name: template, path: "template"}
+      - {name: ism_policy, path: "ilm_policy", description: "Associated ISM policy, if any"}
+      - {name: hidden, type: BOOLEAN, path: "hidden"}
+      - {name: indices, type: JSON, path: "indices"}
+    examples:
+      - sql: "SELECT name, status, generation, write_index FROM opensearch_data_streams WHERE name = 'logs-*' ORDER BY name"
+        description: Log data streams and their health.
+    fixtures:
+      - file: data_streams.json
+        note: "Verbatim example response of the OpenSearch 'Get data stream' API reference."
+        expect_rows: 1
+        expect_columns: {name: logs-app, status: YELLOW, timestamp_field: "@timestamp", generation: 1, backing_indices: 1, write_index: .ds-logs-app-000001, template: template-logs-app}
+    docs_url: https://docs.opensearch.org/latest/api-reference/data-stream/data-stream-info/
+
+  # ------------------------------------------------------------------------------------------
+  - name: opensearch_data_stream_stats
+    title: Data stream freshness and size (GET /_data_stream/_stats)
+    description: >-
+      Per data stream: backing index count, store size and maximum @timestamp (newest event). A
+      stale max_ts means ingestion stopped - tells 'no errors' apart from 'no data'.
+    kind: entities
+    request:
+      method: GET
+      path: "/_data_stream{{ ('/' ~ filters.name) if filters.name else '' }}/_stats"
+    filters:
+      - {column: name, description: "Data stream name or wildcard (default all)", examples: ["logs-*"]}
+    response:
+      rows_path: "$.data_streams[*]"
+    columns:
+      - {name: name, path: "data_stream"}
+      - {name: backing_indices, type: BIGINT, path: "backing_indices"}
+      - {name: store_size_bytes, type: BIGINT, path: "store_size_bytes"}
+      - {name: max_ts, type: TIMESTAMP, path: "maximum_timestamp", transform: epoch_ms, description: "Newest timestamp in the stream (epoch ms in the API), UTC"}
+    examples:
+      - sql: "SELECT name, max_ts, store_size_bytes FROM opensearch_data_stream_stats ORDER BY max_ts"
+        description: Data streams ordered by staleness (ingestion gaps first).
+    fixtures:
+      - file: data_stream_stats.json
+        note: "Verbatim example response of the OpenSearch 'Get data stream stats' API reference."
+        expect_rows: 1
+        expect_columns: {name: logs-app, backing_indices: 1, store_size_bytes: 17304, max_ts: "2025-06-23T10:05:00Z"}
+    docs_url: https://docs.opensearch.org/latest/api-reference/data-stream/data-stream-stats/
+
+roles:
+  logs:
+    table: opensearch_search
+    filters:
+      service: "{{ service }}"
+      query: "{{ query or '' }}"
+    columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id}
+    query_language: lucene_query_string
+  log_counts:
+    table: opensearch_log_counts
+    filters: {query: "{{ query or '' }}"}
+    columns: {ts: ts, value: value, group: group_key}
+    query_language: lucene_query_string
+  metrics:
+    table: opensearch_ppl
+    columns: {ts: ts, labels: result}
+    query_language: ppl
+  alert_rules:
+    table: opensearch_alerting_monitors
+    columns: {id: id, name: name, query: search_query, interval: schedule}
+  active_alerts:
+    table: opensearch_alerts
+    filters: {state: ACTIVE}
+    columns: {ts: ts, name: title, state: state, severity: severity, id: id}
+  alert_history:
+    table: opensearch_alerts
+    columns: {ts: ts, name: title, state: state, end: end_ts, id: id}
+  traces:
+    table: opensearch_trace_spans
+    filters: {service: "{{ service }}"}
+    columns: {ts: ts, service: service, resource: resource, duration_ms: duration_ms, trace_id: trace_id, span_id: span_id, status: status_code}
+  trace_detail:
+    table: opensearch_trace_spans
+    columns: {ts: ts, service: service, resource: resource, duration_ms: duration_ms, trace_id: trace_id, span_id: span_id, parent_id: parent_id}
+  service_map:
+    table: opensearch_service_map
+    filters: {service: "{{ service }}"}
+    columns: {service: service, dependency: destination_service}

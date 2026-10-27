@@ -1,0 +1,27 @@
+{
+  "uptimeCheckConfigs": [
+    {
+      "name": "projects/my-project/uptimeCheckConfigs/checkout-https-a1b2c3",
+      "displayName": "checkout https",
+      "monitoredResource": {"type": "uptime_url", "labels": {"project_id": "my-project", "host": "shop.example.com"}},
+      "httpCheck": {"path": "/healthz", "port": 443, "useSsl": true, "requestMethod": "GET", "acceptedResponseStatusCodes": [{"statusClass": "STATUS_CLASS_2XX"}]},
+      "period": "60s",
+      "timeout": "10s",
+      "contentMatchers": [{"content": "ok"}],
+      "checkerType": "STATIC_IP_CHECKERS",
+      "selectedRegions": ["USA", "EUROPE"],
+      "userLabels": {"service": "checkout"}
+    },
+    {
+      "name": "projects/my-project/uptimeCheckConfigs/redis-tcp-d4e5f6",
+      "displayName": "redis tcp",
+      "monitoredResource": {"type": "gce_instance", "labels": {"project_id": "my-project", "instance_id": "5106847938295940291", "zone": "us-central1-a"}},
+      "tcpCheck": {"port": 6379},
+      "period": "300s",
+      "timeout": "5s",
+      "checkerType": "VPC_CHECKERS"
+    }
+  ],
+  "nextPageToken": "",
+  "totalSize": 2
+}

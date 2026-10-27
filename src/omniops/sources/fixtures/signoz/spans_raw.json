@@ -1,0 +1,65 @@
+{
+  "status": "success",
+  "data": {
+    "type": "raw",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "nextCursor": "",
+          "rows": [
+            {
+              "timestamp": "2026-10-01T11:42:07.120Z",
+              "data": {
+                "timestamp": "2026-10-01T11:42:07.120Z",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00f067aa0ba902b7",
+                "service.name": "frontend",
+                "name": "HTTP GET /dispatch",
+                "duration_nano": 1532000000,
+                "has_error": true,
+                "status_code_string": "STATUS_CODE_ERROR",
+                "status_message": "upstream timeout",
+                "kind_string": "Server",
+                "parent_span_id": "",
+                "http_method": "GET",
+                "http_url": "http://frontend:8080/dispatch?customer=392",
+                "response_status_code": "504",
+                "db_name": "",
+                "db_operation": "",
+                "external_http_url": "",
+                "deployment.environment": "production",
+                "host.name": "frontend-7d9f4-x4k2p"
+              }
+            },
+            {
+              "timestamp": "2026-10-01T11:42:07.130Z",
+              "data": {
+                "timestamp": "2026-10-01T11:42:07.130Z",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "b7ad6b7169203331",
+                "service.name": "mysql",
+                "name": "SQL SELECT",
+                "duration_nano": 1500000000,
+                "has_error": false,
+                "status_code_string": "STATUS_CODE_UNSET",
+                "status_message": "",
+                "kind_string": "Client",
+                "parent_span_id": "00f067aa0ba902b7",
+                "http_method": "",
+                "http_url": "",
+                "response_status_code": "",
+                "db_name": "customers",
+                "db_operation": "SELECT",
+                "external_http_url": "",
+                "deployment.environment": "production",
+                "host.name": "frontend-7d9f4-x4k2p"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 2, "bytesScanned": 2048, "durationMs": 9}
+  }
+}

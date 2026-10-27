@@ -1,0 +1,27 @@
+{
+  "allowOrgCreate": true,
+  "appSubUrl": "",
+  "buildInfo": {
+    "buildstamp": 0,
+    "commit": "vyyyy",
+    "version": "zzzzz"
+  },
+  "datasources": {
+    "datasourcename": {
+      "index": "grafana-dash",
+      "meta": {
+        "annotations": true,
+        "module": "plugins/datasource/grafana/datasource",
+        "name": "Grafana",
+        "partials": {
+          "annotations": "app/plugins/datasource/grafana/partials/annotations.editor.html",
+          "config": "app/plugins/datasource/grafana/partials/config.html"
+        },
+        "pluginType": "datasource",
+        "serviceName": "Grafana",
+        "type": "grafanasearch"
+      }
+    }
+  },
+  "defaultDatasource": "Grafana"
+}

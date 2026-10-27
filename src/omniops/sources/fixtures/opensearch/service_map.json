@@ -1,0 +1,54 @@
+{
+  "took": 14,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 2,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+      {
+        "_index": "otel-v1-apm-service-map",
+        "_type": "_doc",
+        "_id": "7/jRp2VF7544pBN6+mK2vw==",
+        "_score": 1,
+        "_source": {
+          "serviceName": "inventory",
+          "kind": "SPAN_KIND_CLIENT",
+          "destination": {
+            "resource": "updateItem",
+            "domain": "database"
+          },
+          "target": null,
+          "traceGroupName": "client_checkout",
+          "hashId": "7/jRp2VF7544pBN6+mK2vw=="
+        }
+      },
+      {
+        "_index": "otel-v1-apm-service-map",
+        "_type": "_doc",
+        "_id": "lZcUyuhGYfnaQqt+r73njA==",
+        "_version": 3,
+        "_score": 0,
+        "_source": {
+          "serviceName": "database",
+          "kind": "SPAN_KIND_SERVER",
+          "destination": null,
+          "target": {
+            "resource": "updateItem",
+            "domain": "database"
+          },
+          "traceGroupName": "client_checkout",
+          "hashId": "lZcUyuhGYfnaQqt+r73njA=="
+        }
+      }
+    ]
+  }
+}

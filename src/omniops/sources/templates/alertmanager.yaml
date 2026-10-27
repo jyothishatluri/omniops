@@ -1,0 +1,333 @@
+# Prometheus Alertmanager API v2. Reusable template: upstream Alertmanager, Grafana Mimir / Cortex
+# Alertmanager (<mimir>/alertmanager/api/v2, X-Scope-OrgID), Grafana Cloud Alertmanager, and
+# Grafana's built-in Alertmanager (<grafana>/api/alertmanager/grafana/api/v2: alerts, alert
+# groups, silences and status; no /receivers).
+# Reference: the OpenAPI 2.0 spec, the only official API reference for v2
+#   https://github.com/prometheus/alertmanager/blob/v0.34.1/api/v2/openapi.yaml
+# (identical to main as of v0.34.1, 2026-09-17). The spec has schemas but no example bodies, so
+# fixtures are built strictly from the schema definitions.
+source: alertmanager
+display_name: Prometheus Alertmanager
+vendor: Prometheus (CNCF)
+description: Alertmanager API v2 - routed alerts with silence/inhibition state, alert groups per receiver, silences, receivers and cluster status/config.
+docs_url: https://github.com/prometheus/alertmanager/blob/v0.34.1/api/v2/openapi.yaml
+categories: [alerts]
+base_url: "{{ env.ALERTMANAGER_URL }}"
+env:
+  - {name: ALERTMANAGER_URL, description: "Base URL before /api/v2, e.g. http://alertmanager:9093"}
+required_env: [ALERTMANAGER_URL]
+rate_limit:
+  concurrency: 4
+  notes: "No documented rate limit; every call returns the full in-memory state, so prefer server-side matchers on large installations."
+pitfalls:
+  - "Alertmanager holds only CURRENT state: resolved alerts disappear shortly after they resolve and expired silences are garbage-collected (default retention 120h). It is not an alert history - use the alert source (Prometheus/Grafana rules, events) for history."
+  - "endsAt of a firing alert is a rolling timeout in the future (refreshed on every evaluation), not when the problem ended."
+  - "state = 'suppressed' means silenced or inhibited: no notification was sent. Check silenced_by / inhibited_by before assuming on-call was paged."
+  - "Label matchers are exact and case-sensitive: an unknown label or a misspelled value returns 0 rows, not an error. List alerts without filters first when unsure."
+  - "Times are RFC3339 strings in UTC; all timestamps here are TIMESTAMP columns."
+tables:
+  - name: alertmanager_alerts
+    title: Alerts held by Alertmanager
+    description: >-
+      Every alert Alertmanager currently holds (GET /api/v2/alerts) with its processing state
+      (active | suppressed | unprocessed), the silences/inhibitions muting it, the receivers it is
+      routed to, and its labels/annotations. One row per alert. Optional server-side filters:
+      alertname, severity, matcher (any Alertmanager matcher such as service="payment-service" or
+      service=~"pay.*"), receiver (regex) and state (active -> silenced=false&inhibited=false,
+      suppressed -> active=false). service/env/host are derived columns (several label names),
+      so filter them in SQL or pass an explicit matcher.
+    kind: alerts
+    request:
+      method: GET
+      path: /api/v2/alerts
+      query:
+        filter: >-
+          {{ (filters.matcher | as_list)
+             + (['alertname="' ~ (filters.alertname | label_escape) ~ '"'] if filters.alertname else [])
+             + (['severity="' ~ (filters.severity | label_escape) ~ '"'] if filters.severity else []) }}
+        receiver: "{{ filters.receiver }}"
+        active: "{{ False if filters.state == 'suppressed' else None }}"
+        silenced: "{{ False if filters.state == 'active' else None }}"
+        inhibited: "{{ False if filters.state == 'active' else None }}"
+    filters:
+      - {column: alertname, ops: ["=", "in"], description: "Alert name (sent as filter=alertname=\"...\")", examples: [HighErrorRate]}
+      - {column: severity, ops: ["=", "in"], description: "severity label (sent as a matcher)", examples: [critical]}
+      - {column: state, ops: ["=", "in"], description: "active | suppressed | unprocessed (active and suppressed are pushed down as the active/silenced/inhibited flags)", examples: [active]}
+      - {column: matcher, ops: ["=", "in"], description: "Raw Alertmanager matcher, e.g. service=\"payment-service\" or instance=~\"api-.*\" (one matcher per value; IN = union)", examples: ['service="payment-service"']}
+      - {column: receiver, description: "Regex on receiver names (e.g. slack-.*)", examples: ['slack-.*']}
+    response:
+      rows_path: "$[*]"
+    columns:
+      - {name: fingerprint, path: fingerprint, description: "Alert id (stable hash of the label set)"}
+      - {name: alertname, path: "labels.alertname"}
+      - {name: state, path: "status.state", description: "active | suppressed | unprocessed"}
+      - {name: severity, path: "labels.severity"}
+      - {name: service, expr: "_.labels.service or _.labels.service_name or _.labels.job or _.labels.app", description: "service label (falls back to service_name/job/app)"}
+      - {name: env, expr: "_.labels.env or _.labels.environment"}
+      - {name: host, expr: "_.labels.instance or _.labels.host or _.labels.hostname or _.labels.node"}
+      - {name: namespace, path: "labels.namespace"}
+      - {name: pod, path: "labels.pod"}
+      - {name: title, expr: "_.annotations.summary or _.annotations.title or _.labels.alertname", description: "summary annotation (falls back to alertname)"}
+      - {name: description, expr: "_.annotations.description or _.annotations.message"}
+      - {name: runbook_url, path: "annotations.runbook_url"}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt, description: "When the alert started firing"}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt, description: "Rolling expiry for firing alerts (in the future); resolution time only for resolved ones"}
+      - {name: url, path: generatorURL, description: "generatorURL: link to the rule / graph that produced the alert"}
+      - {name: receivers, path: "receivers[*].name", transform: join, transform_arg: ",", description: "Receivers the alert is routed to (comma-separated)"}
+      - {name: silenced_by, type: JSON, path: "status.silencedBy", description: "Silence ids muting the alert"}
+      - {name: inhibited_by, type: JSON, path: "status.inhibitedBy", description: "Fingerprints of inhibiting alerts"}
+      - {name: muted_by, type: JSON, path: "status.mutedBy", description: "Names of time intervals muting the alert"}
+      - {name: labels, type: JSON, path: labels, description: "All alert labels; labels->>'job'"}
+      - {name: annotations, type: JSON, path: annotations}
+      - {name: matcher, filter_only: true}
+      - {name: receiver, filter_only: true, description: "Receiver-name regex (filter only; the routed receivers are in receivers)"}
+    sort_hint: "Unordered; ORDER BY starts_at."
+    pitfalls:
+      - "Without filters you get active, silenced, inhibited and unprocessed alerts together; filter state = 'active' for what is actually notifying."
+      - "Through Grafana's built-in Alertmanager the labels also carry __alert_rule_uid__ and grafana_folder (join to Grafana alert rules with labels->>'__alert_rule_uid__')."
+    examples:
+      - sql: >-
+          SELECT alertname, service, severity, state, starts_at, title, receivers
+          FROM alertmanager_alerts WHERE state = 'active' ORDER BY starts_at
+        description: What is firing and notifying right now, oldest first (first alert = likely origin).
+      - sql: >-
+          SELECT alertname, service, starts_at, silenced_by, inhibited_by FROM alertmanager_alerts
+          WHERE state = 'suppressed' AND severity = 'critical'
+        description: Critical alerts that did NOT page anyone because they were silenced or inhibited.
+      - sql: "SELECT fingerprint, labels, annotations, url FROM alertmanager_alerts WHERE alertname = 'HighErrorRate'"
+        description: Full detail of one alert (labels, annotations, link to the rule).
+    fixtures:
+      - file: alerts.json
+        expect_rows: 2
+        expect_columns: {fingerprint: 4f1c3e9a8b7d6c50, alertname: HighErrorRate, state: active, severity: critical, service: payment-service, host: "payment-service:8084", title: High 5xx error rate on payment-service, starts_at: "2026-10-01T11:42:30Z", receivers: slack-oncall, silenced_by: "[]"}
+        note: >-
+          The v2 API reference (OpenAPI spec) has no example bodies; built strictly from the
+          gettableAlerts / gettableAlert / alertStatus / receiverReference definitions of
+          api/v2/openapi.yaml v0.34.1 (all required fields present). Values are illustrative.
+    docs_url: https://github.com/prometheus/alertmanager/blob/v0.34.1/api/v2/openapi.yaml#L155
+
+  - name: alertmanager_alert_groups
+    title: Alert groups per receiver
+    description: >-
+      Alerts as Alertmanager groups them for notification (GET /api/v2/alerts/groups): one row per
+      (group, alert) with the group's labels (group_by), the receiver it notifies and the alert.
+      Shows which alerts were bundled into one notification and to whom it went.
+    kind: alerts
+    request:
+      method: GET
+      path: /api/v2/alerts/groups
+      query:
+        filter: >-
+          {{ (filters.matcher | as_list)
+             + (['alertname="' ~ (filters.alertname | label_escape) ~ '"'] if filters.alertname else []) }}
+        receiver: "{{ filters.receiver }}"
+        active: "{{ False if filters.state == 'suppressed' else None }}"
+        silenced: "{{ False if filters.state == 'active' else None }}"
+        inhibited: "{{ False if filters.state == 'active' else None }}"
+    filters:
+      - {column: alertname, ops: ["=", "in"], description: "Alert name", examples: [HighErrorRate]}
+      - {column: matcher, ops: ["=", "in"], description: "Raw Alertmanager matcher, e.g. service=\"payment-service\"", examples: ['severity="critical"']}
+      - {column: receiver, ops: ["="], description: "Regex on the receiver name", examples: [slack-oncall]}
+      - {column: state, ops: ["=", "in"], description: "Alert state inside the group: active | suppressed | unprocessed (active/suppressed pushed down as the active/silenced/inhibited flags)", examples: [active]}
+    response:
+      rows_path: "$[*]"
+      expand:
+        - {explode: alerts, as: a}
+    columns:
+      - {name: receiver, path: "receiver.name", description: "Receiver notified for this group"}
+      - {name: group_labels, type: JSON, path: labels, description: "Labels of the group (the route's group_by values)"}
+      - {name: route_labels, type: JSON, path: routeLabels, description: "Labels of the route that grouped them (Alertmanager 0.34+; null on older versions)"}
+      - {name: fingerprint, path: "@a.fingerprint"}
+      - {name: alertname, path: "@a.labels.alertname"}
+      - {name: state, path: "@a.status.state"}
+      - {name: severity, path: "@a.labels.severity"}
+      - {name: service, expr: "a.labels.service or a.labels.service_name or a.labels.job or a.labels.app"}
+      - {name: title, expr: "a.annotations.summary or a.annotations.title or a.labels.alertname"}
+      - {name: starts_at, type: TIMESTAMP, path: "@a.startsAt"}
+      - {name: ends_at, type: TIMESTAMP, path: "@a.endsAt"}
+      - {name: url, path: "@a.generatorURL"}
+      - {name: labels, type: JSON, path: "@a.labels"}
+      - {name: annotations, type: JSON, path: "@a.annotations"}
+      - {name: matcher, filter_only: true}
+    pitfalls:
+      - "An alert routed to several receivers appears once per receiver group."
+      - "receiver is a regex server-side; the SQL comparison is exact."
+    examples:
+      - sql: >-
+          SELECT receiver, group_labels, count(*) AS alerts, min(starts_at) AS first_start
+          FROM alertmanager_alert_groups GROUP BY receiver, group_labels ORDER BY alerts DESC
+        description: Which notification groups are open and how many alerts each bundles.
+    fixtures:
+      - file: alert_groups.json
+        expect_rows: 2
+        expect_columns: {receiver: slack-oncall, alertname: HighErrorRate, state: active, service: payment-service, starts_at: "2026-10-01T11:42:30Z"}
+        note: >-
+          Built strictly from the alertGroups / alertGroup / gettableAlert definitions of
+          api/v2/openapi.yaml v0.34.1 (no example bodies in the reference). Values are illustrative.
+    docs_url: https://github.com/prometheus/alertmanager/blob/v0.34.1/api/v2/openapi.yaml#L224
+
+  - name: alertmanager_silences
+    title: Silences
+    description: >-
+      Silences (GET /api/v2/silences) with matchers, author, comment, window and state
+      (active | pending | expired). Answer 'was this alert silenced, by whom and why?' and
+      'was planned maintenance announced?' (a silence created just before an incident often
+      marks a rollout). state is pushed down as the active/expired/pending flags (Alertmanager
+      0.34+; older versions ignore them and SQL still filters).
+    kind: events
+    request:
+      method: GET
+      path: /api/v2/silences
+      query:
+        filter: "{{ filters.matcher }}"
+        active: "{{ (filters.state == 'active') if filters.state else None }}"
+        expired: "{{ (filters.state == 'expired') if filters.state else None }}"
+        pending: "{{ (filters.state == 'pending') if filters.state else None }}"
+    filters:
+      - {column: state, ops: ["=", "in"], description: "active | pending | expired", examples: [active]}
+      - {column: matcher, ops: ["=", "in"], description: "Exact matcher the silence must contain, e.g. alertname=\"HighErrorRate\"", examples: ['alertname="HighErrorRate"']}
+    response:
+      rows_path: "$[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: state, path: "status.state", description: "active | pending | expired"}
+      - {name: alertname, expr: "_.matchers | selectattr('name', 'equalto', 'alertname') | map(attribute='value') | first", description: "Value of the silence's alertname matcher, if it has one"}
+      - {name: service, expr: "_.matchers | selectattr('name', 'in', ['service', 'service_name', 'job', 'app']) | map(attribute='value') | first", description: "Value of the silence's service/service_name/job/app matcher (may be a regex when the matcher is)"}
+      - {name: title, expr: "'Alertmanager silence (' ~ _.status.state ~ ') by ' ~ _.createdBy ~ ': ' ~ _.comment", description: "One-line summary: state, author and comment"}
+      - {name: created_by, path: createdBy, description: "Author"}
+      - {name: comment, path: comment}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, description: "Last change (creation, update or early expiry)"}
+      - {name: matchers, type: JSON, path: matchers, description: "[{name, value, isRegex, isEqual}]"}
+      - {name: annotations, type: JSON, path: annotations, description: "Silence annotations (Alertmanager 0.32+; null on older versions)"}
+      - {name: matcher, filter_only: true}
+    sort_hint: "Server order: active (next to expire first), then pending (next to start first), then expired (most recently ended first)."
+    pitfalls:
+      - "The matcher filter returns only silences that contain that EXACT matcher (same name, operator and value): a silence alertname=~\"High.*\" is not returned for alertname=\"HighErrorRate\". To ask 'what silences this alert' read silenced_by from the *_alerts table of the same source, or list all silences and inspect matchers."
+      - "Expired silences are garbage-collected after the data retention (default 120h)."
+    examples:
+      - sql: >-
+          SELECT id, alertname, created_by, comment, starts_at, ends_at, matchers
+          FROM alertmanager_silences WHERE state = 'active' ORDER BY starts_at DESC
+        description: Silences in force now and who created them.
+      - sql: >-
+          SELECT id, state, created_by, comment, starts_at, ends_at FROM alertmanager_silences
+          WHERE starts_at <= TIMESTAMP '2026-10-01 12:00:00' AND ends_at >= TIMESTAMP '2026-10-01 11:00:00'
+        description: Silences that overlapped the incident window (including since-expired ones).
+    fixtures:
+      - file: silences.json
+        expect_rows: 2
+        expect_columns: {id: 7d8f9e0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a, state: active, alertname: HighLatency, service: "api-.*", created_by: jane.doe, starts_at: "2026-10-01T11:30:00Z", title: "Alertmanager silence (active) by jane.doe: Planned api-gateway rollout, latency expected"}
+        note: >-
+          Built strictly from the gettableSilences / gettableSilence / silence / matcher /
+          silenceStatus definitions of api/v2/openapi.yaml v0.34.1 (no example bodies in the
+          reference). Values are illustrative.
+    docs_url: https://github.com/prometheus/alertmanager/blob/v0.34.1/api/v2/openapi.yaml#L49
+
+  - name: alertmanager_silence
+    title: One silence by id
+    description: One silence by its id (GET /api/v2/silence/{silenceID}), e.g. an id from silenced_by of the *_alerts table.
+    kind: events
+    request:
+      method: GET
+      path: "/api/v2/silence/{{ filters.id }}"
+      accept_status: [404]
+    filters:
+      - {column: id, required: true, ops: ["=", "in"], description: "Silence id (uuid)", examples: [7d8f9e0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: state, path: "status.state"}
+      - {name: alertname, expr: "_.matchers | selectattr('name', 'equalto', 'alertname') | map(attribute='value') | first"}
+      - {name: service, expr: "_.matchers | selectattr('name', 'in', ['service', 'service_name', 'job', 'app']) | map(attribute='value') | first"}
+      - {name: created_by, path: createdBy}
+      - {name: comment, path: comment}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: matchers, type: JSON, path: matchers}
+      - {name: annotations, type: JSON, path: annotations}
+    pitfalls:
+      - "A 404 (unknown or garbage-collected silence) returns 0 rows."
+    examples:
+      - sql: "SELECT created_by, comment, starts_at, ends_at, matchers FROM alertmanager_silence WHERE id = '7d8f9e0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a'"
+        description: Who silenced an alert and why.
+    fixtures:
+      - file: silence.json
+        expect_rows: 1
+        expect_columns: {id: 7d8f9e0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a, state: active, created_by: jane.doe, alertname: HighLatency}
+        note: "Built strictly from the gettableSilence definition of api/v2/openapi.yaml v0.34.1. Values are illustrative."
+    docs_url: https://github.com/prometheus/alertmanager/blob/v0.34.1/api/v2/openapi.yaml#L114
+
+  - name: alertmanager_status
+    title: Alertmanager status and configuration
+    description: >-
+      Cluster status, peers, version, uptime and the loaded configuration (GET /api/v2/status).
+      One row. config_original is the full YAML (routes, receivers, inhibit rules, time
+      intervals; secrets are masked) - read it to see where an alert is routed and what inhibits it.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/status
+    response:
+      rows_path: "$"
+    columns:
+      - {name: cluster_status, path: "cluster.status", description: "ready | settling | disabled"}
+      - {name: cluster_name, path: "cluster.name"}
+      - {name: peers, type: JSON, path: "cluster.peers"}
+      - {name: peer_count, type: BIGINT, path: "cluster.peers", transform: length}
+      - {name: version, path: "versionInfo.version"}
+      - {name: revision, path: "versionInfo.revision"}
+      - {name: uptime, type: TIMESTAMP, path: uptime, description: "Start time of the process"}
+      - {name: config_original, path: "config.original", description: "Loaded alertmanager.yml (secrets masked)"}
+      - {name: config, type: JSON, path: config, description: "Config object (Grafana's built-in Alertmanager returns structured JSON here instead of original)"}
+    pitfalls:
+      - "cluster_status = 'settling' right after a restart: silences/notification log may still be syncing; a recent uptime explains duplicate or missing notifications."
+    examples:
+      - sql: "SELECT version, cluster_status, peer_count, uptime, config_original FROM alertmanager_status"
+        description: Is Alertmanager healthy and clustered, and what routing config is loaded.
+    tests:
+      - {sql: "SELECT cluster_status FROM alertmanager_status", min_rows: 1}
+    fixtures:
+      - file: status.json
+        expect_rows: 1
+        expect_columns: {cluster_status: ready, peer_count: 2, version: "0.34.1", uptime: "2026-10-01T08:00:00Z"}
+        note: "Built strictly from the alertmanagerStatus / clusterStatus / peerStatus / versionInfo / alertmanagerConfig definitions of api/v2/openapi.yaml v0.34.1. Values are illustrative."
+    docs_url: https://github.com/prometheus/alertmanager/blob/v0.34.1/api/v2/openapi.yaml#L21
+
+  - name: alertmanager_receivers
+    title: Receivers
+    description: Names (and labels, Alertmanager 0.33+) of all configured notification receivers (GET /api/v2/receivers).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/receivers
+    response:
+      rows_path: "$[*]"
+    columns:
+      - {name: name, path: name}
+      - {name: labels, type: JSON, path: labels}
+    pitfalls:
+      - "Not served by Grafana's built-in Alertmanager (404): read contact points from Grafana instead."
+    examples:
+      - sql: "SELECT name FROM alertmanager_receivers ORDER BY name"
+        description: Which notification receivers exist.
+    fixtures:
+      - file: receivers.json
+        expect_rows: 3
+        expect_columns: {name: slack-oncall}
+        note: "Built strictly from the receiver definition of api/v2/openapi.yaml v0.34.1 (name required, labels optional). Values are illustrative."
+    docs_url: https://github.com/prometheus/alertmanager/blob/v0.34.1/api/v2/openapi.yaml#L32
+
+roles:
+  active_alerts:
+    table: alertmanager_alerts
+    columns: {id: fingerprint, name: alertname, state: state, ts: starts_at, severity: severity, service: service, title: title, url: url, labels: labels}
+    notes: "Routed alerts with silence/inhibition state; state = 'active' means it is notifying."
+  change_events:
+    table: alertmanager_silences
+    columns: {ts: starts_at, title: title, service: service, author: created_by}
+    notes: "Silences are alerting changes: one created just before an incident usually marks planned work (rollout, maintenance)."

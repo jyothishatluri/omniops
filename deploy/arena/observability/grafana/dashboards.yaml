@@ -1,0 +1,20 @@
+# The alert rules' overview dashboard (uid omniops-arena: every rule links to its panel, so Grafana's
+# notifications carry Dashboard/Panel links whose 'from' is StartsAt - 1h), plus the RED dashboards that
+# ship inside grafana/otel-lgtm (our provisioning path replaces the image's).
+apiVersion: 1
+providers:
+  - name: Platform alerts overview
+    type: file
+    options:
+      path: /omniops/provisioning/dashboards/arena
+      foldersFromFilesStructure: false
+  - name: RED Metrics (classic histogram)
+    type: file
+    options:
+      path: /otel-lgtm/grafana-dashboard-red-metrics-classic.json
+      foldersFromFilesStructure: false
+  - name: RED Metrics (native histogram)
+    type: file
+    options:
+      path: /otel-lgtm/grafana-dashboard-red-metrics-native.json
+      foldersFromFilesStructure: false

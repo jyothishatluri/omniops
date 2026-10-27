@@ -1,0 +1,34 @@
+{
+ "nextPageKey": "AQAAABQBAAAABQ==",
+ "pageSize": 1,
+ "releases": [
+  {
+   "affectedByProblems": true,
+   "affectedBySecurityVulnerabilities": true,
+   "instances": [
+    "PROCESS_GROUP_INSTANCE-49D94B90FB71C45B",
+    "PROCESS_GROUP_INSTANCE-7EA049157C82D1A5"
+   ],
+   "name": "cluster",
+   "problemCount": 4,
+   "product": "Sockshop",
+   "releaseEntityId": "PROCESS_GROUP-DFDBAC9CBF104253",
+   "running": true,
+   "securityVulnerabilitiesCount": 4,
+   "securityVulnerabilitiesEnabled": true,
+   "softwareTechs": [
+    {
+     "edition": "OpenJDK",
+     "technology": "JAVA",
+     "verbatimType": "Java",
+     "version": "1.8.0_242"
+    }
+   ],
+   "stage": "staging",
+   "throughput": 923234,
+   "version": "1.195.34.12341232423-012342"
+  }
+ ],
+ "releasesWithProblems": 1,
+ "totalCount": 1
+}

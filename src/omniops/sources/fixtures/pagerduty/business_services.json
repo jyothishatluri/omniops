@@ -1,0 +1,33 @@
+{
+ "business_services": [
+  {
+   "type": "business_service",
+   "self": "https://api.pagerduty.com/business_services/P3U7V58",
+   "html_url": null,
+   "point_of_contact": "PagerDuty Admin",
+   "name": "stand-alone node",
+   "team": null,
+   "id": "P3U7V58",
+   "description": "Very important business function",
+   "summary": "stand-alone node"
+  },
+  {
+   "type": "business_service",
+   "self": "https://api.pagerduty.com/business_services/P1L1YEE",
+   "html_url": null,
+   "point_of_contact": "PagerDuty Admin",
+   "name": "Cross-tier business service",
+   "id": "P1L1YEE",
+   "summary": "Cross-tier business service",
+   "team": {
+    "id": "PQ9K7I8",
+    "type": "team_reference",
+    "self": "https://api.pagerduty.com/teams/PQ9K7I8"
+   }
+  }
+ ],
+ "limit": 100,
+ "offset": 0,
+ "total": null,
+ "more": false
+}

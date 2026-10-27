@@ -1,0 +1,27 @@
+{
+  "data": {
+    "id": "0",
+    "type": "timeseries_response",
+    "attributes": {
+      "series": [
+        {
+          "group_tags": [],
+          "query_index": 0,
+          "unit": null
+        }
+      ],
+      "times": [
+        1711977645000,
+        1711977705000,
+        1711980225000
+      ],
+      "values": [
+        [
+          1,
+          1,
+          87
+        ]
+      ]
+    }
+  }
+}

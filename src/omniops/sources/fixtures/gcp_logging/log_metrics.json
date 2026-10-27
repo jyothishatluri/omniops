@@ -1,0 +1,33 @@
+{
+  "metrics": [
+    {
+      "name": "payment_errors",
+      "description": "Errors logged by the payments component",
+      "filter": "resource.type=\"cloud_run_revision\" AND severity>=ERROR AND jsonPayload.component=\"payments\"",
+      "metricDescriptor": {
+        "name": "projects/my-project/metricDescriptors/logging.googleapis.com/user/payment_errors",
+        "type": "logging.googleapis.com/user/payment_errors",
+        "metricKind": "DELTA",
+        "valueType": "INT64",
+        "unit": "1"
+      },
+      "labelExtractors": {"error_code": "EXTRACT(jsonPayload.error_code)"},
+      "createTime": "2026-05-02T10:11:12.123456789Z",
+      "updateTime": "2026-09-30T08:00:00Z"
+    },
+    {
+      "name": "checkout_latency",
+      "filter": "log_id(\"run.googleapis.com/requests\") AND resource.labels.service_name=\"checkout\"",
+      "metricDescriptor": {
+        "type": "logging.googleapis.com/user/checkout_latency",
+        "metricKind": "DELTA",
+        "valueType": "DISTRIBUTION",
+        "unit": "ms"
+      },
+      "valueExtractor": "EXTRACT(httpRequest.latency)",
+      "bucketOptions": {"exponentialBuckets": {"numFiniteBuckets": 64, "growthFactor": 1.4, "scale": 1}},
+      "disabled": false
+    }
+  ],
+  "nextPageToken": ""
+}

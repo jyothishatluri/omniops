@@ -1,0 +1,459 @@
+# Thanos Query (Querier / Query Frontend): global PromQL view over sidecars, store gateways, rulers and
+# receivers. Extends templates/prometheus.yaml and adds the Thanos query parameters (dedup,
+# partial_response, max_source_resolution, engine), exemplars, label names and the /api/v1/stores
+# endpoint status (a broken StoreAPI = a hole in the data).
+# Docs: https://thanos.io/tip/components/query.md/
+source: thanos
+display_name: Thanos Query
+vendor: Thanos (CNCF)
+extends: prometheus
+description: >-
+  Thanos Querier / Query Frontend: Prometheus-compatible PromQL API across many Prometheus instances with
+  deduplication, partial-response control, downsampling, rules/alerts/targets fan-out and store status.
+docs_url: https://thanos.io/tip/components/query.md/
+categories: [metrics, alerts]
+base_url: "{{ env.THANOS_URL }}"
+env:
+  - {name: THANOS_URL, description: "Thanos Query or Query Frontend root, e.g. http://thanos-query.monitoring.svc:9090 (no /api/v1)"}
+  - {name: THANOS_TOKEN, description: "Optional bearer token for the auth proxy in front of Thanos (Thanos has no auth itself)", secret: true}
+  - {name: THANOS_USERNAME, description: "Optional basic-auth user for the proxy"}
+  - {name: THANOS_PASSWORD, description: "Optional basic-auth password for the proxy", secret: true}
+  - {name: THANOS_TENANT, description: "Optional tenant id sent in the tenant header (--query.tenant-header)"}
+  - {name: THANOS_TENANT_HEADER, description: "Tenant header name configured with --query.tenant-header", default: THANOS-TENANT}
+required_env: [THANOS_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Bearer ' ~ env.THANOS_TOKEN) if env.THANOS_TOKEN
+      else (('Basic ' ~ ((env.THANOS_USERNAME ~ ':' ~ env.THANOS_PASSWORD) | b64)) if env.THANOS_USERNAME else None) }}
+headers:
+  "{{ env.THANOS_TENANT_HEADER }}": "{{ env.THANOS_TENANT or None }}"
+rate_limit:
+  concurrency: 4
+  notes: "No API rate limit; --query.max-concurrent (default 20) queues extra queries and --query.timeout (default 2m) aborts long ones (503)."
+retention:
+  metrics: "Sidecars serve local Prometheus retention; store gateways serve object storage per compactor --retention.resolution-* (raw / 5m / 1h)."
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error or every StoreAPI failed: fix the expression or check thanos_stores; do not retry unchanged"}
+query_languages:
+  promql: >-
+    PromQL (Prometheus engine, or the Thanos engine with engine=thanos). Selectors use braces:
+    metric{label="value"}. rate()/increase() need a range vector [5m]. Aggregate with sum by (label) (...).
+    Histograms: histogram_quantile(0.95, sum by (le) (rate(x_bucket[5m]))). Replica labels (e.g. replica,
+    prometheus_replica) are removed when dedup=true, so never group by them.
+pitfalls:
+  - "An unknown metric or label returns 0 series, not an error: list label values first (thanos_label_values), then filter."
+  - "partial_response=true (the usual default) turns an unreachable store into a warning with HTTP 200: check the warnings column (or thanos_stores) before concluding 'no data'. Use partial_response = false to make missing stores fail loudly."
+  - "With dedup=false you get one series per HA replica (duplicated sums); with dedup=true the replica label disappears. Do not sum across replicas."
+  - "Long ranges may be served from downsampled blocks (5m / 1h resolution) when auto-downsampling is on: short spikes vanish. Set max_source_resolution = '0' to force raw data."
+  - "Range queries are capped at ~11,000 points per series; the engine auto-sizes step to ~300 points."
+tables:
+  - name: thanos_query_range
+    description: >-
+      Evaluate a PromQL expression over a time range across all StoreAPIs (/api/v1/query_range). One row per
+      (series, timestamp). Filter on query (required) and ts; optional step (s), dedup, partial_response,
+      max_source_resolution, engine. Store failures tolerated by partial_response appear in warnings.
+    request:
+      method: GET
+      path: /api/v1/query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+        dedup: "{{ filters.dedup }}"
+        partial_response: "{{ filters.partial_response }}"
+        max_source_resolution: "{{ filters.max_source_resolution }}"
+        engine: "{{ filters.engine }}"
+        "replicaLabels[]": "{{ filters.replica_labels }}"
+        "storeMatch[]": "{{ filters.store_match }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression", examples: ['sum by (job) (rate(http_requests_total[5m]))']}
+      - {column: step, type: BIGINT, description: "Resolution step in seconds (default: auto, ~300 points)"}
+      - {column: dedup, type: BOOLEAN, description: "Deduplicate HA replicas using the replica labels (server default true when --query.replica-label is set)"}
+      - {column: partial_response, type: BOOLEAN, description: "true = tolerate failing StoreAPIs (warning); false = fail the query"}
+      - {column: max_source_resolution, description: "auto | 0 (raw only) | 5m | 1h - max downsampling resolution to read", examples: ['0']}
+      - {column: engine, description: "prometheus | thanos (PromQL engine to use)"}
+      - {column: replica_labels, ops: ["=", "in"], fan_out: false, description: "Replica label name(s) to deduplicate on (replicaLabels[]); overrides --query.replica-label for this query", examples: [prometheus_replica]}
+      - {column: store_match, ops: ["=", "in"], fan_out: false, description: "Restrict the query to StoreAPIs matching a federate-style selector on __address__ (storeMatch[]), e.g. {__address__=~\"prometheus-eu.*\"}"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s, description: "Sample timestamp (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value (NaN/Inf preserved)"}
+      - {name: metric, path: "metric.__name__", description: "Metric name when the expression keeps it"}
+      - {name: labels, type: JSON, path: metric, description: "All series labels as JSON; use labels->>'job'"}
+      - {name: warnings, type: JSON, expr: "root.warnings or root.data.warnings", description: "Partial-response / store warnings (same on every row). Non-null = data may be missing."}
+      - {name: query, filter_only: true, description: "The PromQL expression"}
+      - {name: step, type: BIGINT, filter_only: true, description: "Step in seconds"}
+      - {name: dedup, type: BOOLEAN, filter_only: true}
+      - {name: partial_response, type: BOOLEAN, filter_only: true}
+      - {name: max_source_resolution, filter_only: true}
+      - {name: engine, filter_only: true}
+      - {name: replica_labels, filter_only: true}
+      - {name: store_match, filter_only: true}
+    time: {column: ts, default_lookback: 1h, max_window: 90d}
+    pitfalls:
+      - "Use rate()/increase() on counters; raw counter values only ever go up."
+      - "Group with sum by (...) in PromQL before fetching; it is far cheaper than grouping millions of points in SQL."
+      - "A non-null warnings column means at least one StoreAPI did not answer: the result can be silently incomplete."
+    examples:
+      - sql: >-
+          SELECT labels->>'job' AS job, max(value) AS peak, arg_max(ts, value) AS peak_at, any_value(warnings) AS warnings
+          FROM thanos_query_range
+          WHERE query = 'sum by (job) (rate(http_requests_total{code=~"5.."}[5m]))'
+            AND partial_response = false
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per job over an hour, failing loudly if a store is missing.
+      - sql: >-
+          SELECT ts, value FROM thanos_query_range
+          WHERE query = 'max(rate(http_requests_total{service="checkout",code=~"5.."}[1m]))'
+            AND max_source_resolution = '0'
+            AND ts >= TIMESTAMP '2026-09-01 00:00:00' AND ts < TIMESTAMP '2026-09-03 00:00:00'
+          ORDER BY ts
+        description: Two days of raw (non-downsampled) data so short spikes are not averaged away.
+    tests:
+      - {sql: "SELECT count(*) AS n FROM thanos_query_range WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_range.json
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up, warnings: null}
+        note: "Prometheus HTTP API docs range-query example (Thanos docs: Query API is guaranteed compatible with the Prometheus API)."
+      - file: query_range_partial.json
+        filters: {query: up, partial_response: true}
+        expect_rows: 6
+        expect_columns: {warnings: '["receive-1:10901: rpc error: code = DeadlineExceeded desc = context deadline exceeded"]'}
+        note: "Prometheus docs range example plus the documented response-envelope 'warnings' array that Thanos fills on partial responses (Thanos docs 'Partial Response' / 'Custom Response Fields'); warning text illustrative."
+      - file: query_error.json
+        filters: {query: 'up{job=}'}
+        expect_error: "parse error"
+        note: "Built strictly from the documented Prometheus API error envelope (status=error, errorType, error); proves the 2xx error rule fires when a proxy/gateway answers 200 with an error body. Message text illustrative."
+    ui_link: "{{ source.base_url }}/graph?g0.expr={{ filters.query | urlencode }}&g0.range_input={{ time.range_s }}s&g0.end_input={{ time.end | strftime('%Y-%m-%d %H:%M:%S') | urlencode }}&g0.tab=0&g0.deduplicate=1&g0.partial_response=0"
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_query
+    description: >-
+      Evaluate a PromQL expression at one instant across all StoreAPIs (/api/v1/query; evaluation time = upper
+      bound of ts). One row per series. Supports dedup, partial_response, max_source_resolution, engine.
+    request:
+      method: GET
+      path: /api/v1/query
+      query:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | epoch_s }}"
+        dedup: "{{ filters.dedup }}"
+        partial_response: "{{ filters.partial_response }}"
+        max_source_resolution: "{{ filters.max_source_resolution }}"
+        engine: "{{ filters.engine }}"
+        "replicaLabels[]": "{{ filters.replica_labels }}"
+        "storeMatch[]": "{{ filters.store_match }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression returning an instant vector", examples: ['topk(5, sum by (instance) (rate(node_cpu_seconds_total{mode!="idle"}[5m])))']}
+      - {column: dedup, type: BOOLEAN, description: "Deduplicate HA replicas"}
+      - {column: partial_response, type: BOOLEAN, description: "true = tolerate failing StoreAPIs (warning); false = fail"}
+      - {column: max_source_resolution, description: "auto | 0 | 5m | 1h"}
+      - {column: engine, description: "prometheus | thanos"}
+      - {column: replica_labels, ops: ["=", "in"], fan_out: false, description: "Replica label name(s) to deduplicate on (replicaLabels[])"}
+      - {column: store_match, ops: ["=", "in"], fan_out: false, description: "storeMatch[] selector on __address__ restricting which StoreAPIs answer"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: warnings, type: JSON, expr: "root.warnings or root.data.warnings", description: "Partial-response / store warnings"}
+      - {name: query, filter_only: true}
+      - {name: dedup, type: BOOLEAN, filter_only: true}
+      - {name: partial_response, type: BOOLEAN, filter_only: true}
+      - {name: max_source_resolution, filter_only: true}
+      - {name: engine, filter_only: true}
+      - {name: replica_labels, filter_only: true}
+      - {name: store_match, filter_only: true}
+    examples:
+      - sql: "SELECT labels->>'instance' AS instance, labels->>'cluster' AS cluster FROM thanos_query WHERE query = 'up == 0' AND partial_response = false"
+        description: Targets that are down across every cluster, failing if a store is unreachable.
+      - sql: "SELECT labels->>'replica' AS replica, value FROM thanos_query WHERE query = 'count by (replica) (up)' AND dedup = false"
+        description: Compare HA replicas (dedup off) to spot a replica that stopped scraping.
+      - sql: "SELECT labels->>'job' AS job, value FROM thanos_query WHERE query = 'count by (job) (up)' AND store_match = '{__address__=~\"prometheus-eu.*\"}'"
+        description: Ask only the EU Prometheus sidecars (storeMatch[]) to isolate one region's view.
+    tests:
+      - {sql: "SELECT value FROM thanos_query WHERE query = 'vector(1)'", min_rows: 1}
+    fixtures:
+      - file: query_vector.json
+        filters: {query: up}
+        expect_rows: 2
+        expect_columns: {value: 1.0, metric: up}
+        note: "Prometheus HTTP API docs instant-query example (Thanos Query API is Prometheus-compatible)."
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_series
+    description: Label sets of series matching a selector across all StoreAPIs (/api/v1/series). Cheap discovery before querying.
+    fixtures:
+      - file: series.json
+        filters: {match: up}
+        expect_rows: 3
+        expect_columns: {metric: up}
+        note: "Prometheus HTTP API docs series example (Thanos Query API is Prometheus-compatible)."
+    examples:
+      - sql: "SELECT DISTINCT labels->>'cluster' AS cluster, labels->>'job' AS job FROM thanos_series WHERE match = 'up'"
+        description: Which clusters and jobs report into Thanos.
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_label_values
+    description: Values of one label across all StoreAPIs (/api/v1/label/{name}/values) - confirm a value exists before filtering.
+    fixtures:
+      - file: label_values.json
+        filters: {label: code}
+        expect_rows: 2
+        expect_columns: {value: "200"}
+        note: "Prometheus HTTP API docs label-values example."
+    examples:
+      - sql: "SELECT value AS cluster FROM thanos_label_values WHERE label = 'cluster'"
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_metric_metadata
+    description: Type / help / unit per metric, fanned out to the Metadata API of sidecars (/api/v1/metadata).
+    fixtures:
+      - file: metadata.json
+        expect_rows: 3
+        expect_columns: {metric: cortex_ring_tokens, type: gauge}
+        note: "Prometheus HTTP API docs metadata example."
+    examples:
+      - sql: "SELECT metric, type, help FROM thanos_metric_metadata WHERE metric = 'http_requests_total'"
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_alerts
+    title: Active alerts (all rulers / Prometheus)
+    description: >-
+      Alerts pending or firing on every connected Rules API (Thanos Ruler and Prometheus sidecars), via
+      /api/v1/alerts on the querier. HA rulers may report the same alert once per replica.
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: my-alert, state: firing, value: 1.0}
+        note: "Prometheus HTTP API docs alerts example (Thanos serves the same shape via the Rules API)."
+    examples:
+      - sql: "SELECT alertname, state, active_at, labels->>'cluster' AS cluster FROM thanos_alerts WHERE state = 'firing' ORDER BY active_at"
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_rules
+    title: Alerting and recording rules (all rulers)
+    description: >-
+      Rules from every connected Rules API (Thanos Ruler, Prometheus sidecars) via /api/v1/rules, one row per
+      rule with PromQL, for-duration, health and last error. Push down rule_name / group_name / file / type.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/rules
+      query:
+        type: "{{ 'alert' if filters.type == 'alerting' else ('record' if filters.type == 'recording' else None) }}"
+        "rule_name[]": "{{ filters.rule_name }}"
+        "rule_group[]": "{{ filters.group_name }}"
+        "file[]": "{{ filters.file }}"
+    filters:
+      - {column: type, description: "alerting | recording (sent as type=alert|record)", examples: [alerting]}
+      - {column: rule_name, ops: ["=", "in"], fan_out: false, description: "Exact rule name(s)", examples: [HighRequestLatency]}
+      - {column: group_name, ops: ["=", "in"], fan_out: false, description: "Exact rule group name(s)"}
+      - {column: file, ops: ["=", "in"], fan_out: false, description: "Rule file path(s)"}
+    response:
+      rows_path: "$.data.groups[*]"
+      expand:
+        - {explode: rules, as: r}
+    columns:
+      - {name: group_name, path: name}
+      - {name: file, path: file}
+      - {name: rule_name, path: "@r.name"}
+      - {name: type, path: "@r.type", description: "alerting | recording"}
+      - {name: query, path: "@r.query", description: "PromQL expression (threshold is part of it)"}
+      - {name: duration_s, type: DOUBLE, path: "@r.duration", description: "for: duration in seconds"}
+      - {name: state, path: "@r.state"}
+      - {name: health, path: "@r.health"}
+      - {name: last_error, path: "@r.lastError"}
+      - {name: last_evaluation, type: TIMESTAMP, path: "@r.lastEvaluation"}
+      - {name: severity, path: "@r.labels.severity"}
+      - {name: labels, type: JSON, path: "@r.labels"}
+      - {name: annotations, type: JSON, path: "@r.annotations"}
+      - {name: active_alerts, type: JSON, path: "@r.alerts"}
+    pitfalls:
+      - "The querier's rules endpoint always uses the --rule.partial-response default: a ruler that does not answer just disappears from the list."
+    examples:
+      - sql: "SELECT rule_name, query, duration_s, state, health FROM thanos_rules WHERE rule_name = 'HighRequestLatency'"
+        description: Look up the alert rule that fired.
+    fixtures:
+      - file: rules.json
+        expect_rows: 2
+        expect_columns: {rule_name: HighRequestLatency, type: alerting, duration_s: 600.0}
+        note: "Prometheus HTTP API docs rules example (Thanos serves the same shape via the Rules API)."
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_targets
+    description: Scrape targets of all Prometheus instances behind sidecars (Targets API via /api/v1/targets) with health and last error.
+    fixtures:
+      - file: targets.json
+        expect_rows: 1
+        expect_columns: {job: prometheus, health: up, instance: "127.0.0.1:9090"}
+        note: "Prometheus HTTP API docs targets example (Thanos Targets API returns the same shape)."
+    examples:
+      - sql: "SELECT job, instance, health, last_error FROM thanos_targets WHERE health <> 'up'"
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_labels
+    title: Label names
+    description: Label names across all StoreAPIs (/api/v1/labels), optionally scoped by a selector.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/labels
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: match, description: "Optional series selector", examples: ['http_requests_total']}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT label FROM thanos_labels WHERE match = 'http_requests_total'"
+    fixtures:
+      - file: labels.json
+        expect_rows: 21
+        expect_columns: {label: __name__}
+        note: "Prometheus HTTP API docs label-names example."
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_exemplars
+    title: Exemplars (metric -> trace links)
+    description: >-
+      Exemplars of series selected by a PromQL expression (/api/v1/query_exemplars, fanned out to the Exemplars
+      API of sidecars/receivers): one row per exemplar with trace_id. Jump from a spike to concrete traces.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/v1/query_exemplars
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression", examples: ['http_request_duration_seconds_bucket{service="checkout"}']}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.data[*]"
+      expand:
+        - {explode: exemplars, as: e}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@e.timestamp", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "@e.value"}
+      - {name: trace_id, expr: "e.labels.trace_id or e.labels.traceID or e.labels.traceId"}
+      - {name: metric, path: "seriesLabels.__name__"}
+      - {name: service, expr: "_.seriesLabels.service or _.seriesLabels.service_name or _.seriesLabels.job"}
+      - {name: labels, type: JSON, path: seriesLabels}
+      - {name: exemplar_labels, type: JSON, path: "@e.labels"}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Exemplars exist only where Prometheus/receive has exemplar storage enabled (--enable-feature=exemplar-storage) and only for recent data."
+    examples:
+      - sql: >-
+          SELECT ts, value, trace_id FROM thanos_exemplars
+          WHERE query = 'http_request_duration_seconds_bucket{service="checkout"}' ORDER BY value DESC LIMIT 10
+        description: Traces behind the slowest checkout requests.
+    fixtures:
+      - file: exemplars.json
+        filters: {query: test_exemplar_metric_total}
+        expect_rows: 3
+        expect_columns: {trace_id: EpTxMJ40fUus7aGY, value: 6.0, service: bar}
+        note: "Prometheus HTTP API docs exemplars example."
+    docs_url: https://thanos.io/tip/components/query.md/#query-api-overview
+
+  - name: thanos_stores
+    title: StoreAPI endpoints and their health
+    description: >-
+      Every StoreAPI endpoint the querier knows (sidecar, store, rule, receive, query) with last health check,
+      last error, external label sets and the time range it serves (/api/v1/stores). An endpoint with a
+      last_error, or a gap in [min_time, max_time] coverage, explains 'missing data' in an incident window.
+    kind: entities
+    request: {method: GET, path: /api/v1/stores}
+    response:
+      rows_path: "$.data"
+      expand:
+        - {entries: ".", as: c}
+        - {explode: "@c.value", as: s}
+    columns:
+      - {name: component, path: "@c.key", description: "sidecar | store | rule | receive | query | ..."}
+      - {name: name, path: "@s.name", description: "Endpoint address"}
+      - {name: last_check, type: TIMESTAMP, path: "@s.lastCheck"}
+      - {name: last_error, path: "@s.lastError", description: "null when healthy"}
+      - {name: label_sets, type: JSON, path: "@s.labelSets", description: "External labels this endpoint serves"}
+      - {name: min_time, type: TIMESTAMP, expr: "s.minTime if (s.minTime is number and s.minTime > 0 and s.minTime < 4102444800000) else None", transform: epoch_ms, description: "Oldest data served (null = unbounded)"}
+      - {name: max_time, type: TIMESTAMP, expr: "s.maxTime if (s.maxTime is number and s.maxTime > 0 and s.maxTime < 4102444800000) else None", transform: epoch_ms, description: "Newest data served (null = open-ended, i.e. up to now)"}
+    pitfalls:
+      - "This endpoint backs the Thanos UI 'Stores' page and is not part of the Prometheus API; it is undocumented in the API reference and may change between releases."
+    examples:
+      - sql: "SELECT component, name, last_error, last_check FROM thanos_stores WHERE last_error IS NOT NULL"
+        description: StoreAPIs that are failing (likely cause of partial results).
+      - sql: "SELECT component, name, min_time, label_sets FROM thanos_stores WHERE component = 'store' ORDER BY min_time"
+        description: How far back the store gateways serve data.
+    fixtures:
+      - file: stores.json
+        expect_rows: 2
+        expect_columns: {component: sidecar, name: "prometheus-0.thanos-sidecar:10901", last_error: null, min_time: "2026-10-01T00:00:00Z"}
+        note: "Built strictly from the EndpointStatus JSON schema in thanos pkg/query/endpointset.go (map of component type -> endpoint status list); the docs give no example."
+    docs_url: https://thanos.io/tip/components/query.md/#store-filtering
+  - name: thanos_tsdb_status
+    title: TSDB cardinality stats (all StoreAPIs)
+    description: >-
+      Head-block cardinality statistics merged across the Status API of connected receivers / sidecars
+      (/api/v1/status/tsdb, Prometheus TSDB-stats format): top metric names and label=value pairs by series count,
+      label value counts and memory per label name, plus head totals. One row per (stat, name). Optional match
+      (Thanos-only superset of the Prometheus API) restricts the analysed series. Use it for cardinality
+      explosions behind slow queries or receive/ingest limits.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/status/tsdb
+      query:
+        limit: "{{ [limit or 10, 10000] | min }}"
+        "match[]": "{{ filters.match }}"
+    filters:
+      - {column: match, ops: ["=", "in"], fan_out: false, description: "Optional series selector(s) restricting the stats (Thanos extension)", examples: ['{namespace="checkout"}']}
+    response:
+      rows_path: "$.data"
+      expand:
+        - {entries: ".", as: e}
+        - {explode: "@e.value", as: s}
+    columns:
+      - {name: stat, path: "@e.key", description: "headStats | seriesCountByMetricName | labelValueCountByLabelName | memoryInBytesByLabelName | seriesCountByLabelValuePair"}
+      - {name: name, expr: "s.name if (s is mapping and s.name is defined) else e.key", description: "Metric / label / label=value (headStats: the stat name)"}
+      - {name: value, type: DOUBLE, expr: "s.value if (s is mapping and s.value is defined) else (s.numSeries if s is mapping else None)", description: "Series count, label value count or bytes per stat; headStats: numSeries"}
+      - {name: head_stats, type: JSON, expr: "s if e.key == 'headStats' else None", description: "headStats object (numSeries, chunkCount, minTime, maxTime in ms)"}
+      - {name: match, filter_only: true}
+    pitfalls:
+      - "Only head (in-memory, ~last 2h) blocks of receivers / sidecar Prometheus are counted; store-gateway blocks are not. Stats from several tenants or replicas are summed."
+      - "Not documented on thanos.io (served by pkg/api/query/v1.go since the Status API was added); older queriers return 404."
+    examples:
+      - sql: "SELECT name AS metric, value AS series FROM thanos_tsdb_status WHERE stat = 'seriesCountByMetricName' ORDER BY value DESC LIMIT 10"
+        description: Metrics with the most head series right now.
+      - sql: "SELECT name AS pair, value AS series FROM thanos_tsdb_status WHERE stat = 'seriesCountByLabelValuePair' AND match = '{namespace=\"checkout\"}' ORDER BY value DESC"
+        description: Which label=value pairs dominate a namespace's series.
+    fixtures:
+      - file: tsdb_status.json
+        expect_rows: 9
+        expect_columns: {stat: headStats, name: headStats, value: 508.0}
+        note: "Prometheus HTTP API docs 'TSDB Stats' example response (Thanos returns the Prometheus v1.TSDBStatus struct, see convertToTSDBSTatus in pkg/api/query/v1.go); a trailing comma in the doc JSON was fixed."
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#tsdb-stats
+roles:
+  metrics: {table: thanos_query_range, query_language: promql}
+  active_alerts:
+    table: thanos_alerts
+    columns: {name: alertname, state: state, ts: active_at, labels: labels, severity: severity}
+  alert_rules:
+    table: thanos_rules
+    columns: {name: rule_name, query: query, state: state, severity: severity}
+  hosts:
+    table: thanos_targets
+    columns: {host: instance, health: health}

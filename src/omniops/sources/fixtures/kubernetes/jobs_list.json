@@ -1,0 +1,107 @@
+{
+ "kind": "JobList",
+ "apiVersion": "batch/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "catalog-maintenance",
+    "namespace": "batch",
+    "uid": "7c3d4e5f-0000-4000-8000-000000000007",
+    "creationTimestamp": "2026-10-01T11:40:05Z",
+    "labels": {
+     "app": "catalog-maintenance"
+    }
+   },
+   "spec": {
+    "parallelism": 1,
+    "completions": 1,
+    "backoffLimit": 0,
+    "completionMode": "NonIndexed",
+    "suspend": false,
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "catalog-maintenance"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "main",
+        "image": "fixture.local/catalog-maintenance:v1"
+       }
+      ],
+      "restartPolicy": "Never"
+     }
+    }
+   },
+   "status": {
+    "startTime": "2026-10-01T11:40:05Z",
+    "active": 1,
+    "ready": 1,
+    "terminating": 0,
+    "uncountedTerminatedPods": {}
+   }
+  },
+  {
+   "metadata": {
+    "name": "credential-rotator",
+    "namespace": "batch",
+    "uid": "8d4e5f60-0000-4000-8000-000000000008",
+    "creationTimestamp": "2026-10-01T10:15:00Z",
+    "labels": {
+     "app": "credential-rotator"
+    }
+   },
+   "spec": {
+    "parallelism": 1,
+    "completions": 1,
+    "backoffLimit": 1,
+    "completionMode": "NonIndexed",
+    "suspend": false,
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "credential-rotator"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "main",
+        "image": "fixture.local/credential-rotator:v1"
+       }
+      ],
+      "restartPolicy": "Never"
+     }
+    }
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "SuccessCriteriaMet",
+      "status": "True",
+      "lastProbeTime": "2026-10-01T10:15:09Z",
+      "lastTransitionTime": "2026-10-01T10:15:09Z"
+     },
+     {
+      "type": "Complete",
+      "status": "True",
+      "lastProbeTime": "2026-10-01T10:15:09Z",
+      "lastTransitionTime": "2026-10-01T10:15:09Z"
+     }
+    ],
+    "startTime": "2026-10-01T10:15:00Z",
+    "completionTime": "2026-10-01T10:15:09Z",
+    "succeeded": 1,
+    "terminating": 0,
+    "ready": 0,
+    "uncountedTerminatedPods": {}
+   }
+  }
+ ]
+}

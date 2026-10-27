@@ -1,0 +1,1707 @@
+# Grafana HTTP API (OSS / Enterprise / Grafana Cloud). One manifest for everything Grafana itself
+# stores or brokers: folders, dashboards (search, panels, variables, annotation queries, versions,
+# one version's JSON, library panels, save), data sources (list, get, health), the unified
+# data-source query endpoint (/api/ds/query: any data source by uid, returns data frames),
+# annotations and their tags (deploy markers), and Grafana-managed alerting (provisioning rules,
+# Prometheus-compatible rule/alert status, Grafana Alertmanager alerts and silences, state history,
+# contact points, notification policies, mute timings).
+#
+# Prometheus / Loki / Tempo through Grafana's data-source proxy are separate sources
+# (grafana_prometheus.yaml here; grafana_loki.yaml and grafana_tempo.yaml); /api/ds/query below
+# reaches any backend data source ad hoc.
+#
+# Research notes, endpoint table and doc links: docs/sources/grafana.md
+# Legacy /api routes are deprecated from Grafana 13 but "not being disabled" (apis-migration doc);
+# they work on Grafana 9-13 and Grafana Cloud, which is why this manifest uses them.
+source: grafana
+display_name: Grafana
+vendor: Grafana Labs
+description: >-
+  Grafana HTTP API: dashboards and their panel queries, data sources, unified /api/ds/query over
+  any data source (Prometheus, Loki, Tempo, SQL...), annotations, and Grafana-managed alerting.
+docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/
+categories: [dashboards, alerts, events, logs, metrics, changes]
+base_url: "{{ env.GRAFANA_URL.rstrip('/') }}"
+ui_base_url: "{{ env.GRAFANA_URL.rstrip('/') }}"
+env:
+  - {name: GRAFANA_URL, description: "Grafana root URL incl. any sub-path, no trailing /api. o11y-bench: http://localhost:3000; Cloud: https://<stack>.grafana.net"}
+  - {name: GRAFANA_TOKEN, description: "Service account token (glsa_...). Optional only when anonymous access is enabled (o11y-bench runs anonymous Admin)", secret: true}
+  - {name: GRAFANA_USERNAME, description: "Basic-auth user (self-hosted only; used when GRAFANA_TOKEN is unset)"}
+  - {name: GRAFANA_PASSWORD, description: "Basic-auth password", secret: true}
+  - {name: GRAFANA_ORG_ID, description: "Optional X-Grafana-Org-Id header (multi-org self-hosted)"}
+required_env: [GRAFANA_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: "{{ ('Bearer ' ~ env.GRAFANA_TOKEN) if env.GRAFANA_TOKEN else (('Basic ' ~ ((env.GRAFANA_USERNAME ~ ':' ~ (env.GRAFANA_PASSWORD or '')) | b64)) if env.GRAFANA_USERNAME else None) }}"
+headers:
+  X-Grafana-Org-Id: "{{ env.GRAFANA_ORG_ID }}"
+rate_limit:
+  concurrency: 4
+  notes: >-
+    Grafana OSS documents no global HTTP API rate limit; /api/ds/query and the data-source proxy
+    load the underlying data source and are bounded by [dataproxy] timeout (default 30s).
+retention:
+  annotations: "kept forever unless [annotations.*] max_age / max_annotations_to_keep are set"
+  dashboard_versions: "20 versions per dashboard by default ([dashboards] versions_to_keep)"
+  alert_state_history: "depends on the state-history backend (Loki retention, or annotation max_age)"
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "Prometheus-compatible endpoint reported an error; fix the filter values, do not retry unchanged"}
+pitfalls:
+  - "Every list is scoped to what the token's role can see: a dashboard/folder/rule missing from results may be a permission gap, not absence. HTTP 403 = token scope problem."
+  - "url columns are paths relative to GRAFANA_URL (e.g. /d/<uid>/<slug>); prepend the Grafana base URL when linking."
+  - "If GRAFANA_URL is missing a reverse-proxy sub-path, some proxies answer 200 with the HTML login page: an empty result on a table that should never be empty (grafana_datasources, grafana_health) means the base URL is wrong."
+  - "Legacy /api routes are deprecated from Grafana 13 but still served; dashboards saved in the v2 schema (dynamic dashboards) may be rejected by /api/dashboards/uid and need /apis/dashboard.grafana.app."
+  - "Grafana-managed alert rule state comes from Grafana's own evaluator: rules live in grafana_alert_rules / grafana_alert_rule_status, NOT in Prometheus /api/v1/rules (grafana_prometheus_rules shows only Prometheus-side rules)."
+query_languages:
+  grafana_ds_query: >-
+    /api/ds/query sends one data-source-native query. Put PromQL/LogQL in expr, TraceQL or other
+    text queries in query (+ query_type, e.g. traceql), SQL in raw_sql (+ format='table'). Results
+    are data frames: ts = first time field, value = first number field, message = first string
+    field, labels = series labels (or Loki stream labels), fields = the whole frame row as JSON.
+
+tables:
+  # ------------------------------------------------------------------------------------------
+  # Dashboards
+  # ------------------------------------------------------------------------------------------
+  - name: grafana_search
+    title: Dashboard and folder search
+    description: >-
+      Search dashboards and folders visible to the token (GET /api/search). One row per hit.
+      Optional filters: query (case-insensitive title substring), tag, type ('dash-db' dashboards
+      | 'dash-folder' folders), folder_uid, uid, is_starred. Start here to find the dashboard(s)
+      for a service, then read panels with grafana_dashboard_panels WHERE dashboard_uid = uid.
+    kind: entities
+    request:
+      method: GET
+      path: /api/search
+      query:
+        query: "{{ filters.query }}"
+        tag: "{{ filters.tag }}"
+        type: "{{ filters.type }}"
+        folderUIDs: "{{ filters.folder_uid }}"
+        dashboardUIDs: "{{ filters.uid }}"
+        starred: "{{ filters.starred }}"
+    filters:
+      - {column: query, description: "Title substring (case-insensitive). Searching '' lists everything (paginated).", examples: ["service"]}
+      - {column: tag, ops: ["=", "in"], description: "Dashboard tag, exact. IN fans out one request per tag (OR semantics); de-duplicate on uid.", examples: ["prod"]}
+      - {column: type, description: "dash-db (dashboards) or dash-folder (folders)", examples: ["dash-db"]}
+      - {column: folder_uid, ops: ["=", "in"], description: "Only dashboards inside this folder uid", examples: ["000000163"]}
+      - {column: uid, ops: ["=", "in"], fan_out: false, description: "Dashboard uid(s); IN is sent as repeated dashboardUIDs in one request", examples: ["svc-overview"]}
+      - {column: is_starred, param: starred, type: BOOLEAN, description: "true = only dashboards starred by the token's user"}
+    pagination: {type: page, page_param: query.page, limit_param: query.limit, page_size: 1000, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid, description: "Dashboard or folder uid (use with grafana_dashboard*.dashboard_uid)"}
+      - {name: title}
+      - {name: type, description: "dash-db | dash-folder"}
+      - {name: url, description: "Path relative to GRAFANA_URL, e.g. /d/<uid>/<slug>"}
+      - {name: tags, type: JSON, path: tags, description: "Tag array; use list_contains(from_json(tags, '[\"VARCHAR\"]'), 'prod') or tags::VARCHAR LIKE '%prod%'"}
+      - {name: is_starred, type: BOOLEAN, path: isStarred}
+      - {name: folder_uid, path: folderUid, description: "Parent folder uid (null at root level)"}
+      - {name: folder_title, path: folderTitle}
+      - {name: folder_url, path: folderUrl}
+      - {name: id, type: BIGINT, path: id, description: "Deprecated numeric id; prefer uid"}
+      - {name: query, filter_only: true, description: "Title search text"}
+      - {name: tag, filter_only: true, description: "Tag that was searched for"}
+    max_rows: 5000
+    sort_hint: "Grafana sorts hits alphabetically by title (sort=alpha-asc default); folders and dashboards are mixed unless type is set."
+    pitfalls:
+      - "query is a title substring match, not full-text: panel titles, queries and tags are not searched. Search by tag or list everything (type='dash-db') when titles are unknown."
+      - "Default page size is 1000 (max 5000); the manifest pages with page=1..5."
+      - "Multiple tags in one request mean AND in Grafana; the manifest fans out IN lists so each tag is searched separately (OR)."
+    examples:
+      - sql: "SELECT uid, title, folder_title, url, tags FROM grafana_search WHERE type = 'dash-db' AND query = 'service' ORDER BY title"
+        description: Find dashboards whose title mentions 'service' (e.g. Service Overview) before inspecting their panels.
+      - sql: "SELECT uid, title FROM grafana_search WHERE type = 'dash-folder'"
+        description: List folders (needed as folder_uid when saving dashboards).
+    fixtures:
+      - file: search_root.json
+        expect_rows: 2
+        expect_columns: {uid: "000000163", title: Folder, type: dash-folder, url: /dashboards/f/000000163/folder, is_starred: false}
+        note: "Official docs example 'retrieving folders and dashboards at the root level' (Folder/Dashboard Search API). JS comments removed and tags:[prod] quoted to make it valid JSON."
+      - file: search_dashboards.json
+        filters: {query: "Production Overview", tag: prod}
+        expect_rows: 1
+        expect_columns: {uid: cIBgcSjkk, title: Production Overview, folder_uid: "000000163", folder_title: Folder, is_starred: true, tag: prod}
+        note: "Official docs example 'searching for dashboards' (Folder/Dashboard Search API); comments removed, tags quoted."
+    ui_link: "{{ source.base_url }}/dashboards?query={{ (filters.query or '') | urlencode }}"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/folder_dashboard_search/
+
+  - name: grafana_folders
+    title: Folders
+    description: >-
+      Dashboard/alert-rule folders (GET /api/folders, or GET /api/folders/:uid when uid is
+      filtered): uid, title, url, parent and permissions of the token. Folder uids are needed for
+      grafana_dashboard_write (folder_uid), and alert rules / rule status are grouped by folder.
+      With nested folders, the list shows one level: filter parent_uid to descend.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/folders{{ ('/' ~ filters.uid) if filters.uid else '' }}"
+      query:
+        parentUid: "{{ none if filters.uid else filters.parent_uid }}"
+    filters:
+      - {column: uid, ops: ["=", "in"], description: "Folder uid (switches to GET /api/folders/:uid, which also returns url, version, created/updated and parents)", examples: ["nErXDvCkzz"]}
+      - {column: parent_uid, description: "List the subfolders of this folder (nested folders); omit for the root level"}
+    pagination: {type: page, page_param: query.page, limit_param: query.limit, page_size: 1000, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid}
+      - {name: title}
+      - {name: id, type: BIGINT, path: id, description: "Deprecated numeric id"}
+      - {name: url, path: url, description: "Path relative to GRAFANA_URL (only on GET /api/folders/:uid)"}
+      - {name: parent_uid, path: parentUid, description: "Parent folder uid (nested folders)"}
+      - {name: parents, type: JSON, path: parents, description: "Full ancestry, root first (nested folders, by-uid only)"}
+      - {name: version, type: BIGINT, path: version}
+      - {name: created, type: TIMESTAMP, path: created, transform: auto_time}
+      - {name: updated, type: TIMESTAMP, path: updated, transform: auto_time}
+      - {name: created_by, path: createdBy}
+      - {name: updated_by, path: updatedBy}
+      - {name: can_save, type: BOOLEAN, path: canSave}
+      - {name: can_edit, type: BOOLEAN, path: canEdit}
+      - {name: can_admin, type: BOOLEAN, path: canAdmin}
+      - {name: has_acl, type: BOOLEAN, path: hasAcl}
+    sort_hint: "Alphabetical by title."
+    pitfalls:
+      - "The list endpoint returns only id, uid, title (and parentUid); url, version and timestamps need uid = '...'."
+      - "Without parent_uid only root-level folders are listed when nested folders are enabled; a folder missing from the list may be nested."
+      - "The General/root folder is not a real folder: dashboards at the root have an empty folder_uid."
+    examples:
+      - sql: "SELECT uid, title FROM grafana_folders ORDER BY title"
+        description: Folder uids for saving a dashboard into the right folder.
+      - sql: "SELECT uid, title, url, updated, updated_by FROM grafana_folders WHERE uid = 'nErXDvCkzz'"
+        description: One folder with its link and last change.
+    fixtures:
+      - file: folders.json
+        expect_rows: 2
+        expect_columns: {uid: nErXDvCkzz, title: Department ABC, id: 1, url: null}
+        note: "Official docs example for GET /api/folders (Folder API, v12.4 docs)."
+      - file: folder_by_uid.json
+        filters: {uid: nErXDvCkzz}
+        expect_rows: 1
+        expect_columns: {uid: nErXDvCkzz, url: /dashboards/f/nErXDvCkzz/department-abc, version: 1, can_save: true, updated_by: admin, created: "2018-01-31T17:43:12+01:00"}
+        note: "Official docs example for GET /api/folders/:uid (Folder API, v12.4 docs)."
+    ui_link: "{{ source.base_url }}/dashboards{{ ('/f/' ~ filters.uid) if filters.uid else '' }}"
+    docs_url: https://grafana.com/docs/grafana/v12.4/developers/http_api/folder/
+
+  - name: grafana_dashboard
+    title: Dashboard by uid (summary + full JSON)
+    description: >-
+      One row per dashboard (GET /api/dashboards/uid/:uid): title, version, folder, panel count,
+      data sources used, edit metadata and the complete dashboard JSON (dashboard_json) needed to
+      repair it with grafana_dashboard_write. uid is required (IN fans out, max 20).
+    kind: entities
+    request:
+      method: GET
+      path: "/api/dashboards/uid/{{ filters.uid }}"
+    filters:
+      - {column: uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid (from grafana_search)", examples: ["user-access-cache-review"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid, path: dashboard.uid}
+      - {name: title, path: dashboard.title}
+      - {name: version, type: BIGINT, path: dashboard.version, description: "Current version; send it back unchanged inside dashboard_json when saving (optimistic locking)"}
+      - {name: id, type: BIGINT, path: dashboard.id, description: "Deprecated numeric id"}
+      - {name: tags, type: JSON, path: dashboard.tags}
+      - {name: schema_version, type: BIGINT, path: dashboard.schemaVersion}
+      - {name: timezone, path: dashboard.timezone}
+      - {name: refresh, path: dashboard.refresh}
+      - {name: time_from, path: dashboard.time.from, description: "Default time range start, e.g. now-6h"}
+      - {name: time_to, path: dashboard.time.to}
+      - {name: panel_count, type: BIGINT, path: dashboard.panels, transform: length, description: "Top-level panels incl. row panels (collapsed-row children are not counted)"}
+      - {name: variable_names, expr: "(_.dashboard.templating.list or []) | map(attribute='name') | join(',')", description: "Template variable names, comma-separated"}
+      - {name: annotation_names, expr: "(_.dashboard.annotations.list or []) | map(attribute='name') | join(',')", description: "Annotation query names (incl. built-in 'Annotations & Alerts')"}
+      - {name: datasource_uids, expr: "(_.dashboard.panels or []) | map(attribute='datasource') | select('mapping') | map(attribute='uid') | select | unique | join(',')", description: "Distinct panel-level data source uids"}
+      - {name: folder_uid, path: meta.folderUid, description: "Folder uid; pass it as folder_uid when saving or the dashboard moves to the root folder"}
+      - {name: folder_title, path: meta.folderTitle}
+      - {name: folder_id, type: BIGINT, path: meta.folderId}
+      - {name: url, path: meta.url, description: "Path relative to GRAFANA_URL"}
+      - {name: slug, path: meta.slug}
+      - {name: is_starred, type: BOOLEAN, path: meta.isStarred}
+      - {name: created, type: TIMESTAMP, path: meta.created, transform: auto_time}
+      - {name: updated, type: TIMESTAMP, path: meta.updated, transform: auto_time, description: "Last save time"}
+      - {name: created_by, path: meta.createdBy}
+      - {name: updated_by, path: meta.updatedBy, description: "Who saved last (dashboard changes are change events)"}
+      - {name: provisioned, type: BOOLEAN, path: meta.provisioned, description: "Provisioned from files: API saves may be overwritten on restart"}
+      - {name: can_save, type: BOOLEAN, path: meta.canSave}
+      - {name: dashboard_json, type: JSON, path: dashboard, description: "Complete dashboard model; edit this and pass it to grafana_dashboard_write"}
+    pitfalls:
+      - "meta fields beyond isStarred/url/folderUid/slug (created, updated, updatedBy, provisioned, canSave) are returned by current Grafana versions but not shown in the docs example; they may be null on old versions."
+      - "Panels inside a collapsed row live in that row panel's own panels array; use grafana_dashboard_panels, which flattens them."
+    examples:
+      - sql: "SELECT uid, title, version, folder_uid, panel_count, datasource_uids, updated, updated_by FROM grafana_dashboard WHERE uid = 'user-access-cache-review'"
+        description: Inspect a dashboard and who changed it last before repairing it.
+      - sql: "SELECT dashboard_json FROM grafana_dashboard WHERE uid = 'svc-annotate'"
+        description: Fetch the full JSON to edit and save back through grafana_dashboard_write.
+    fixtures:
+      - file: dashboard_by_uid.json
+        filters: {uid: cIBgcSjkk}
+        expect_rows: 1
+        expect_columns: {uid: cIBgcSjkk, title: Production Overview, version: 0, folder_uid: l3KqBxCMz, url: /d/cIBgcSjkk/production-overview, panel_count: null}
+        note: "Official docs example for GET /api/dashboards/uid/:uid (Dashboard API, legacy section, v12.4 docs); the '//deprecated' comment removed."
+      - file: dashboard_cache_review.json
+        filters: {uid: user-access-cache-review}
+        expect_rows: 1
+        expect_columns: {uid: user-access-cache-review, title: User Access Cache Review, panel_count: 3, datasource_uids: "prometheus,loki", annotation_names: Deployments}
+        note: "Documented GET envelope {dashboard, meta} wrapping the o11y-bench task dashboard 'dashboard-repair-cache-review' exactly as o11y_stack.provision_task_resources.build_dashboard POSTs it."
+    ui_link: "{{ source.base_url }}/d/{{ filters.uid }}"
+    docs_url: https://grafana.com/docs/grafana/v12.4/developers/http_api/dashboard/#get-dashboard-by-uid
+
+  - name: grafana_dashboard_panels
+    title: Dashboard panels and their queries
+    description: >-
+      One row per (panel, query target) of a dashboard (GET /api/dashboards/uid/:uid, panels
+      flattened): panel title/type/data source and each target's refId, expr (PromQL/LogQL), query
+      (TraceQL etc.) and legend. Children of collapsed rows are included (parent_row is set).
+      Panels without targets (text, row) appear once with null ref_id. dashboard_uid is required.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/dashboards/uid/{{ filters.dashboard_uid }}"
+    filters:
+      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["svc-overview"]}
+    response:
+      rows_path: "$.dashboard.panels[*]"
+      expand:
+        - {explode: panels, as: c, keep_empty: true}
+        - {explode: "@c.targets", as: ct, keep_empty: true}
+        - {explode: targets, as: t, keep_empty: true}
+    columns:
+      - {name: dashboard_uid, path: "$.dashboard.uid"}
+      - {name: dashboard_title, path: "$.dashboard.title"}
+      - {name: dashboard_version, type: BIGINT, path: "$.dashboard.version"}
+      - {name: panel_id, type: BIGINT, expr: "(c if c else _).id"}
+      - {name: panel_title, expr: "(c if c else _).title"}
+      - {name: panel_type, expr: "(c if c else _).type", description: "timeseries, stat, logs, table, row, text, traces..."}
+      - {name: panel_description, expr: "(c if c else _).description"}
+      - {name: parent_row, expr: "_.title if c else none", description: "Title of the collapsed row containing this panel"}
+      - {name: panel_datasource_uid, expr: "(c if c else _).datasource.uid if (c if c else _).datasource is mapping else none"}
+      - {name: panel_datasource_type, expr: "(c if c else _).datasource.type if (c if c else _).datasource is mapping else none"}
+      - {name: panel_datasource, type: JSON, expr: "(c if c else _).datasource", description: "Raw datasource ref: {type, uid} object, a legacy name string, or a ${variable}"}
+      - {name: ref_id, expr: "(ct if c else t).refId"}
+      - {name: expr, expr: "(ct if c else t).expr", description: "PromQL / LogQL of the target (may contain $variables / $__range)"}
+      - {name: query, expr: "(ct if c else t).query", description: "Text query for data sources that use 'query' (Tempo TraceQL, Elasticsearch, ...)"}
+      - {name: legend_format, expr: "(ct if c else t).legendFormat"}
+      - {name: hide, type: BOOLEAN, expr: "(ct if c else t).hide"}
+      - {name: datasource_uid, expr: "((ct if c else t).datasource.uid if (ct if c else t).datasource is mapping else none) or ((c if c else _).datasource.uid if (c if c else _).datasource is mapping else none)", description: "Effective data source uid (target overrides panel; '-- Mixed --' panels set it per target)"}
+      - {name: datasource_type, expr: "((ct if c else t).datasource.type if (ct if c else t).datasource is mapping else none) or ((c if c else _).datasource.type if (c if c else _).datasource is mapping else none)"}
+      - {name: library_panel_uid, expr: "(c if c else _).libraryPanel.uid", description: "Set for library panels (their targets are not stored in the dashboard)"}
+      - {name: grid_pos, type: JSON, expr: "(c if c else _).gridPos"}
+      - {name: target, type: JSON, expr: "ct if c else t", description: "Full target object"}
+      - {name: panel_json, type: JSON, expr: "c if c else _", description: "Full panel object (for repairs)"}
+    pitfalls:
+      - "expr may reference dashboard variables ($service, ${service:regex}, $__range, $__rate_interval); substitute them before running the query through grafana_ds_query or grafana_prometheus_query_range."
+      - "Library panels store their queries in the library element, not the dashboard: library_panel_uid is set and target is null."
+      - "Old dashboards reference data sources by name (panel_datasource is a string) or via ${DS_...} variables; datasource_uid is null then."
+      - "Rows of an expanded (not collapsed) row are siblings in the panel list, so parent_row is only known for collapsed rows."
+    examples:
+      - sql: "SELECT panel_title, panel_type, datasource_type, ref_id, expr FROM grafana_dashboard_panels WHERE dashboard_uid = 'svc-overview' ORDER BY panel_id, ref_id"
+        description: What does each panel of the Service Overview dashboard query?
+      - sql: "SELECT dashboard_uid, panel_title FROM grafana_dashboard_panels WHERE dashboard_uid IN ('svc-overview', 'user-access-cache-review') AND expr LIKE '%service_cache_refresh_lag_seconds%'"
+        description: Which panels already chart the cache-lag metric?
+    fixtures:
+      - file: dashboard_cache_review.json
+        filters: {dashboard_uid: user-access-cache-review}
+        expect_rows: 3
+        expect_columns: {panel_id: 1, panel_title: User P95 Latency, panel_type: timeseries, ref_id: A, datasource_uid: prometheus, expr: "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"user-service\"}[5m])) by (le))"}
+        note: "Documented GET envelope wrapping the o11y-bench task dashboard 'dashboard-repair-cache-review' as provisioned by o11y_stack.provision_task_resources."
+      - file: dashboard_docs_model.json
+        filters: {dashboard_uid: gdxccn}
+        expect_rows: 1
+        expect_columns: {panel_title: Example panel, panel_type: timeseries, ref_id: A, datasource_uid: grafana, panel_datasource_type: datasource, panel_description: With a description}
+        note: "Dashboard JSON = 'spec' of the official Create Dashboard example (Dashboard API docs, latest; fieldConfig.defaults.custom omitted, uid copied from metadata.name) inside the documented legacy GET envelope."
+      - file: dashboard_collapsed_row.json
+        filters: {dashboard_uid: svc-rows}
+        expect_rows: 4
+        expect_columns: {panel_title: Overview, panel_type: row, ref_id: null}
+        note: "Built strictly from the dashboard schema (grafana kinds/dashboard/dashboard_kind.cue #RowPanel: type row, collapsed, panels[]) to test collapsed-row flattening: rows Overview, Request Rate A, Request Rate B, Error Logs (parent_row Logs)."
+    ui_link: "{{ source.base_url }}/d/{{ filters.dashboard_uid }}"
+    docs_url: https://grafana.com/docs/grafana/v12.4/developers/http_api/dashboard/#get-dashboard-by-uid
+
+  - name: grafana_dashboard_variables
+    title: Dashboard template variables
+    description: >-
+      One row per template variable of a dashboard (dashboard.templating.list): name, type,
+      query, data source, multi / include-all flags and current selection. Use it to audit
+      dropdowns (e.g. does the dashboard have a multi-select 'service' variable with All?).
+    kind: entities
+    request:
+      method: GET
+      path: "/api/dashboards/uid/{{ filters.dashboard_uid }}"
+    filters:
+      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["service-overview-variable-audit"]}
+    response:
+      rows_path: "$.dashboard.templating.list[*]"
+    columns:
+      - {name: dashboard_uid, path: "$.dashboard.uid"}
+      - {name: dashboard_title, path: "$.dashboard.title"}
+      - {name: name, path: name}
+      - {name: label, path: label}
+      - {name: type, path: type, description: "query, custom, interval, datasource, constant, textbox, adhoc"}
+      - {name: query, expr: "_.query.query if _.query is mapping else _.query", description: "Variable query text (object form {query, refId} is unwrapped)"}
+      - {name: definition, path: definition}
+      - {name: datasource_uid, expr: "_.datasource.uid if _.datasource is mapping else none"}
+      - {name: datasource_type, expr: "_.datasource.type if _.datasource is mapping else none"}
+      - {name: multi, type: BOOLEAN, path: multi}
+      - {name: include_all, type: BOOLEAN, path: includeAll}
+      - {name: all_value, path: allValue}
+      - {name: current_text, path: current.text, description: "Saved selection text (JSON array text when multi)"}
+      - {name: current_value, path: current.value}
+      - {name: regex, path: regex}
+      - {name: refresh, type: BIGINT, path: refresh, description: "0 never, 1 on dashboard load, 2 on time range change (legacy false = 0)"}
+      - {name: hide, type: BIGINT, path: hide}
+      - {name: options_count, type: BIGINT, path: options, transform: length}
+      - {name: options, type: JSON, path: options}
+      - {name: variable_json, type: JSON, path: "."}
+    pitfalls:
+      - "multi / includeAll are omitted (null) when false in many saved dashboards; treat null as false."
+      - "Panels use a variable when their expr contains $name or ${name...}: join with grafana_dashboard_panels on expr LIKE '%$' || name || '%' OR expr LIKE '%${' || name || '%'."
+    examples:
+      - sql: "SELECT name, type, query, multi, include_all, datasource_uid FROM grafana_dashboard_variables WHERE dashboard_uid = 'service-overview-variable-audit'"
+        description: Does the dashboard have a multi-select service dropdown with All?
+    fixtures:
+      - file: dashboard_variable_audit.json
+        filters: {dashboard_uid: service-overview-variable-audit}
+        expect_rows: 1
+        expect_columns: {name: service, type: query, query: "label_values(http_requests_total, job)", multi: true, include_all: true, datasource_uid: prometheus}
+        note: "Documented GET envelope wrapping the o11y-bench task dashboard 'audit-service-overview-variable' as provisioned by o11y_stack.provision_task_resources."
+      - file: dashboard_templating.json
+        filters: {dashboard_uid: cLV5GDCkz}
+        expect_rows: 2
+        expect_columns: {name: env, type: query, include_all: true, current_value: prod, query: "tag_values(cpu.utilization.average,env)", options_count: 3}
+        note: "Official 'Dashboard JSON model' docs: classic model example with the documented templating example, inside the documented GET envelope."
+    ui_link: "{{ source.base_url }}/d/{{ filters.dashboard_uid }}"
+    docs_url: https://grafana.com/docs/grafana/latest/visualizations/dashboards/build-dashboards/view-dashboard-json-model/#templating
+
+  - name: grafana_dashboard_annotation_queries
+    title: Dashboard annotation queries
+    description: >-
+      One row per annotation query configured on a dashboard (dashboard.annotations.list): name,
+      enabled, data source and query (e.g. a Loki deployment-marker query). This is the
+      configuration of the markers; the stored annotation events themselves are grafana_annotations.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/dashboards/uid/{{ filters.dashboard_uid }}"
+    filters:
+      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["svc-annotate"]}
+    response:
+      rows_path: "$.dashboard.annotations.list[*]"
+    columns:
+      - {name: dashboard_uid, path: "$.dashboard.uid"}
+      - {name: name, path: name}
+      - {name: enable, type: BOOLEAN, path: enable}
+      - {name: hide, type: BOOLEAN, path: hide}
+      - {name: built_in, type: BIGINT, path: builtIn, description: "1 = the default 'Annotations & Alerts' query"}
+      - {name: icon_color, path: iconColor}
+      - {name: datasource_uid, expr: "_.datasource.uid if _.datasource is mapping else none"}
+      - {name: datasource_type, expr: "_.datasource.type if _.datasource is mapping else none"}
+      - {name: expr, expr: "_.expr or (_.target.expr if _.target is mapping else none)", description: "Query of Loki/Prometheus annotation queries (top-level or in target)"}
+      - {name: title_format, path: titleFormat}
+      - {name: text_format, path: textFormat}
+      - {name: tag_keys, path: tagKeys}
+      - {name: target, type: JSON, path: target}
+      - {name: annotation_json, type: JSON, path: "."}
+    examples:
+      - sql: "SELECT name, enable, datasource_type, expr, title_format FROM grafana_dashboard_annotation_queries WHERE dashboard_uid = 'user-access-cache-review'"
+        description: Which deployment markers does the dashboard show, and from which service?
+    fixtures:
+      - file: dashboard_cache_review.json
+        filters: {dashboard_uid: user-access-cache-review}
+        expect_rows: 1
+        expect_columns: {name: Deployments, enable: true, datasource_uid: loki, expr: "{job=\"payment-service\"} | json | event=\"deployment\"", title_format: "{{ service }} {{ version }}"}
+        note: "Documented GET envelope wrapping the o11y-bench task dashboard 'dashboard-repair-cache-review'."
+      - file: dashboard_docs_model.json
+        filters: {dashboard_uid: gdxccn}
+        expect_rows: 1
+        expect_columns: {name: Example annotation, enable: true, datasource_uid: grafana, icon_color: red}
+        note: "annotations.list of the official Create Dashboard example (Dashboard API docs) inside the documented legacy GET envelope."
+    ui_link: "{{ source.base_url }}/d/{{ filters.dashboard_uid }}"
+    docs_url: https://grafana.com/docs/grafana/latest/visualizations/dashboards/build-dashboards/annotate-visualizations/
+
+  - name: grafana_dashboard_versions
+    title: Dashboard version history
+    description: >-
+      Saved versions of one dashboard (GET /api/dashboards/uid/:uid/versions): who saved which
+      version when, with the commit message. A dashboard edited shortly before an incident is a
+      change event; dashboard_uid is required.
+    kind: changes
+    request:
+      method: GET
+      path: "/api/dashboards/uid/{{ filters.dashboard_uid }}/versions"
+      query:
+        limit: "{{ limit or 100 }}"
+    filters:
+      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Dashboard uid", examples: ["svc-overview"]}
+    response:
+      # Grafana 12+ returns {continueToken, versions: [...]}; Grafana <= 11 returns a bare array.
+      # rows_path "$" + keep_empty explode handles both: v is the version on 12+, _ on <= 11.
+      rows_path: "$"
+      expand:
+        - {explode: versions, as: v, keep_empty: true}
+    columns:
+      - {name: dashboard_uid, expr: "(v if v else _).uid"}
+      - {name: version, type: BIGINT, expr: "(v if v else _).version"}
+      - {name: ts, type: TIMESTAMP, expr: "(v if v else _).created", transform: auto_time, description: "When this version was saved"}
+      - {name: author, expr: "(v if v else _).createdBy"}
+      - {name: message, expr: "(v if v else _).message"}
+      - {name: parent_version, type: BIGINT, expr: "(v if v else _).parentVersion"}
+      - {name: restored_from, type: BIGINT, expr: "(v if v else _).restoredFrom"}
+      - {name: id, type: BIGINT, expr: "(v if v else _).id"}
+      - {name: dashboard_id, type: BIGINT, expr: "(v if v else _).dashboardId"}
+    sort_hint: "Newest version first."
+    pitfalls:
+      - "Only [dashboards] versions_to_keep versions (default 20) are retained."
+      - "Response shape changed in Grafana 12 (object with continueToken) vs <= 11 (bare array); both are handled."
+    examples:
+      - sql: "SELECT version, ts, author, message FROM grafana_dashboard_versions WHERE dashboard_uid = 'svc-overview' ORDER BY version DESC LIMIT 5"
+        description: Recent edits of a dashboard (did someone change the panel queries before the incident?).
+    fixtures:
+      - file: dashboard_versions.json
+        filters: {dashboard_uid: QA7wKklGz}
+        expect_rows: 2
+        expect_columns: {dashboard_uid: QA7wKklGz, version: 2, author: admin, message: Updated panel title, ts: "2017-06-08T17:24:33-04:00"}
+        note: "Official docs example for GET /api/dashboards/uid/:uid/versions (Dashboard Versions API, legacy; Grafana 12+ shape)."
+      - file: dashboard_versions_v11.json
+        filters: {dashboard_uid: QA7wKklGz}
+        expect_rows: 2
+        expect_columns: {dashboard_uid: QA7wKklGz, version: 2, parent_version: 1, author: admin}
+        note: "Official docs example for the same endpoint in the Grafana v11.6 docs (bare array shape)."
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/dashboard_versions/
+
+  - name: grafana_dashboard_version
+    title: One saved dashboard version (full JSON)
+    description: >-
+      The complete dashboard JSON as saved in one version (GET
+      /api/dashboards/uid/:uid/versions/:version). Compare it with grafana_dashboard.dashboard_json
+      (current) to see exactly what an edit changed, or to restore panels when repairing a
+      dashboard. dashboard_uid and version (numbers from grafana_dashboard_versions) are required.
+    kind: changes
+    request:
+      method: GET
+      path: "/api/dashboards/uid/{{ filters.dashboard_uid }}/versions/{{ filters.version }}"
+    filters:
+      - {column: dashboard_uid, required: true, description: "Dashboard uid", examples: ["QA7wKklGz"]}
+      - {column: version, type: BIGINT, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Version number (grafana_dashboard_versions.version); IN fetches several", examples: ["1"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: dashboard_uid, path: uid}
+      - {name: version, type: BIGINT, path: version}
+      - {name: ts, type: TIMESTAMP, path: created, transform: auto_time, description: "When this version was saved"}
+      - {name: author, path: createdBy}
+      - {name: message, path: message, description: "Commit message of the save"}
+      - {name: parent_version, type: BIGINT, path: parentVersion}
+      - {name: restored_from, type: BIGINT, path: restoredFrom}
+      - {name: title, path: data.title}
+      - {name: panel_count, type: BIGINT, path: data.panels, transform: length, description: "Top-level panels (null for pre-5.0 dashboards that use rows)"}
+      - {name: panel_titles, expr: "(_.data.panels or []) | map(attribute='title') | select | join(' | ')", description: "Top-level panel titles"}
+      - {name: variable_names, expr: "((_.data.templating or {}).list or []) | map(attribute='name') | join(',')"}
+      - {name: dashboard_json, type: JSON, path: data, description: "The dashboard model of this version"}
+      - {name: id, type: BIGINT, path: id}
+    pitfalls:
+      - "The path parameter is the version NUMBER on current Grafana (docs: :version); very old Grafana (< 9) used the version row id instead."
+      - "Only the last [dashboards] versions_to_keep versions (default 20) exist; older numbers return 404."
+      - "Restoring an old version is a write: take dashboard_json from here, set version to the CURRENT version (grafana_dashboard.version) and save with grafana_dashboard_write."
+    examples:
+      - sql: "SELECT version, ts, author, message, panel_titles FROM grafana_dashboard_version WHERE dashboard_uid = 'svc-overview' AND version IN (6, 7)"
+        description: Compare two versions around a suspicious dashboard edit.
+      - sql: "SELECT dashboard_json FROM grafana_dashboard_version WHERE dashboard_uid = 'user-access-cache-review' AND version = 1"
+        description: The originally saved JSON, to restore broken panels during a repair.
+    fixtures:
+      - file: dashboard_version.json
+        filters: {dashboard_uid: QA7wKklGz, version: 1}
+        expect_rows: 1
+        expect_columns: {dashboard_uid: QA7wKklGz, version: 1, author: admin, message: Initial save, title: test, panel_count: null, ts: "2017-04-26T17:18:38-04:00", parent_version: 0}
+        note: "Official docs example for GET /api/dashboards/uid/:uid/versions/:version (Dashboard Versions API, legacy); blank lines inside empty arrays removed."
+    ui_link: "{{ source.base_url }}/d/{{ filters.dashboard_uid }}?orgId={{ env.GRAFANA_ORG_ID or 1 }}&editview=versions"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/dashboard_versions/#get-dashboard-version
+
+  - name: grafana_library_panels
+    title: Library panels and their queries
+    description: >-
+      Library panels (GET /api/library-elements?kind=1) flattened to one row per (panel, query
+      target): uid, name, type, folder, how many dashboards use it, and each target's refId / expr
+      / data source. Dashboards that embed a library panel only store its uid
+      (grafana_dashboard_panels.library_panel_uid), so its queries are read here. Optional
+      pushdown: search (name/description substring), folder_uid; uid is filtered in SQL.
+    kind: entities
+    request:
+      method: GET
+      path: /api/library-elements
+      query:
+        kind: 1
+        searchString: "{{ filters.search }}"
+        folderFilterUIDs: "{{ filters.folder_uid }}"
+        sortDirection: alpha-asc
+    filters:
+      - {column: search, description: "Substring of the panel name or description", examples: ["5xx"]}
+      - {column: folder_uid, description: "Only library panels stored in this folder uid"}
+    pagination: {type: page, page_param: query.page, limit_param: query.perPage, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$.result.elements[*]"
+      expand:
+        - {explode: model.targets, as: t, keep_empty: true}
+    columns:
+      - {name: uid, description: "Library panel uid (= grafana_dashboard_panels.library_panel_uid)"}
+      - {name: name}
+      - {name: panel_type, path: type, description: "timeseries, stat, text, logs..."}
+      - {name: description}
+      - {name: version, type: BIGINT, path: version}
+      - {name: folder_uid, expr: "(_.meta.folderUid if _.meta else none) or _.folderUid"}
+      - {name: folder_title, path: meta.folderName}
+      - {name: connected_dashboards, type: BIGINT, path: meta.connectedDashboards, description: "How many dashboards embed this panel (a change affects all of them)"}
+      - {name: updated, type: TIMESTAMP, path: meta.updated, transform: auto_time}
+      - {name: updated_by, path: meta.updatedBy.name}
+      - {name: panel_datasource_uid, expr: "_.model.datasource.uid if _.model.datasource is mapping else none"}
+      - {name: ref_id, path: "@t.refId"}
+      - {name: expr, path: "@t.expr", description: "PromQL / LogQL of the target (may contain dashboard $variables)"}
+      - {name: query, path: "@t.query", description: "Text query (TraceQL, Lucene...)"}
+      - {name: datasource_uid, expr: "(t.datasource.uid if t and t.datasource is mapping else none) or (_.model.datasource.uid if _.model.datasource is mapping else none)", description: "Effective data source uid (target overrides panel)"}
+      - {name: target, type: JSON, path: "@t"}
+      - {name: model, type: JSON, path: model, description: "Full panel model"}
+      - {name: id, type: BIGINT, path: id}
+      - {name: search, filter_only: true}
+    pitfalls:
+      - "Panels without targets (text panels) appear once with null ref_id."
+      - "Editing a library panel changes every connected dashboard; saving a dashboard does not change library panel queries."
+      - "uid is not a server-side filter on the list endpoint: the manifest reads up to 5 pages x 100 panels and SQL filters uid; use search to narrow large orgs."
+    examples:
+      - sql: "SELECT uid, name, panel_type, connected_dashboards, ref_id, expr FROM grafana_library_panels WHERE uid = 'lib-5xx-rate'"
+        description: Queries of a library panel referenced by a dashboard (grafana_dashboard_panels.library_panel_uid).
+      - sql: "SELECT name, connected_dashboards, updated, updated_by, expr FROM grafana_library_panels WHERE expr LIKE '%http_requests_total%' ORDER BY updated DESC"
+        description: Shared panels that chart the request counter, most recently changed first.
+    fixtures:
+      - file: library_elements.json
+        expect_rows: 1
+        expect_columns: {uid: V--OrYHnz, name: API docs Example, panel_type: text, connected_dashboards: 1, folder_title: General, updated_by: admin, ref_id: null, updated: "2021-09-27T09:56:17+02:00"}
+        note: "Official docs example for GET /api/library-elements (Library Element API, legacy): first element as documented (its model, shown as {...} in the docs, is {} here); the second, elided {...} element is omitted."
+      - file: library_elements_timeseries.json
+        filters: {search: 5xx}
+        expect_rows: 2
+        expect_columns: {uid: lib-5xx-rate, name: Service 5xx rate, panel_type: timeseries, ref_id: A, datasource_uid: prometheus, connected_dashboards: 4, expr: "sum by (job) (rate(http_requests_total{job=~\"$service\", status=~\"5..\"}[$__rate_interval]))"}
+        note: "Documented list envelope {result: {totalCount, page, perPage, elements}} and element fields of the docs example; the panel model is built strictly from the dashboard panel schema (datasource ref, targets[refId, expr, legendFormat]) to exercise target flattening (2 targets)."
+    ui_link: "{{ source.base_url }}/library-panels"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/library_element/
+
+  # ------------------------------------------------------------------------------------------
+  # Data sources
+  # ------------------------------------------------------------------------------------------
+  - name: grafana_datasources
+    title: Data sources
+    description: >-
+      All data sources of the org (GET /api/datasources): uid, name, type, backend URL, default
+      flag. Use the uid with grafana_ds_query / grafana_datasource_health. No server-side filters.
+    kind: entities
+    request: {method: GET, path: /api/datasources}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid}
+      - {name: name}
+      - {name: type, description: "Plugin id: prometheus, loki, tempo, elasticsearch, grafana-postgresql-datasource, ..."}
+      - {name: is_default, type: BOOLEAN, path: isDefault}
+      - {name: datasource_url, path: url, description: "Backend URL Grafana proxies to (not a UI link)"}
+      - {name: access, path: access, description: "proxy (server) or direct (browser)"}
+      - {name: database_name, path: database}
+      - {name: basic_auth, type: BOOLEAN, path: basicAuth}
+      - {name: read_only, type: BOOLEAN, path: readOnly, description: "Provisioned from files"}
+      - {name: json_data, type: JSON, path: jsonData, description: "Type-specific settings (derived fields, trace-to-logs links, timeInterval...)"}
+      - {name: id, type: BIGINT, path: id}
+      - {name: org_id, type: BIGINT, path: orgId}
+    pitfalls:
+      - "Not paginated; returns up to 5000 data sources by default."
+    examples:
+      - sql: "SELECT uid, name, type, is_default, datasource_url FROM grafana_datasources ORDER BY type, name"
+        description: Which data sources exist (o11y-bench - prometheus, loki, tempo) and which is default.
+    fixtures:
+      - file: datasources.json
+        expect_rows: 1
+        expect_columns: {uid: H8joYFVGz, name: datasource_elastic, type: elasticsearch, is_default: false, datasource_url: "http://mydatasource.com"}
+        note: "Official docs example for GET /api/datasources (Data source API, legacy); missing comma after uid fixed."
+    ui_link: "{{ source.base_url }}/connections/datasources"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/data_source/#get-all-data-sources
+
+  - name: grafana_datasource
+    title: Data source by uid
+    description: One data source with its full non-secret settings (GET /api/datasources/uid/:uid). uid is required.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/datasources/uid/{{ filters.uid }}"
+    filters:
+      - {column: uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Data source uid", examples: ["loki"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid}
+      - {name: name}
+      - {name: type}
+      - {name: is_default, type: BOOLEAN, path: isDefault}
+      - {name: datasource_url, path: url}
+      - {name: access}
+      - {name: database_name, path: database}
+      - {name: basic_auth, type: BOOLEAN, path: basicAuth}
+      - {name: basic_auth_user, path: basicAuthUser}
+      - {name: with_credentials, type: BOOLEAN, path: withCredentials}
+      - {name: json_data, type: JSON, path: jsonData}
+      - {name: secure_json_fields, type: JSON, path: secureJsonFields, description: "Which secrets are set (values never returned)"}
+      - {name: version, type: BIGINT, path: version}
+      - {name: read_only, type: BOOLEAN, path: readOnly}
+      - {name: id, type: BIGINT, path: id}
+    examples:
+      - sql: "SELECT name, type, datasource_url, json_data FROM grafana_datasource WHERE uid = 'loki'"
+        description: Inspect the Loki data source settings (e.g. derived fields linking trace_id to Tempo).
+    fixtures:
+      - file: datasource_by_uid.json
+        filters: {uid: kLtEtcRGk}
+        expect_rows: 1
+        expect_columns: {uid: kLtEtcRGk, name: test_datasource, type: graphite, version: 1, basic_auth: false}
+        note: "Official docs example for GET /api/datasources/uid/:uid (Data source API, legacy)."
+    ui_link: "{{ source.base_url }}/connections/datasources/edit/{{ filters.uid }}"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/data_source/#get-a-single-data-source-by-uid
+
+  - name: grafana_datasource_health
+    title: Data source health check
+    description: >-
+      Runs the data source's health check (GET /api/datasources/uid/:uid/health). One row: status
+      OK | ERROR | UNKNOWN and the message. A failing data source explains empty panels and
+      NoData alerts. uid is required.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/datasources/uid/{{ filters.uid }}/health"
+    filters:
+      - {column: uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Data source uid", examples: ["prometheus"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid, filter_only: true}
+      - {name: status, description: "OK | ERROR | UNKNOWN"}
+      - {name: message}
+      - {name: details, type: JSON, path: details}
+    pitfalls:
+      - "A failed check is HTTP 400 with body {status: ERROR, message}: the query then fails with that body in the error text - an error here IS the finding (the backend is unhealthy from Grafana's side), not a tooling problem. Query one uid per statement so one failing data source does not hide the others."
+      - "Health checks are implemented per plugin; plugins without one return an error instead of a status."
+    examples:
+      - sql: "SELECT uid, status, message FROM grafana_datasource_health WHERE uid = 'loki'"
+        description: Is the Loki data source reachable from Grafana (empty Logs panels / NoData alerts)?
+      - sql: "SELECT uid, status, message FROM grafana_datasource_health WHERE uid IN ('prometheus', 'loki', 'tempo')"
+        description: Are the telemetry backends reachable from Grafana (any failing one fails the statement with its message)?
+    fixtures:
+      - file: datasource_health.json
+        filters: {uid: P8045C56BDA891CB2}
+        expect_rows: 1
+        expect_columns: {uid: P8045C56BDA891CB2, status: OK}
+        note: "Official docs example for GET /api/datasources/uid/:uid/health (Data source API, legacy)."
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/data_source/#check-data-source-health
+
+  # ------------------------------------------------------------------------------------------
+  # Unified data-source query (/api/ds/query)
+  # ------------------------------------------------------------------------------------------
+  - name: grafana_ds_query
+    title: Query any data source through Grafana
+    description: >-
+      Runs one query against any backend data source by uid (POST /api/ds/query) and flattens the
+      returned data frames: one row per frame row. Required: datasource_uid and one of expr
+      (PromQL/LogQL), query (TraceQL / text query languages) or raw_sql. ts / value / message /
+      labels are picked from the first time / number / string field and the series (or stream)
+      labels; fields holds the whole frame row for table results.
+    kind: generic
+    request:
+      method: POST
+      path: /api/ds/query
+      body:
+        from: "{{ time.start | epoch_ms | string }}"
+        to: "{{ time.end | epoch_ms | string }}"
+        queries:
+          - refId: A
+            datasource:
+              uid: "{{ filters.datasource_uid }}"
+              type: "{{ filters.datasource_type }}"
+            expr: "{{ filters.expr }}"
+            query: "{{ filters.query }}"
+            queryType: "{{ filters.query_type }}"
+            rawSql: "{{ filters.raw_sql }}"
+            format: "{{ filters.format }}"
+            legendFormat: "{{ filters.legend_format }}"
+            instant: "{{ true if (filters.instant | string | lower) in ['true', '1'] else none }}"
+            range: "{{ false if (filters.instant | string | lower) in ['true', '1'] else true }}"
+            maxLines: "{{ filters.max_lines }}"
+            limit: "{{ filters.max_results }}"
+            intervalMs: "{{ (filters.step or time.step_s) * 1000 }}"
+            maxDataPoints: 11000
+    filters:
+      - {column: datasource_uid, required: true, ops: ["=", "in"], max_fan_out: 5, description: "Data source uid (grafana_datasources.uid); o11y-bench: prometheus, loki, tempo", examples: ["prometheus"]}
+      - {column: datasource_type, description: "Optional plugin id (prometheus, loki, tempo...)"}
+      - {column: expr, description: "PromQL / LogQL expression", examples: ['sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))']}
+      - {column: query, description: "Query text for data sources whose model field is 'query' (Tempo TraceQL, Elasticsearch Lucene...)"}
+      - {column: query_type, description: "queryType of the model: Loki range|instant, Tempo traceql|traceqlSearch|serviceMap"}
+      - {column: raw_sql, description: "SQL for SQL data sources (Postgres, MySQL, MSSQL); usually with format = 'table'"}
+      - {column: format, description: "time_series | table | logs (data-source dependent)"}
+      - {column: instant, type: BOOLEAN, description: "Prometheus: true = instant query at the window end"}
+      - {column: legend_format, description: "Legend template (series naming), e.g. {{job}}"}
+      - {column: max_lines, type: BIGINT, description: "Loki: max log lines"}
+      - {column: max_results, type: BIGINT, description: "Model 'limit' for data sources that support it (e.g. Tempo search)"}
+      - {column: step, type: BIGINT, description: "Step / min interval in seconds (default auto, ~300 points)"}
+    require_one_of: [[expr, query, raw_sql]]
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.results"
+      expand:
+        - {entries: ".", as: r}
+        - {explode: "@r.value.frames", as: f}
+        - {columnar: {columns: "@f.schema.fields", data: "@f.data.values", orientation: column}, as: row}
+      errors:
+        - {path: "$.results.*.error", non_empty: true, message: "$.results.*.error", hint: "the data source rejected the query; fix its syntax for that data source type"}
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "row[(f.schema.fields | selectattr('type', 'equalto', 'time') | map(attribute='name') | first)]", transform: epoch_ms, description: "First time field of the frame (UTC)"}
+      - {name: value, type: DOUBLE, expr: "row[(f.schema.fields | selectattr('type', 'equalto', 'number') | map(attribute='name') | first)]", description: "First number field (the series value)"}
+      - {name: series, expr: "f.schema.fields | selectattr('type', 'equalto', 'number') | map(attribute='name') | first", description: "Name of the value field (metric name, A-series, ...)"}
+      - {name: labels, type: JSON, expr: "row['labels'] if row['labels'] is mapping else (f.schema.fields | selectattr('type', 'equalto', 'number') | map(attribute='labels') | select | first)", description: "Series labels, or Loki stream labels; labels->>'job'"}
+      - {name: message, expr: "row[(f.schema.fields | selectattr('type', 'equalto', 'string') | map(attribute='name') | first)]", description: "First string field (log line for Loki)"}
+      - {name: level, expr: "(row['labels']['level'] or row['labels']['detected_level']) if row['labels'] is mapping else none", description: "Log level label when present"}
+      - {name: fields, type: JSON, path: "@row", description: "The whole frame row {field_name: value}; use for table/SQL/trace results"}
+      - {name: ref_id, path: "@r.key"}
+      - {name: frame_name, path: "@f.schema.name"}
+      - {name: frame_type, path: "@f.schema.meta.type", description: "timeseries-multi, numeric-multi, log-lines, ..."}
+      - {name: executed_query, path: "@f.schema.meta.executedQueryString"}
+      - {name: notices, type: JSON, path: "@f.schema.meta.notices", description: "Warnings attached by the data source (e.g. truncated results)"}
+      - {name: datasource_uid, filter_only: true}
+      - {name: datasource_type, filter_only: true}
+      - {name: expr, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: query_type, filter_only: true}
+      - {name: raw_sql, filter_only: true}
+      - {name: format, filter_only: true}
+      - {name: instant, type: BOOLEAN, filter_only: true}
+      - {name: legend_format, filter_only: true}
+      - {name: max_lines, type: BIGINT, filter_only: true}
+      - {name: max_results, type: BIGINT, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "Only backend data sources answer /api/ds/query (Prometheus, Loki, Tempo, SQL, Elasticsearch, CloudWatch...). Frontend-only plugins return an error."
+      - "One unknown metric/label returns 0 frames, not an error: check label values first (grafana_prometheus_label_values)."
+      - "from/to are sent as epoch-millisecond strings; intervalMs is the Prometheus min step, so step = filters.step or the auto step."
+      - "NaN / +Inf samples are encoded as null in data frames (with a separate entities list): value is NULL for them."
+      - "Wide/table frames with several number columns: value/series only show the first; read the rest from fields->>'<column>'. Duplicate field names in one frame collapse."
+      - "Dashboard variables ($service, $__range, $__rate_interval) are NOT expanded by this endpoint unless the data source does it; substitute literal values."
+      - "A failing query returns HTTP 400 with results.<refId>.error (207 Multi-Status when the datasourceQueryMultiStatus feature toggle is on); both are raised as errors."
+    examples:
+      - sql: >-
+          SELECT labels->>'job' AS job, max(value) AS peak_5xx_rps, arg_max(ts, value) AS peak_at
+          FROM grafana_ds_query
+          WHERE datasource_uid = 'prometheus'
+            AND expr = 'sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak_5xx_rps DESC
+        description: Peak 5xx rate per service through Grafana's Prometheus data source.
+      - sql: >-
+          SELECT ts, labels->>'job' AS job, message FROM grafana_ds_query
+          WHERE datasource_uid = 'loki' AND expr = '{job="payment-service", level="error"} | json'
+            AND max_lines = 200
+          ORDER BY ts DESC
+        description: Recent error log lines of a service through Grafana's Loki data source.
+      - sql: >-
+          SELECT fields FROM grafana_ds_query
+          WHERE datasource_uid = 'tempo' AND query_type = 'traceql'
+            AND query = '{ resource.service.name = "order-service" && status = error }' AND max_results = 20
+        description: TraceQL search through Grafana's Tempo data source (trace table rows are in fields).
+    fixtures:
+      - file: ds_query_testdata.json
+        filters: {datasource_uid: PD8C576611E62080A}
+        expect_rows: 6
+        expect_columns: {ts: "2022-02-10T10:15:52Z", value: 1.0, series: A-series, ref_id: A, labels: null, message: null}
+        note: "Official docs example response of POST /api/ds/query for the Test data source (Data source API, legacy, 'Query a data source')."
+      - file: ds_query_prometheus_range.json
+        filters: {datasource_uid: prometheus, expr: "prometheus_http_requests_total"}
+        expect_rows: 5
+        expect_columns: {ts: "2022-01-11T08:25:30Z", value: 21.0, series: prometheus_http_requests_total, ref_id: A, frame_type: timeseries-multi, labels: "{\"__name__\":\"prometheus_http_requests_total\",\"code\":\"200\",\"handler\":\"/api/v1/query_range\",\"job\":\"prometheus\"}"}
+        note: "Recorded output of Grafana's Prometheus backend: grafana/grafana-prometheus-datasource pkg/promlib/testdata/range_simple.result.golden.jsonc (a backend.DataResponse), wrapped in the /api/ds/query envelope {results: {A: ...}} shown in the docs."
+      - file: ds_query_loki_streams.json
+        filters: {datasource_uid: loki, expr: '{location="moon"}'}
+        expect_rows: 6
+        expect_columns: {ts: "2022-02-16T16:50:44Z", message: log line error 1, frame_type: log-lines, value: null, level: null, series: null}
+        note: "Recorded output of Grafana's Loki backend (dataplane log-lines frame): grafana/grafana-loki-datasource pkg/loki/testdata_dataplane/streams_simple.golden.jsonc, wrapped in the /api/ds/query envelope."
+      - file: ds_query_error.json
+        filters: {datasource_uid: prometheus, expr: 'sum(rate(http_requests_total{job="api"}}[5m]))'}
+        expect_error: "parse error"
+        note: "Built strictly from the backend.DataResponse JSON encoding of grafana-plugin-sdk-go (status, error, errorSource per refId) inside the documented {results: {<refId>: ...}} envelope - the body of a 207 Multi-Status (or 400) response. Proves the results.*.error rule fires."
+    ui_link: "{{ source.base_url }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'omni': {'datasource': filters.datasource_uid, 'queries': [{'refId': 'A', 'expr': filters.expr or none, 'query': filters.query or none, 'rawSql': filters.raw_sql or none, 'datasource': {'uid': filters.datasource_uid}}], 'range': {'from': time.start | epoch_ms | string, 'to': time.end | epoch_ms | string}}} | tojson | urlencode }}"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/data_source/#query-a-data-source
+
+  # ------------------------------------------------------------------------------------------
+  # Annotations
+  # ------------------------------------------------------------------------------------------
+  - name: grafana_annotations
+    title: Annotations (deploy markers, notes, alert transitions)
+    description: >-
+      Annotation events stored in Grafana (GET /api/annotations) in the time window: deploy
+      markers posted by CI, manual notes and (type='alert') alert state transitions. Optional
+      filters: tag, type ('annotation' | 'alert'), dashboard_uid, panel_id, alert_uid.
+    kind: events
+    request:
+      method: GET
+      path: /api/annotations
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        limit: "{{ limit or 1000 }}"
+        tags: "{{ filters.tag }}"
+        type: "{{ filters.type }}"
+        dashboardUID: "{{ filters.dashboard_uid }}"
+        panelId: "{{ filters.panel_id }}"
+        alertUID: "{{ filters.alert_uid }}"
+    filters:
+      - {column: tag, ops: ["=", "in"], description: "Annotation tag, exact (deploy markers are often tagged deploy / deployment / release). IN fans out (OR); de-duplicate on id.", examples: ["deploy"]}
+      - {column: type, description: "annotation (user/API events) | alert (alert state changes)", examples: ["annotation"]}
+      - {column: dashboard_uid, ops: ["=", "in"], description: "Only annotations attached to this dashboard"}
+      - {column: panel_id, type: BIGINT, description: "Only annotations of this panel (with dashboard_uid)"}
+      - {column: alert_uid, description: "Alert rule uid (type=alert)"}
+    time: {column: ts, default_lookback: 6h, max_window: 90d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: ts, type: TIMESTAMP, path: time, transform: epoch_ms, description: "Event (or region start) time"}
+      - {name: ts_end, type: TIMESTAMP, path: timeEnd, transform: epoch_ms, description: "Region end (equals ts for point events)"}
+      - {name: duration_ms, type: DOUBLE, expr: "(_.timeEnd - _.time) if (_.timeEnd and _.time) else none"}
+      - {name: message, path: text, description: "Annotation text"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: type, expr: "'alert' if _.alertId else 'annotation'"}
+      - {name: dashboard_uid, path: dashboardUID}
+      - {name: panel_id, type: BIGINT, path: panelId}
+      - {name: alert_id, type: BIGINT, path: alertId}
+      - {name: alert_name, path: alertName}
+      - {name: new_state, path: newState, description: "Alert annotations: state after the transition"}
+      - {name: prev_state, path: prevState}
+      - {name: author, path: login, description: "Login of the creating user (when returned)"}
+      - {name: data, type: JSON, path: data}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: tag, filter_only: true, description: "Tag that was filtered on"}
+      - {name: alert_uid, filter_only: true}
+    max_rows: 10000
+    pitfalls:
+      - "The API returns at most `limit` rows (Grafana default 100); the manifest sends LIMIT or 1000. Narrow the window when you hit it."
+      - "Organization-wide annotations (no dashboard) are found by tag; dashboard annotations need dashboard_uid or no filter."
+      - "Annotations from data-source annotation queries (e.g. Loki deploy markers configured on a dashboard) are NOT stored here: see grafana_dashboard_annotation_queries and run their expr through grafana_loki_logs (or grafana_ds_query)."
+    examples:
+      - sql: >-
+          SELECT ts, message, tags, dashboard_uid FROM grafana_annotations
+          WHERE tag IN ('deploy', 'deployment', 'release') AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Deploy markers around the incident start (change events).
+      - sql: "SELECT ts, alert_name, prev_state, new_state FROM grafana_annotations WHERE type = 'alert' ORDER BY ts DESC LIMIT 50"
+        description: Recent alert state transitions recorded as annotations.
+    fixtures:
+      - file: annotations.json
+        filters: {tag: tag1}
+        expect_rows: 2
+        expect_columns: {id: 1124, ts: "2017-10-06T05:06:35Z", message: test, dashboard_uid: uGlb_lG7z, panel_id: 2, type: annotation, tag: tag1, duration_ms: 0.0}
+        note: "Official docs example for GET /api/annotations (Annotations API, legacy)."
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/annotations/#find-annotations
+
+  - name: grafana_annotation_tags
+    title: Annotation tags in use
+    description: >-
+      Tags used on annotations with their counts (GET /api/annotations/tags). Use it first to learn
+      how deploy markers are tagged in this Grafana (deploy vs deployment vs release vs a service
+      name) before filtering grafana_annotations by tag. Optional search filter (tag substring).
+    kind: entities
+    request:
+      method: GET
+      path: /api/annotations/tags
+      query:
+        tag: "{{ filters.search }}"
+        limit: "{{ limit or 1000 }}"
+    filters:
+      - {column: search, description: "Only tags containing this text", examples: ["deploy"]}
+    response:
+      rows_path: "$.result.tags[*]"
+    columns:
+      - {name: tag}
+      - {name: count, type: BIGINT, description: "Number of annotations carrying the tag"}
+      - {name: search, filter_only: true}
+    sort_hint: "Ordered by tag name, not by count: ORDER BY count DESC in SQL."
+    pitfalls:
+      - "Default limit is 100 tags; the manifest sends LIMIT or 1000."
+      - "Counts are over all time (no time filter): a tag can exist without any annotation in the incident window."
+    examples:
+      - sql: "SELECT tag, count FROM grafana_annotation_tags WHERE search = 'deploy' ORDER BY count DESC"
+        description: Which deploy-like tags exist, so grafana_annotations can be filtered on the right one.
+    fixtures:
+      - file: annotation_tags.json
+        filters: {search: out}
+        expect_rows: 1
+        expect_columns: {tag: outage, count: 1, search: out}
+        note: "Official docs example for GET /api/annotations/tags?tag=out (Annotations API, legacy, 'Find Annotations Tags')."
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/annotations/#find-annotations-tags
+
+  # ------------------------------------------------------------------------------------------
+  # Grafana-managed alerting
+  # ------------------------------------------------------------------------------------------
+  - name: grafana_alert_rules
+    title: Alert rule definitions (provisioning API)
+    description: >-
+      Grafana-managed alert and recording rule definitions (GET /api/v1/provisioning/alert-rules,
+      or /alert-rules/:uid when uid is filtered): title, group, folder, condition, pending period
+      (for), labels, annotations (summary, runbook_url) and the queries they evaluate. Look the
+      firing rule up here to see its full expression and threshold.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1/provisioning/alert-rules{{ ('/' ~ filters.uid) if filters.uid else '' }}"
+    filters:
+      - {column: uid, ops: ["=", "in"], description: "Rule uid (switches to GET /alert-rules/:uid)", examples: ["pay-err-rate"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid}
+      - {name: title}
+      - {name: rule_group, path: ruleGroup}
+      - {name: folder_uid, path: folderUID}
+      - {name: type, expr: "'recording' if _.record else 'alerting'"}
+      - {name: condition, path: condition, description: "refId of the query/expression that decides firing"}
+      - {name: query_exprs, expr: "(_.data or []) | map(attribute='model') | map(attribute='expr') | select | join(' ; ')", description: "PromQL/LogQL of the rule's data-source queries"}
+      - {name: datasource_uids, expr: "(_.data or []) | map(attribute='datasourceUid') | reject('in', ['__expr__', '-100']) | unique | join(',')"}
+      - {name: for_duration, path: for, description: "Pending period, e.g. 5m"}
+      - {name: for_s, type: DOUBLE, path: for, transform: duration_to_s}
+      - {name: keep_firing_for, path: keepFiringFor}
+      - {name: no_data_state, path: noDataState, description: "NoData | Alerting | OK | KeepLast"}
+      - {name: exec_err_state, path: execErrState, description: "Error | Alerting | OK | KeepLast"}
+      - {name: is_paused, type: BOOLEAN, path: isPaused}
+      - {name: severity, path: labels.severity}
+      - {name: summary, path: annotations.summary}
+      - {name: runbook_url, path: annotations.runbook_url}
+      - {name: dashboard_uid, path: "annotations.__dashboardUid__"}
+      - {name: panel_id, path: "annotations.__panelId__"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+      - {name: record_metric, path: record.metric, description: "Recording rules: metric written"}
+      - {name: queries, type: JSON, path: data, description: "Full query + expression pipeline (see grafana_alert_rule_queries)"}
+      - {name: notification_settings, type: JSON, path: notification_settings}
+      - {name: updated, type: TIMESTAMP, path: updated, transform: auto_time}
+      - {name: provenance, path: provenance, description: "api | file | '' (UI)"}
+      - {name: id, type: BIGINT, path: id}
+      - {name: org_id, type: BIGINT, path: orgID}
+    pitfalls:
+      - "Needs the alert.provisioning:read permission; a 403 here does not mean there are no rules (use grafana_alert_rule_status, which needs alert.rules:read)."
+      - "The threshold is usually in a server-side expression query (datasourceUid __expr__ / -100: threshold, math, classic_conditions), not in the PromQL: read grafana_alert_rule_queries."
+      - "Deprecated in favour of /apis/rules.alerting.grafana.app on Grafana 13+, still served."
+    examples:
+      - sql: "SELECT uid, title, rule_group, for_duration, query_exprs, severity, runbook_url FROM grafana_alert_rules WHERE title LIKE '%Payment%'"
+        description: Find the definition of the payment alert that fired.
+      - sql: "SELECT title, for_s, no_data_state, updated FROM grafana_alert_rules WHERE uid = 'pay-err-rate'"
+        description: Was the rule recently edited (updated) or does it alert on NoData?
+    fixtures:
+      - file: alert_rules.json
+        expect_rows: 2
+        expect_columns: {uid: XXXXXXXXX, title: TEST-API_1, rule_group: API3, condition: B, for_s: 300.0, type: alerting, query_exprs: up, datasource_uids: XXXXXXXXX-XXXXXXXXX-XXXXXXXXXX, summary: test_api_1}
+        note: "Array of the two ProvisionedAlertRule bodies documented in the Alerting provisioning API docs (alert rule and recording rule example responses); GET /alert-rules returns ProvisionedAlertRules = []ProvisionedAlertRule."
+      - file: alert_rule_by_uid.json
+        filters: {uid: XXXXXXXXX}
+        expect_rows: 1
+        expect_columns: {uid: XXXXXXXXX, keep_firing_for: 2m, exec_err_state: OK}
+        note: "Documented ProvisionedAlertRule example (GET /alert-rules/:uid returns one ProvisionedAlertRule)."
+    ui_link: "{{ source.base_url }}/alerting/grafana/{{ filters.uid }}/view"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/alerting_provisioning/#route-get-alert-rules
+
+  - name: grafana_alert_rule_queries
+    title: Alert rule queries and expressions
+    description: >-
+      One row per query / expression step of Grafana-managed alert rules (the rule's data array):
+      refId, data source, PromQL/LogQL expr, server-side expression type (reduce, math,
+      threshold, classic_conditions) and relative time range. Filter uid to one rule.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1/provisioning/alert-rules{{ ('/' ~ filters.rule_uid) if filters.rule_uid else '' }}"
+    filters:
+      - {column: rule_uid, ops: ["=", "in"], description: "Rule uid", examples: ["pay-err-rate"]}
+    response:
+      rows_path: "$"
+      expand:
+        - {explode: data, as: q}
+    columns:
+      - {name: rule_uid, path: uid}
+      - {name: rule_title, path: title}
+      - {name: condition, path: condition}
+      - {name: ref_id, path: "@q.refId"}
+      - {name: is_condition, type: BOOLEAN, expr: "q.refId == _.condition"}
+      - {name: datasource_uid, path: "@q.datasourceUid"}
+      - {name: is_expression, type: BOOLEAN, expr: "q.datasourceUid in ['__expr__', '-100']", description: "Server-side expression (reduce/math/threshold/classic_conditions)"}
+      - {name: query_type, path: "@q.queryType"}
+      - {name: relative_from_s, type: BIGINT, path: "@q.relativeTimeRange.from", description: "Window start, seconds before evaluation (600 = last 10m)"}
+      - {name: relative_to_s, type: BIGINT, path: "@q.relativeTimeRange.to"}
+      - {name: expr, path: "@q.model.expr", description: "PromQL/LogQL of data-source queries"}
+      - {name: expression, path: "@q.model.expression", description: "Input refId / math expression of server-side expressions"}
+      - {name: expression_type, path: "@q.model.type", description: "reduce | math | threshold | classic_conditions | resample"}
+      - {name: conditions, type: JSON, path: "@q.model.conditions", description: "Thresholds (evaluator.type gt/lt, evaluator.params)"}
+      - {name: model, type: JSON, path: "@q.model"}
+    examples:
+      - sql: "SELECT ref_id, is_condition, datasource_uid, expr, expression_type, expression, conditions FROM grafana_alert_rule_queries WHERE rule_uid = 'pay-err-rate' ORDER BY ref_id"
+        description: The exact query and threshold pipeline of the alert that fired.
+    fixtures:
+      - file: alert_rule_by_uid.json
+        filters: {rule_uid: XXXXXXXXX}
+        expect_rows: 2
+        expect_columns: {rule_uid: XXXXXXXXX, ref_id: A, is_condition: false, expr: up, relative_from_s: 600, is_expression: false}
+        note: "Documented ProvisionedAlertRule example (Alerting provisioning API docs)."
+      - file: alert_rules.json
+        expect_rows: 3
+        note: "Two documented ProvisionedAlertRule examples: 2 + 1 data queries."
+    ui_link: "{{ source.base_url }}/alerting/grafana/{{ filters.rule_uid }}/view"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/alerting_provisioning/#alertquery
+
+  - name: grafana_alert_rule_status
+    title: Alert rule evaluation status (Prometheus-compatible)
+    description: >-
+      Current evaluation state of Grafana-managed rules (GET /api/prometheus/grafana/api/v1/rules):
+      one row per rule with state (firing | pending | inactive | recovering), health (ok | error |
+      nodata), last evaluation, last error, firing instance count and the instances (alerts JSON).
+      Optional server-side filters: folder_uid, group_name, rule_name, state, health, type,
+      dashboard_uid, search (title substring).
+    kind: alerts
+    request:
+      method: GET
+      path: "/api/prometheus/{{ filters.rules_source or 'grafana' }}/api/v1/rules"
+      query:
+        folder_uid: "{{ filters.folder_uid }}"
+        rule_group: "{{ filters.group_name }}"
+        rule_name: "{{ filters.rule_name }}"
+        state: "{{ filters.state }}"
+        health: "{{ filters.health }}"
+        rule_type: "{{ filters.type }}"
+        dashboard_uid: "{{ filters.dashboard_uid }}"
+        "search.rule_name": "{{ filters.search }}"
+        rule_uid: "{{ filters.rule_uid }}"
+        datasource_uid: "{{ filters.datasource_uid }}"
+        receiver_name: "{{ filters.receiver_name }}"
+        limit_alerts: "{{ filters.limit_alerts }}"
+        group_limit: 200
+    filters:
+      - {column: folder_uid, ops: ["=", "in"], description: "Folder uid"}
+      - {column: group_name, param: group_name, ops: ["=", "in"], description: "Rule group name (exact)"}
+      - {column: rule_name, ops: ["=", "in"], description: "Rule title (exact)", examples: ["PaymentServiceHighErrorRate"]}
+      - {column: state, ops: ["=", "in"], description: "firing | pending | inactive | recovering", examples: ["firing"]}
+      - {column: health, ops: ["=", "in"], description: "ok | error | nodata"}
+      - {column: type, description: "alerting | recording"}
+      - {column: dashboard_uid, description: "Rules linked to this dashboard"}
+      - {column: search, description: "Case-insensitive substring of the rule title"}
+      - {column: rules_source, description: "grafana (default) or the uid of a Mimir/Loki/Prometheus ruler data source (filters other than the source are then ignored)", examples: ["grafana"]}
+      - {column: rule_uid, ops: ["=", "in"], fan_out: false, description: "Rule uid(s), sent as repeated rule_uid (exact)", examples: ["pay-err-rate"]}
+      - {column: datasource_uid, ops: ["=", "in"], fan_out: false, description: "Only rules querying this data source uid (repeated datasource_uid)"}
+      - {column: receiver_name, description: "Only rules whose simplified routing notifies this contact point"}
+      - {column: limit_alerts, type: BIGINT, description: "Cap instances returned per rule (default unlimited); totals stay exact"}
+    pagination: {type: cursor, cursor_path: "$.data.groupNextToken", cursor_param: query.group_next_token, max_pages: 10}
+    response:
+      rows_path: "$.data.groups[*]"
+      expand:
+        - {explode: rules, as: r}
+    columns:
+      - {name: rule_uid, path: "@r.uid"}
+      - {name: rule_name, path: "@r.name"}
+      - {name: type, path: "@r.type"}
+      - {name: state, path: "@r.state", description: "firing | pending | inactive | recovering (null for recording rules)"}
+      - {name: health, path: "@r.health"}
+      - {name: severity, path: "@r.labels.severity"}
+      - {name: query, path: "@r.query", description: "Data-source queries joined with ' | ' (or JSON when they cannot be extracted)"}
+      - {name: duration_s, type: DOUBLE, path: "@r.duration", description: "Pending period (for) in seconds"}
+      - {name: keep_firing_for_s, type: DOUBLE, path: "@r.keepFiringFor"}
+      - {name: active_at, type: TIMESTAMP, path: "@r.activeAt", transform: auto_time, description: "Earliest firing instance start"}
+      - {name: last_evaluation, type: TIMESTAMP, path: "@r.lastEvaluation", transform: auto_time}
+      - {name: evaluation_time_s, type: DOUBLE, path: "@r.evaluationTime"}
+      - {name: last_error, path: "@r.lastError"}
+      - {name: alert_count, type: BIGINT, path: "@r.alerts", transform: length, description: "Instances returned (all states)"}
+      - {name: alerts, type: JSON, path: "@r.alerts", description: "Instances: labels, annotations, state (Alerting, Pending, Normal, 'Alerting (NoData)'...), activeAt, value"}
+      - {name: totals, type: JSON, path: "@r.totals", description: "Instance counts by state"}
+      - {name: summary, path: "@r.annotations.summary"}
+      - {name: runbook_url, path: "@r.annotations.runbook_url"}
+      - {name: labels, type: JSON, path: "@r.labels"}
+      - {name: annotations, type: JSON, path: "@r.annotations"}
+      - {name: is_paused, type: BOOLEAN, path: "@r.isPaused"}
+      - {name: datasource_uids, type: JSON, path: "@r.queriedDatasourceUIDs"}
+      - {name: dashboard_uid, path: "@r.annotations.__dashboardUid__"}
+      - {name: group_name, path: name}
+      - {name: folder, path: file, description: "Folder title"}
+      - {name: folder_uid, expr: "r.folderUid or _.folderUid"}
+      - {name: group_interval_s, type: DOUBLE, path: interval}
+      - {name: search, filter_only: true}
+      - {name: rules_source, filter_only: true}
+      - {name: datasource_uid, filter_only: true, description: "Data source uid filter (see datasource_uids for the rule's actual list)"}
+      - {name: receiver_name, filter_only: true}
+      - {name: limit_alerts, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "state filter values map to instance states: use health = 'error' / 'nodata' for broken rules rather than state."
+      - "Rule state is computed from instances; a rule can be 'firing' for one label set while others are Normal: inspect alerts JSON."
+      - "Older Grafana versions may ignore some of these filter parameters and return every rule; the SQL predicate still applies client-side."
+      - "state accepts normal, inactive, alerting, firing, pending, nodata, error, recovering; any other value is HTTP 400. health accepts ok, error, nodata."
+      - "Rules with thousands of instances make this response huge: set limit_alerts (e.g. 20) and read totals for exact counts."
+    examples:
+      - sql: "SELECT rule_name, state, health, active_at, alert_count, severity, folder FROM grafana_alert_rule_status WHERE state IN ('firing', 'pending') ORDER BY active_at"
+        description: Which Grafana alerts are firing or pending right now, and since when?
+      - sql: "SELECT rule_name, health, last_error, last_evaluation FROM grafana_alert_rule_status WHERE health IN ('error', 'nodata')"
+        description: Rules that cannot evaluate (broken query or missing data).
+      - sql: "SELECT rule_name, state, query, duration_s, totals, alerts FROM grafana_alert_rule_status WHERE rule_uid = 'pay-err-rate' AND limit_alerts = 20"
+        description: Current state, query and firing instances of the rule behind the page.
+    fixtures:
+      - file: rule_status.json
+        expect_rows: 2
+        expect_columns: {rule_uid: pay-err-rate, rule_name: PaymentServiceHighErrorRate, state: firing, health: ok, duration_s: 300.0, alert_count: 1, severity: critical, folder: Payments, group_name: payment-alerts, active_at: "2026-10-01T11:42:00Z"}
+        note: "Built strictly from the RuleResponse / RuleDiscovery / RuleGroup / AlertingRule / Alert schemas of Grafana's alerting OpenAPI spec (pkg/services/ngalert/api/tooling/post.json); the docs give no example."
+      - file: rule_status_error.json
+        filters: {state: broken}
+        expect_error: "unknown state"
+        note: "Built strictly from the DiscoveryBase schema (status, errorType, error) of Grafana's alerting OpenAPI spec; proves the source-level status=error rule fires."
+    ui_link: "{{ source.base_url }}/alerting/list"
+    docs_url: https://github.com/grafana/grafana/blob/main/pkg/services/ngalert/api/tooling/post.json
+
+  - name: grafana_alert_instances
+    title: Alert instances (Prometheus-compatible)
+    description: >-
+      Every alert instance (one per label set) of Grafana-managed rules with its evaluation state
+      (GET /api/prometheus/grafana/api/v1/alerts): Alerting, Pending, Normal, Recovering, NoData,
+      Error, optionally with a reason ('Alerting (NoData)'). Includes Normal instances; filter
+      state in SQL.
+    kind: alerts
+    request:
+      method: GET
+      path: /api/prometheus/grafana/api/v1/alerts
+      query: {includeInternalLabels: true}
+    response:
+      rows_path: "$.data.alerts[*]"
+    columns:
+      - {name: alertname, path: labels.alertname}
+      - {name: state, path: state, description: "Alerting | Pending | Normal | Recovering | NoData | Error, optionally '<State> (<Reason>)'"}
+      - {name: active_at, type: TIMESTAMP, path: activeAt, transform: auto_time, description: "Start of the current state"}
+      - {name: value, path: value, description: "Last evaluated values, e.g. '1.2e-01' or 'A: 9.4e+01, B: 1e+00'"}
+      - {name: severity, path: labels.severity}
+      - {name: service, path: labels.service}
+      - {name: folder, path: labels.grafana_folder}
+      - {name: rule_uid, path: "labels.__alert_rule_uid__", description: "Internal label (requested with includeInternalLabels=true)"}
+      - {name: summary, path: annotations.summary}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+    pitfalls:
+      - "Normal instances are included: WHERE state LIKE 'Alerting%' OR state LIKE 'Pending%' for active ones."
+      - "value is text, not a number; multi-query rules list one value per refId."
+    examples:
+      - sql: "SELECT alertname, state, active_at, value, labels FROM grafana_alert_instances WHERE state NOT LIKE 'Normal%' ORDER BY active_at"
+        description: All non-normal alert instances with their current values.
+    fixtures:
+      - file: alert_instances.json
+        expect_rows: 3
+        expect_columns: {alertname: PaymentServiceHighErrorRate, state: Alerting, value: "1.2e-01", rule_uid: pay-err-rate, folder: Payments, active_at: "2026-10-01T11:42:00Z"}
+        note: "Built strictly from the AlertResponse / AlertDiscovery / Alert schemas of Grafana's alerting OpenAPI spec (post.json); state strings follow state.FormatStateAndReason in Grafana's source."
+    docs_url: https://github.com/grafana/grafana/blob/main/pkg/services/ngalert/api/tooling/post.json
+
+  - name: grafana_active_alerts
+    title: Active alerts in Grafana Alertmanager
+    description: >-
+      Alerts held by Grafana's built-in Alertmanager (GET /api/alertmanager/grafana/api/v2/alerts):
+      the firing alerts that were routed to notifications, with receivers, silenced / inhibited
+      status, start time and labels. Optional filters: alertname, matcher (Alertmanager matcher
+      like severity="critical"), receiver (regex), active / silenced / inhibited flags.
+    kind: alerts
+    request:
+      method: GET
+      path: "/api/alertmanager/{{ filters.alertmanager or 'grafana' }}/api/v2/alerts"
+      query:
+        active: "{{ filters.active }}"
+        silenced: "{{ filters.silenced }}"
+        inhibited: "{{ filters.inhibited }}"
+        receiver: "{{ filters.receiver }}"
+        filter: "{{ (filters.matcher | as_list) + ((['alertname=\"' ~ (filters.alertname | label_escape) ~ '\"']) if filters.alertname else []) }}"
+    filters:
+      - {column: alertname, ops: ["=", "in"], description: "Alert rule title", examples: ["PaymentServiceHighErrorRate"]}
+      - {column: matcher, description: "Alertmanager matcher, e.g. severity=\"critical\" or service=~\"pay.*\""}
+      - {column: receiver, description: "Regex on receiver (contact point) name"}
+      - {column: active, type: BOOLEAN, description: "false = only non-active (suppressed/unprocessed)"}
+      - {column: silenced, type: BOOLEAN, description: "false = hide silenced alerts"}
+      - {column: inhibited, type: BOOLEAN, description: "false = hide inhibited alerts"}
+      - {column: alertmanager, description: "grafana (default) or the uid of an external Alertmanager data source"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: alertname, path: labels.alertname}
+      - {name: state, path: status.state, description: "active | suppressed | unprocessed"}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt, transform: auto_time}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt, transform: auto_time, description: "Expected resolve time if no new evaluation arrives"}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: auto_time}
+      - {name: severity, path: labels.severity}
+      - {name: service, path: labels.service}
+      - {name: folder, path: labels.grafana_folder}
+      - {name: rule_uid, path: "labels.__alert_rule_uid__"}
+      - {name: summary, path: annotations.summary}
+      - {name: receivers, expr: "(_.receivers or []) | map(attribute='name') | join(',')", description: "Contact points notified"}
+      - {name: active, type: BOOLEAN, expr: "_.status.state == 'active'"}
+      - {name: silenced, type: BOOLEAN, expr: "(_.status.silencedBy or []) | length > 0"}
+      - {name: inhibited, type: BOOLEAN, expr: "(_.status.inhibitedBy or []) | length > 0"}
+      - {name: silenced_by, type: JSON, path: status.silencedBy, description: "Silence ids (see grafana_silences)"}
+      - {name: inhibited_by, type: JSON, path: status.inhibitedBy}
+      - {name: fingerprint}
+      - {name: url, path: generatorURL, description: "Absolute link to the alert rule"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+      - {name: matcher, filter_only: true}
+      - {name: receiver, filter_only: true}
+      - {name: alertmanager, filter_only: true}
+    pitfalls:
+      - "Only alerts that reached the Alertmanager appear (firing, after the pending period). Pending alerts are in grafana_alert_instances."
+      - "Alerts routed to an external Alertmanager only (admin config) are not in the Grafana Alertmanager."
+    examples:
+      - sql: "SELECT alertname, state, starts_at, severity, service, receivers, silenced FROM grafana_active_alerts ORDER BY starts_at"
+        description: What is currently firing and who was notified?
+      - sql: "SELECT alertname, starts_at, labels FROM grafana_active_alerts WHERE matcher = 'severity=\"critical\"' AND silenced = false"
+        description: Unsilenced critical alerts.
+    fixtures:
+      - file: am_alerts.json
+        expect_rows: 2
+        expect_columns: {alertname: PaymentServiceHighErrorRate, state: active, receivers: oncall-slack, rule_uid: pay-err-rate, silenced: false, starts_at: "2026-10-01T11:42:00Z"}
+        note: "Built strictly from the gettableAlerts / gettableAlert / alertStatus / receiver schemas of Grafana's alerting OpenAPI spec (post.json, route RouteGetGrafanaAMAlerts); the docs give no example."
+    ui_link: "{{ source.base_url }}/alerting/groups"
+    docs_url: https://github.com/grafana/grafana/blob/main/pkg/services/ngalert/api/tooling/post.json
+
+  - name: grafana_silences
+    title: Alertmanager silences
+    description: >-
+      Silences of Grafana's Alertmanager (GET /api/alertmanager/grafana/api/v2/silences): matchers,
+      active window, author, comment and the silenced rule. An active silence explains a missing
+      page. Optional matcher filter.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/alertmanager/{{ filters.alertmanager or 'grafana' }}/api/v2/silences"
+      query:
+        filter: "{{ filters.matcher }}"
+        ruleMetadata: true
+    filters:
+      - {column: matcher, description: "Only silences matching this label matcher, e.g. service=\"order-service\""}
+      - {column: alertmanager, description: "grafana (default) or an external Alertmanager data source uid"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id}
+      - {name: state, path: status.state, description: "active | pending | expired"}
+      - {name: starts_at, type: TIMESTAMP, path: startsAt, transform: auto_time}
+      - {name: ends_at, type: TIMESTAMP, path: endsAt, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: auto_time}
+      - {name: author, path: createdBy}
+      - {name: comment}
+      - {name: matchers, type: JSON, path: matchers, description: "[{name, value, isRegex, isEqual}]"}
+      - {name: rule_uid, path: metadata.rule_uid}
+      - {name: rule_title, path: metadata.rule_title}
+      - {name: folder_uid, path: metadata.folder_uid}
+      - {name: matcher, filter_only: true}
+      - {name: alertmanager, filter_only: true}
+    pitfalls:
+      - "Expired silences are kept for a while and returned too: filter state = 'active'."
+    examples:
+      - sql: "SELECT id, state, starts_at, ends_at, author, comment, matchers FROM grafana_silences WHERE state = 'active'"
+        description: Which alerts are muted right now, by whom and why?
+    fixtures:
+      - file: silences.json
+        expect_rows: 1
+        expect_columns: {state: active, author: alice, rule_uid: ord-latency, starts_at: "2026-10-01T11:30:00Z"}
+        note: "Built strictly from the gettableGrafanaSilences / gettableGrafanaSilence / matcher / SilenceMetadata schemas of Grafana's alerting OpenAPI spec (post.json); the docs give no example."
+    ui_link: "{{ source.base_url }}/alerting/silences"
+    docs_url: https://github.com/grafana/grafana/blob/main/pkg/services/ngalert/api/tooling/post.json
+
+  - name: grafana_alert_state_history
+    title: Alert state history
+    description: >-
+      State transitions of Grafana-managed alert instances (GET /api/v1/rules/history) in the
+      window: previous -> new state, values at evaluation, instance labels. Filter rule_uid
+      (required on the annotation backend), state / previous_state, dashboard_uid, or one label
+      via label_name + label_value.
+    kind: events
+    request:
+      method: GET
+      path: /api/v1/rules/history
+      query:
+        from: "{{ time.start | epoch_s }}"
+        to: "{{ time.end | epoch_s }}"
+        limit: "{{ limit or 1000 }}"
+        ruleUID: "{{ filters.rule_uid }}"
+        dashboardUID: "{{ filters.dashboard_uid }}"
+        panelID: "{{ filters.panel_id }}"
+        current: "{{ filters.state }}"
+        previous: "{{ filters.previous_state }}"
+        "labels_{{ filters.label_name }}": "{{ filters.label_value if filters.label_name else none }}"
+        matchers: "{{ filters.matcher }}"
+    filters:
+      - {column: rule_uid, ops: ["=", "in"], description: "Alert rule uid (grafana_alert_rules.uid)", examples: ["pay-err-rate"]}
+      - {column: state, description: "New state: Normal | Alerting | Pending | NoData | Error | Recovering", examples: ["Alerting"]}
+      - {column: previous_state, description: "Previous state"}
+      - {column: dashboard_uid, description: "Rules linked to this dashboard"}
+      - {column: panel_id, type: BIGINT, description: "With dashboard_uid"}
+      - {column: label_name, description: "Instance label name to filter on (with label_value)"}
+      - {column: label_value, description: "Instance label value"}
+      - {column: matcher, ops: ["=", "in"], fan_out: false, description: "Prometheus-style label matchers on instance labels, e.g. service=\"payment-service\" or {severity=~\"crit.*\"} (repeated matchers param; Loki backend only)"}
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    response:
+      rows_path: "$"
+      expand:
+        - {columnar: {columns: "schema.fields", data: "data.values", orientation: column}, as: row}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@row.time", transform: epoch_ms, description: "Transition time"}
+      - {name: rule_uid, expr: "row['line']['ruleUID'] if row['line'] is mapping else filters.rule_uid"}
+      - {name: rule_title, expr: "row['line']['ruleTitle'] if row['line'] is mapping else none"}
+      - {name: state, expr: "row['line']['current'] if row['line'] is mapping else row['next']", description: "State after the transition"}
+      - {name: previous_state, expr: "row['line']['previous'] if row['line'] is mapping else row['prev']"}
+      - {name: eval_values, type: JSON, expr: "row['line']['values'] if row['line'] is mapping else row['data']", description: "Query/expression values at evaluation (refId -> value)"}
+      - {name: condition, expr: "row['line']['condition'] if row['line'] is mapping else none"}
+      - {name: error, expr: "row['line']['error'] if row['line'] is mapping else none"}
+      - {name: labels, type: JSON, expr: "row['line']['labels'] if row['line'] is mapping else none", description: "Alert instance labels (Loki backend)"}
+      - {name: fingerprint, expr: "row['line']['fingerprint'] if row['line'] is mapping else none"}
+      - {name: dashboard_uid, expr: "row['line']['dashboardUID'] if row['line'] is mapping else none"}
+      - {name: panel_id, type: BIGINT, expr: "row['line']['panelID'] if row['line'] is mapping else none"}
+      - {name: text, expr: "row['text']", description: "Annotation backend: rule + labels + values as text"}
+      - {name: stream_labels, type: JSON, expr: "row['labels'] if row['labels'] is mapping else none", description: "Loki stream labels (folderUID, group, orgID)"}
+      - {name: label_name, filter_only: true}
+      - {name: label_value, filter_only: true}
+      - {name: matcher, filter_only: true}
+    pitfalls:
+      - "Times are epoch SECONDS in the request (from/to), unlike annotations (ms)."
+      - "With the default annotation backend rule_uid is required (HTTP 400 'ruleUID is required' otherwise) and labels are only inside text; transitions are also visible in grafana_annotations WHERE type = 'alert'."
+      - "History is empty when [unified_alerting.state_history] is disabled or the Loki backend is unreachable."
+      - "Use the documented labels_<name>=<value> filter via label_name/label_value; it is ignored by the annotation backend."
+    examples:
+      - sql: >-
+          SELECT ts, previous_state, state, labels->>'service' AS service, eval_values
+          FROM grafana_alert_state_history WHERE rule_uid = 'pay-err-rate'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: When did the alert start and stop firing, and with which values?
+    fixtures:
+      - file: state_history_loki.json
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:42:00Z", rule_uid: pay-err-rate, rule_title: PaymentServiceHighErrorRate, state: Alerting, previous_state: Pending, condition: C}
+        note: "Built strictly from Grafana's source: the endpoint returns one data.Frame (schema/data JSON as in the /api/ds/query docs) built by historian/loki.go QueryResultBuilder (fields time, line=LokiEntry JSON, labels); the OpenAPI spec only says 'Frame'."
+      - file: state_history_annotations.json
+        filters: {rule_uid: pay-err-rate}
+        expect_rows: 1
+        expect_columns: {rule_uid: pay-err-rate, state: Alerting, previous_state: Pending, labels: null}
+        note: "Built strictly from Grafana's source historian/annotation.go AnnotationBackend.Query (frame 'states' with fields time, text, prev, next, data)."
+    ui_link: "{{ source.base_url }}/alerting/history"
+    docs_url: https://github.com/grafana/grafana/blob/main/pkg/services/ngalert/api/tooling/post.json
+
+  - name: grafana_contact_points
+    title: Contact points
+    description: >-
+      Notification integrations (GET /api/v1/provisioning/contact-points): one row per integration
+      (several can share a contact point name) with type (slack, email, pagerduty, webhook...)
+      and settings. Optional name filter.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/provisioning/contact-points
+      query:
+        name: "{{ filters.name }}"
+    filters:
+      - {column: name, description: "Contact point name (exact)", examples: ["email receiver"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid}
+      - {name: name}
+      - {name: type}
+      - {name: settings, type: JSON, path: settings, description: "Integration settings; secrets are redacted"}
+      - {name: disable_resolve_message, type: BOOLEAN, path: disableResolveMessage}
+      - {name: provenance}
+    pitfalls:
+      - "Needs alert.provisioning:read (or receivers read); deprecated in favour of notifications.alerting.grafana.app receivers on Grafana 13+."
+    examples:
+      - sql: "SELECT name, type, settings FROM grafana_contact_points WHERE type IN ('slack', 'pagerduty')"
+        description: Where do Grafana alerts get delivered?
+    fixtures:
+      - file: contact_points.json
+        filters: {name: email receiver}
+        expect_rows: 1
+        expect_columns: {name: email receiver, type: email, disable_resolve_message: false}
+        note: "Official docs example for GET /api/v1/provisioning/contact-points (Alerting provisioning API)."
+    ui_link: "{{ source.base_url }}/alerting/notifications"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/alerting_provisioning/#route-get-contactpoints
+
+  - name: grafana_notification_policies
+    title: Notification policy routes
+    description: >-
+      The notification policy tree (GET /api/v1/provisioning/policies), one row per first-level
+      route (or one row for the root when it has no children): receiver, matchers, grouping and
+      timing. Explains which contact point an alert with given labels goes to.
+    kind: entities
+    request: {method: GET, path: /api/v1/provisioning/policies}
+    response:
+      rows_path: "$"
+      expand:
+        - {explode: routes, as: r, keep_empty: true}
+    columns:
+      - {name: root_receiver, path: receiver, description: "Default contact point"}
+      - {name: receiver, expr: "(r.receiver if r and r.receiver else _.receiver)", description: "Contact point of this route (inherits the root's)"}
+      - {name: object_matchers, type: JSON, path: "@r.object_matchers", description: "[[label, op, value], ...]"}
+      - {name: matchers, type: JSON, path: "@r.matchers"}
+      - {name: continue_matching, type: BOOLEAN, path: "@r.continue"}
+      - {name: group_by, type: JSON, expr: "(r.group_by if r and r.group_by else _.group_by)"}
+      - {name: group_wait, expr: "(r.group_wait if r and r.group_wait else _.group_wait)"}
+      - {name: group_interval, expr: "(r.group_interval if r and r.group_interval else _.group_interval)"}
+      - {name: repeat_interval, expr: "(r.repeat_interval if r and r.repeat_interval else _.repeat_interval)"}
+      - {name: mute_time_intervals, type: JSON, path: "@r.mute_time_intervals"}
+      - {name: active_time_intervals, type: JSON, path: "@r.active_time_intervals"}
+      - {name: child_routes, type: JSON, path: "@r.routes", description: "Nested routes below this one (not flattened)"}
+      - {name: provenance, path: provenance}
+    pitfalls:
+      - "Only the first level is flattened; deeper routes are in child_routes JSON."
+      - "Timing fields that are null inherit from the parent route (Alertmanager defaults when unset everywhere)."
+    examples:
+      - sql: "SELECT receiver, object_matchers, group_by, repeat_interval, mute_time_intervals FROM grafana_notification_policies"
+        description: Which policy routes alerts to which contact point (why was nobody paged?).
+    fixtures:
+      - file: policies.json
+        expect_rows: 1
+        expect_columns: {root_receiver: My Contact Email Point, receiver: My Contact Email Point, object_matchers: "[[\"monitor\",\"=\",\"testdata\"]]", mute_time_intervals: "[\"weekends\"]"}
+        note: "Built from the Route schema (Alerting provisioning API docs / post.json) with the values of the documented policy-tree export example (YAML in the docs, converted to the JSON field names of Route)."
+    ui_link: "{{ source.base_url }}/alerting/routes"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/alerting_provisioning/#route-get-policy-tree
+
+  - name: grafana_mute_timings
+    title: Mute timings
+    description: >-
+      Mute timings of Grafana Alertmanager (GET /api/v1/provisioning/mute-timings): one row per
+      (mute timing, time interval) with weekdays, clock times, days of month, months, years and
+      time zone. A notification policy route that lists a mute timing in mute_time_intervals
+      sends nothing while it is active - a common reason why "nobody was paged".
+    kind: entities
+    request: {method: GET, path: /api/v1/provisioning/mute-timings}
+    response:
+      rows_path: "$"
+      expand:
+        - {explode: time_intervals, as: ti, keep_empty: true}
+    columns:
+      - {name: name, description: "Mute timing name (referenced by grafana_notification_policies.mute_time_intervals)"}
+      - {name: times, type: JSON, path: "@ti.times", description: "[{start_time: '18:00', end_time: '24:00'}] (HH:MM, end exclusive)"}
+      - {name: weekdays, type: JSON, path: "@ti.weekdays", description: "e.g. [\"saturday\", \"sunday\"] or ranges [\"monday:friday\"]"}
+      - {name: days_of_month, type: JSON, path: "@ti.days_of_month", description: "e.g. [\"1:7\"], negative counts from month end"}
+      - {name: months, type: JSON, path: "@ti.months"}
+      - {name: years, type: JSON, path: "@ti.years"}
+      - {name: location, path: "@ti.location", description: "IANA time zone of the interval (UTC when empty)"}
+      - {name: version, path: version}
+      - {name: provenance, path: provenance}
+      - {name: time_interval, type: JSON, path: "@ti"}
+    pitfalls:
+      - "An interval matches only when ALL its set fields match (times AND weekdays AND ...); several intervals of one mute timing are OR-ed."
+      - "Times are evaluated in location (default UTC), not in the viewer's time zone."
+      - "Needs alert.provisioning:read (or alert.notifications.time-intervals:read)."
+    examples:
+      - sql: "SELECT name, weekdays, times, location FROM grafana_mute_timings WHERE name IN ('weekends', 'maintenance-window')"
+        description: Was a mute timing referenced by the matching notification policy active when the alert fired?
+    fixtures:
+      - file: mute_timings.json
+        expect_rows: 2
+        expect_columns: {name: weekends, weekdays: "[\"saturday\",\"sunday\"]", location: Europe/Berlin, times: null}
+        note: "Built strictly from the MuteTimings / MuteTimeInterval / TimeInterval / TimeRange schemas of the Alerting provisioning API docs (TimeRange example 18:00-24:00); the docs give no full example."
+    ui_link: "{{ source.base_url }}/alerting/routes?tab=mute_timings"
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/alerting_provisioning/#route-get-mute-timings
+
+  # ------------------------------------------------------------------------------------------
+  # Instance health / settings
+  # ------------------------------------------------------------------------------------------
+  - name: grafana_health
+    title: Grafana health
+    description: "Grafana server health (GET /api/health, no auth needed) - version, commit and database status. Use to confirm connectivity and version before other calls."
+    kind: entities
+    request: {method: GET, path: /api/health}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: version}
+      - {name: build_commit, path: commit}
+      - {name: database_status, path: database, description: "ok when the Grafana database is reachable"}
+      - {name: enterprise_commit, path: enterpriseCommit}
+    examples:
+      - sql: "SELECT version, database_status FROM grafana_health"
+        description: Is Grafana up and which version is it (decides legacy vs /apis behaviour)?
+    fixtures:
+      - file: health.json
+        expect_rows: 1
+        expect_columns: {version: 5.1.3, database_status: ok, build_commit: "087143285"}
+        note: "Official docs example for GET /api/health (Other HTTP API, legacy)."
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/other/#health-api
+
+  - name: grafana_frontend_settings
+    title: Frontend settings (data source map, version)
+    description: >-
+      Data sources as the frontend sees them plus build info and the default data source
+      (GET /api/frontend/settings). One row per data source entry. Mostly useful to learn the
+      default data source and the Grafana version when /api/datasources is forbidden.
+    kind: entities
+    request: {method: GET, path: /api/frontend/settings}
+    response:
+      rows_path: "$"
+      expand:
+        - {entries: datasources, as: d}
+    columns:
+      - {name: datasource_name, path: "@d.key"}
+      - {name: uid, path: "@d.value.uid"}
+      - {name: type, expr: "d.value.type or (d.value.meta.id if d.value.meta else none) or (d.value.meta.type if d.value.meta else none)"}
+      - {name: is_default, type: BOOLEAN, expr: "d.key == root.defaultDatasource or (d.value.isDefault or false)"}
+      - {name: default_datasource, path: "$.defaultDatasource"}
+      - {name: grafana_version, path: "$.buildInfo.version"}
+      - {name: grafana_commit, path: "$.buildInfo.commit"}
+      - {name: app_sub_url, path: "$.appSubUrl"}
+      - {name: meta, type: JSON, path: "@d.value.meta"}
+    examples:
+      - sql: "SELECT datasource_name, uid, type, is_default, grafana_version FROM grafana_frontend_settings"
+        description: Data sources and Grafana version from the frontend bootstrap payload.
+    fixtures:
+      - file: frontend_settings.json
+        expect_rows: 1
+        expect_columns: {datasource_name: datasourcename, type: grafanasearch, is_default: false, default_datasource: Grafana, grafana_version: zzzzz}
+        note: "Official docs example for GET /api/frontend/settings (Other HTTP API, legacy); the placeholder buildstamp xxxxxx replaced by 0 to make it valid JSON."
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/other/#get-settings
+
+  # ------------------------------------------------------------------------------------------
+  # Writes (staged; a human approves in Slack before execution)
+  # ------------------------------------------------------------------------------------------
+  - name: grafana_dashboard_write
+    title: Save (create or update) a dashboard
+    description: >-
+      WRITE, human-approved. Saves a dashboard (POST /api/dashboards/db) - used for dashboard
+      repair tasks. Provide uid and dashboard_json (the complete dashboard model, normally
+      grafana_dashboard.dashboard_json edited), plus folder_uid (copy grafana_dashboard.folder_uid,
+      or the dashboard moves to the root folder), message, and overwrite (default false).
+    kind: write
+    request:
+      method: POST
+      path: /api/dashboards/db
+      headers: {Content-Type: application/json}
+      body_format: text
+      body: >-
+        {"dashboard": {{ filters.dashboard_json if filters.dashboard_json is string else (filters.dashboard_json | tojson) }},
+        "folderUid": {{ (filters.folder_uid or none) | tojson }},
+        "message": {{ (filters.message or 'Saved by OmniOps (approved in Slack)') | tojson }},
+        "overwrite": {{ 'true' if (filters.overwrite | string | lower) in ['true', '1'] else 'false' }}}
+    filters:
+      - {column: uid, required: true, description: "uid of the dashboard being saved; must equal dashboard_json's uid", examples: ["user-access-cache-review"]}
+      - {column: dashboard_json, required: true, description: "Complete dashboard JSON object (string). Keep uid and the current version for optimistic locking; id may be kept or null.", examples: ['{"uid": "user-access-cache-review", "title": "User Access Cache Review", "version": 1, "panels": []}']}
+      - {column: folder_uid, description: "Target folder uid (omit = root folder!)"}
+      - {column: message, description: "Version-history commit message", examples: ["Repair cache review dashboard: user-service cache lag panels"]}
+      - {column: overwrite, type: BOOLEAN, description: "true = ignore version conflicts / replace a dashboard with the same uid"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: uid}
+      - {name: id, type: BIGINT, path: id}
+      - {name: url, path: url}
+      - {name: status, description: "success"}
+      - {name: version, type: BIGINT, path: version, description: "New version number"}
+      - {name: slug}
+      - {name: dashboard_json, type: JSON, filter_only: true}
+      - {name: folder_uid, filter_only: true}
+      - {name: message, filter_only: true}
+      - {name: overwrite, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "Omitting folder_uid on update moves the dashboard to the root folder (documented)."
+      - "HTTP 412 status=version-mismatch: someone saved in between; re-read grafana_dashboard and re-apply, or set overwrite = true. name-exists: uid already used by another dashboard. plugin-dashboard: owned by a plugin."
+      - "The engine cannot merge JSON, so uid is not injected: dashboard_json must already contain the same uid, else a different dashboard is created/overwritten."
+      - "Provisioned (file-based) dashboards may be reverted on restart; check grafana_dashboard.provisioned."
+      - "Change only what the task asks: keep existing panels (ids, gridPos, targets) and settings unchanged so diffs stay minimal."
+    examples:
+      - sql: >-
+          SELECT uid, version, url, status FROM grafana_dashboard_write
+          WHERE uid = 'svc-annotate' AND folder_uid = '' AND message = 'Add order/payment deployment annotations'
+            AND dashboard_json = '{"uid": "svc-annotate", "title": "Service Overview Annotate", "version": 1, "panels": [], "annotations": {"list": []}}'
+        description: Stage a dashboard save (executed only after a human approves it in Slack).
+    fixtures:
+      - file: dashboard_save.json
+        filters: {uid: e883f11b-77c0-4ee3-9a70-3ba223d66e56}
+        expect_rows: 1
+        expect_columns: {uid: e883f11b-77c0-4ee3-9a70-3ba223d66e56, status: success, version: 2, url: /d/e883f11b-77c0-4ee3-9a70-3ba223d66e56/production-overview-updated}
+        note: "Official docs example response of POST /api/dashboards/db (Dashboard API legacy section, v12.4 docs); its JSON syntax errors (missing/trailing comma) fixed."
+    ui_link: "{{ source.base_url }}/d/{{ filters.uid }}"
+    docs_url: https://grafana.com/docs/grafana/v12.4/developers/http_api/dashboard/#create--update-dashboard
+
+  - name: grafana_annotation_write
+    title: Create an annotation
+    description: >-
+      WRITE, human-approved. Posts an annotation (POST /api/annotations), e.g. to mark the incident
+      start, mitigation or a rollback on dashboards. text is required; ts defaults to now; ts_end
+      makes a region; dashboard_uid + panel_id scope it (otherwise it is an org annotation found by tag).
+    kind: write
+    request:
+      method: POST
+      path: /api/annotations
+      body:
+        dashboardUID: "{{ filters.dashboard_uid }}"
+        panelId: "{{ filters.panel_id }}"
+        time: "{{ (filters.ts | epoch_ms) if filters.ts else (now_utc() | epoch_ms) }}"
+        timeEnd: "{{ (filters.ts_end | epoch_ms) if filters.ts_end else none }}"
+        tags: "{{ filters.tag | as_list }}"
+        text: "{{ filters.text }}"
+    filters:
+      - {column: text, required: true, description: "Annotation text", examples: ["INC-42: payment-service 5xx spike, rollback started"]}
+      - {column: tag, ops: ["=", "in"], fan_out: false, description: "Tags (IN = several tags on one annotation)", examples: ["incident"]}
+      - {column: dashboard_uid, description: "Attach to a dashboard (else org-wide)"}
+      - {column: panel_id, type: BIGINT, description: "Attach to one panel (with dashboard_uid)"}
+      - {column: ts, type: TIMESTAMP, description: "Event time (default now)"}
+      - {column: ts_end, type: TIMESTAMP, description: "Region end"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: message, path: message, description: "Annotation added"}
+      - {name: text, filter_only: true}
+      - {name: tag, filter_only: true}
+      - {name: dashboard_uid, filter_only: true}
+      - {name: panel_id, type: BIGINT, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+      - {name: ts_end, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "time/timeEnd are epoch milliseconds (the manifest converts ts)."
+      - "An org annotation (no dashboard_uid) only shows on dashboards whose built-in annotation query filters by its tags."
+    examples:
+      - sql: "SELECT id, message FROM grafana_annotation_write WHERE text = 'INC-42 mitigated: rolled back payment-service v2.3.1' AND tag IN ('incident', 'omniops') AND dashboard_uid = 'svc-overview'"
+        description: Stage an annotation marking the mitigation on the service dashboard.
+    fixtures:
+      - file: annotation_create.json
+        expect_rows: 1
+        expect_columns: {id: 1, message: Annotation added}
+        note: "Official docs example response of POST /api/annotations (Annotations API, legacy); trailing comma removed."
+    docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/annotations/#create-annotation
+
+roles:
+  dashboards:
+    - table: grafana_search
+      filters: {query: "{{ service }}", type: dash-db}
+      columns: {title: title, id: uid, url: url, tags: tags}
+      notes: "Title search; follow up with grafana_dashboard_panels WHERE dashboard_uid = uid"
+    - table: grafana_dashboard_panels
+      columns: {id: dashboard_uid, title: panel_title, query: expr, datasource: datasource_uid}
+  alert_rules:
+    - table: grafana_alert_rules
+      columns: {id: uid, name: title, query: query_exprs, severity: severity, labels: labels, url: runbook_url, ts: updated}
+    - table: grafana_alert_rule_queries
+      filters: {rule_uid: "{{ alert_id }}"}
+      columns: {id: rule_uid, name: rule_title, query: expr}
+  active_alerts:
+    - table: grafana_active_alerts
+      columns: {ts: starts_at, name: alertname, state: state, severity: severity, service: service, labels: labels, url: url, id: rule_uid}
+    - table: grafana_alert_rule_status
+      filters: {state: firing}
+      columns: {ts: active_at, name: rule_name, state: state, severity: severity, labels: labels, id: rule_uid}
+  alert_history:
+    - table: grafana_alert_state_history
+      filters: {rule_uid: "{{ alert_id }}"}
+      columns: {ts: ts, id: rule_uid, name: rule_title, state: state, labels: labels}
+    - table: grafana_annotations
+      filters: {type: alert}
+      columns: {ts: ts, name: alert_name, state: new_state, message: message}
+  change_events:
+    table: grafana_annotations
+    filters: {type: annotation}
+    columns: {ts: ts, title: message, tags: tags, author: author}
+    notes: "Deploy markers are usually tagged deploy / deployment / release; dashboard edits are in grafana_dashboard_versions; Loki-based deploy markers come from grafana_dashboard_annotation_queries.expr run through grafana_loki_logs or grafana_ds_query."

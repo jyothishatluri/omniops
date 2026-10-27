@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "data": {
+    "metrics": [
+      {"metricName": "k8s.node.cpu.usage", "description": "Total CPU usage (sum of all cores per second) averaged over the sample window", "type": "gauge", "unit": "{cpu}", "temporality": "unspecified", "isMonotonic": false},
+      {"metricName": "signoz_calls_total", "description": "Count of calls (span metrics)", "type": "sum", "unit": "", "temporality": "cumulative", "isMonotonic": true},
+      {"metricName": "jvm.gc.duration.bucket", "description": "Duration of JVM garbage collection actions.", "type": "histogram", "unit": "s", "temporality": "cumulative", "isMonotonic": false}
+    ]
+  }
+}

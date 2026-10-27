@@ -1,0 +1,6 @@
+{
+  "timeSeries": [],
+  "executionErrors": [
+    {"code": 8, "message": "Query exceeded the maximum number of time series that can be read; results are incomplete"}
+  ]
+}

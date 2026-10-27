@@ -1,0 +1,27 @@
+{
+  "platform": "edgedelta",
+  "description": "The same Edge Delta monitor and group back to normal: the template's {{#is_recovery}} block with a bold RECOVERED label.",
+  "provenance": "Edge Delta docs, Monitor Notifications (RECOVERED state, {{#is_recovery}} / {{#is_alert_recovery}} conditional blocks, monitor link https://app.edgedelta.com/monitors/{{monitor.id}}). Same template as edgedelta_monitor.json.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B17EDGEDLT",
+    "username": "Edge Delta",
+    "text": "**RECOVERED**: The monitor has returned to normal.\nMonitor: <https://app.edgedelta.com/monitors/1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60789|Checkout error log spike>\nGroup: service.name=checkout, k8s.namespace.name=shop\nValue: 41\nAlert threshold: 200\nEvaluated: 2026-10-20T14:17:00Z to 2026-10-20T14:22:00Z",
+    "ts": "1792506141.001100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792506141.001100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "edgedelta",
+    "rule_id": "1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60789",
+    "status": "resolved",
+    "raw_status": "RECOVERED",
+    "is_recovery": true,
+    "value": "41",
+    "window_start": "2026-10-20T14:17:00Z",
+    "window_end": "2026-10-20T14:22:00Z",
+    "same_key_as": "edgedelta_monitor.json"
+  }
+}

@@ -1,0 +1,4 @@
+# Self-hosted Prometheus. All tables come from templates/prometheus.yaml.
+source: prometheus
+display_name: Prometheus
+extends: prometheus

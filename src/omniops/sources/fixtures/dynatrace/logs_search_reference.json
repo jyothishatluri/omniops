@@ -1,0 +1,21 @@
+{
+ "nextSliceKey": "___-2hI03q0AAAAAAAAAAAAAA-gAAAAAAAAH0P____8AAABkAAAACXRpbWVzdGFtcAD___7aEjTerQ",
+ "results": [
+  {
+   "additionalColumns": {
+    "custom.attribute": [
+     "value1",
+     "value2"
+    ],
+    "loglevel": [
+     "SEVERE"
+    ]
+   },
+   "content": "example log content",
+   "event.type": "LOG",
+   "status": "ERROR",
+   "timestamp": "1631193089000"
+  }
+ ],
+ "sliceSize": 100
+}

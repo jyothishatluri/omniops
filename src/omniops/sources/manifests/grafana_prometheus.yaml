@@ -1,0 +1,172 @@
+# Prometheus HTTP API reached through Grafana's data-source proxy:
+#   {GRAFANA_URL}/api/datasources/proxy/uid/{GRAFANA_PROMETHEUS_UID}/api/v1/...
+# Use this when only Grafana is reachable / credentialed (Grafana Cloud, o11y-bench, locked-down
+# Prometheus behind Grafana). Every table comes from templates/prometheus.yaml (renamed to the
+# grafana_prometheus_ prefix); this file only swaps base URL + auth and adds Grafana deep links,
+# doc links, fixture provenance and a label-names table.
+# Research notes: docs/sources/grafana_prometheus.md
+source: grafana_prometheus
+display_name: Prometheus via Grafana
+vendor: Grafana Labs / Prometheus (CNCF)
+extends: prometheus
+description: >-
+  Prometheus-compatible metrics API (PromQL range/instant queries, series, labels, metadata,
+  alerts, rules, targets) proxied by Grafana for one Prometheus/Mimir data source.
+docs_url: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/data_source/#data-source-proxy-calls
+categories: [metrics, alerts]
+base_url: "{{ env.GRAFANA_URL.rstrip('/') }}/api/datasources/proxy/uid/{{ env.GRAFANA_PROMETHEUS_UID }}"
+ui_base_url: "{{ env.GRAFANA_URL.rstrip('/') }}"
+env:
+  - {name: GRAFANA_URL, description: "Grafana root URL incl. any sub-path, no trailing /api. o11y-bench: http://localhost:3000"}
+  - {name: GRAFANA_TOKEN, description: "Service account token (needs datasources:query on the Prometheus data source). Optional with anonymous access (o11y-bench)", secret: true}
+  - {name: GRAFANA_USERNAME, description: "Basic-auth user (self-hosted only; used when GRAFANA_TOKEN is unset)"}
+  - {name: GRAFANA_PASSWORD, description: "Basic-auth password", secret: true}
+  - {name: GRAFANA_ORG_ID, description: "Optional X-Grafana-Org-Id header"}
+  - {name: GRAFANA_PROMETHEUS_UID, description: "uid of the Prometheus-type data source to proxy (o11y-bench: prometheus; Grafana Cloud: usually grafanacloud-prom)", default: prometheus}
+required_env: [GRAFANA_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: "{{ ('Bearer ' ~ env.GRAFANA_TOKEN) if env.GRAFANA_TOKEN else (('Basic ' ~ ((env.GRAFANA_USERNAME ~ ':' ~ (env.GRAFANA_PASSWORD or '')) | b64)) if env.GRAFANA_USERNAME else None) }}"
+headers:
+  X-Grafana-Org-Id: "{{ env.GRAFANA_ORG_ID }}"
+rate_limit:
+  concurrency: 4
+  notes: "Grafana's data proxy times out after [dataproxy] timeout (default 30s); long range queries over many series hit it first."
+# Template pitfalls (unknown metric = 0 series, 11k points cap) are kept; these are added.
+append:
+  pitfalls:
+  - "Requests go to {GRAFANA_URL}/api/datasources/proxy/uid/{GRAFANA_PROMETHEUS_UID}/...: HTTP 404 'data source not found' = wrong uid (look it up in grafana_datasources); 403 = the token lacks datasources:query on it."
+  - "Grafana forwards the Prometheus response unchanged, so status=error bodies and PromQL error messages are the upstream ones."
+  - "/api/v1/rules and /api/v1/alerts here are the Prometheus server's own rules. Grafana-managed alerts are in grafana_alert_rule_status / grafana_active_alerts."
+  - "The data proxy timeout (default 30s) is shorter than Prometheus' own query timeout: narrow the window or aggregate before fetching."
+
+tables:
+  - name: grafana_prometheus_query_range
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries
+    ui_link: "{{ env.GRAFANA_URL.rstrip('/') }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'omni': {'datasource': env.GRAFANA_PROMETHEUS_UID, 'queries': [{'refId': 'A', 'expr': filters.query, 'range': true, 'datasource': {'type': 'prometheus', 'uid': env.GRAFANA_PROMETHEUS_UID}}], 'range': {'from': time.start | epoch_ms | string, 'to': time.end | epoch_ms | string}}} | tojson | urlencode }}"
+    examples:
+      - sql: >-
+          SELECT labels->>'job' AS job, max(value) AS peak, arg_max(ts, value) AS peak_at
+          FROM grafana_prometheus_query_range
+          WHERE query = 'sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per service (o11y-bench uses label status) over an hour, and when it peaked.
+      - sql: >-
+          SELECT ts, value FROM grafana_prometheus_query_range
+          WHERE query = 'max(service_cache_refresh_lag_seconds{job="user-service"})'
+          ORDER BY value DESC LIMIT 1
+        description: Peak cache refresh lag of user-service in the window.
+    fixtures:
+      - file: query_range.json
+        filters: {query: up}
+        expect_rows: 4
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+        note: "Prometheus HTTP API docs example (range query); Grafana's data-source proxy returns the upstream body unchanged."
+      - file: query_error.json
+        filters: {query: 'sum(rate(http_requests_total{'}
+        expect_error: "parse error"
+        note: "Prometheus HTTP API 'Format overview' error envelope {status: error, errorType, error} (https://prometheus.io/docs/prometheus/latest/querying/api/#format-overview) with a typical PromQL parse error; Grafana's proxy forwards it unchanged. Proves the template's status=error rule fires."
+
+  - name: grafana_prometheus_query
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#instant-queries
+    ui_link: "{{ env.GRAFANA_URL.rstrip('/') }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'omni': {'datasource': env.GRAFANA_PROMETHEUS_UID, 'queries': [{'refId': 'A', 'expr': filters.query, 'instant': true, 'range': false, 'datasource': {'type': 'prometheus', 'uid': env.GRAFANA_PROMETHEUS_UID}}], 'range': {'from': time.start | epoch_ms | string, 'to': time.end | epoch_ms | string}}} | tojson | urlencode }}"
+    fixtures:
+      - file: query_vector.json
+        filters: {query: up}
+        expect_rows: 2
+        expect_columns: {value: 1.0, metric: up}
+        note: "Prometheus HTTP API docs example (instant query, vector result), proxied unchanged by Grafana."
+
+  - name: grafana_prometheus_series
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#finding-series-by-label-matchers
+    fixtures:
+      - file: series.json
+        filters: {match: up}
+        expect_rows: 3
+        note: "Prometheus HTTP API docs example (series), proxied unchanged by Grafana."
+
+  - name: grafana_prometheus_label_values
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#querying-label-values
+    fixtures:
+      - file: label_values.json
+        filters: {label: job}
+        expect_rows: 2
+        expect_columns: {value: node}
+        note: "Prometheus HTTP API docs example (label values), proxied unchanged by Grafana."
+
+  - name: grafana_prometheus_metric_metadata
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#querying-metric-metadata
+    fixtures:
+      - file: metadata.json
+        expect_rows: 3
+        expect_columns: {metric: cortex_ring_tokens, type: gauge}
+        note: "Prometheus HTTP API docs example (metric metadata), proxied unchanged by Grafana."
+
+  - name: grafana_prometheus_alerts
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#alerts
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: HighErrorRate, state: firing}
+        note: "Prometheus HTTP API docs example (alerts), proxied unchanged by Grafana. These are Prometheus-evaluated alerts, not Grafana-managed ones."
+
+  - name: grafana_prometheus_rules
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#rules
+    fixtures:
+      - file: rules.json
+        expect_rows: 2
+        expect_columns: {rule_name: HighRequestLatency, type: alerting}
+        note: "Prometheus HTTP API docs example (rules), proxied unchanged by Grafana."
+
+  - name: grafana_prometheus_targets
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#targets
+    fixtures:
+      - file: targets.json
+        expect_rows: 1
+        expect_columns: {job: prometheus, health: up}
+        note: "Prometheus HTTP API docs example (targets), proxied unchanged by Grafana."
+
+  - name: grafana_prometheus_labels
+    title: Label names
+    description: >-
+      List label names (GET /api/v1/labels), optionally only those of series matching match and
+      seen in the time window. Use it to discover how services are labelled (job vs service vs
+      service_name) before writing PromQL.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/labels
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        limit: "{{ limit }}"
+    filters:
+      - {column: match, description: "Optional series selector to scope label names, e.g. http_requests_total", examples: ["http_requests_total"]}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: label, path: ".", description: "Label name"}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "start/end are approximate: names of series without samples in the window may be returned."
+      - "limit (Prometheus >= 2.51 / 3.x) truncates silently; older servers ignore it."
+    examples:
+      - sql: "SELECT label FROM grafana_prometheus_labels WHERE match = 'http_requests_total' ORDER BY label"
+        description: Which labels does the request counter carry (job, instance, status, ...)?
+    fixtures:
+      - file: labels.json
+        expect_rows: 21
+        expect_columns: {label: __name__}
+        note: "Prometheus HTTP API docs example for GET /api/v1/labels, proxied unchanged by Grafana."
+    docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/#getting-label-names
+
+roles:
+  metrics:
+    table: grafana_prometheus_query_range
+    query_language: promql
+    notes: "o11y-bench: services are the job label (webapp, api-gateway, user-service, order-service, payment-service); HTTP status label is status."

@@ -1,0 +1,44 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "aiIssues": {
+          "incidentsEvents": {
+            "incidents": [
+              {
+                "description": [
+                  "Policy: 'e2e: hrr9ISoLd'. Condition: 'e2e: VceqCmtcT'"
+                ],
+                "incidentId": "693b7dcb-5a6b-4923-acaa-9d4e7e568ae5",
+                "priority": "CRITICAL",
+                "state": "CLOSED",
+                "title": "[\"Provider . Burst Balance . Average < 1 at least once in 2 minutes on 'vol-03e3199dd4b4ffac4'\"]",
+                "updatedAt": 1651060591602
+              },
+              {
+                "description": [
+                  "Policy: 'e2e: hrr9ISoLd'. Condition: 'e2e: VceqCmtcT'"
+                ],
+                "incidentId": "fb0dcb8b-052f-4056-8579-ff7cae8fa879",
+                "priority": "CRITICAL",
+                "state": "CLOSED",
+                "title": "[\"Provider . Burst Balance . Average < 1 at least once in 2 minutes on 'vol-00163b96c3ccd2199'\"]",
+                "updatedAt": 1651060587005
+              },
+              {
+                "description": [
+                  "Policy: 'AirMonitor ML Dashboard Staging'. Condition: 'Latency in Staging'"
+                ],
+                "incidentId": "42bcd3e2-bc2d-4a3d-9e85-ebd8597e6eba",
+                "priority": "CRITICAL",
+                "state": "CLOSED",
+                "title": "[\"Metric query result is > 0.69 for 5 minutes on 'Latency in Staging'\"]",
+                "updatedAt": 1651060560312
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

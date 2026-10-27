@@ -1,0 +1,26 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "alerts": {
+          "policiesSearch": {
+            "nextCursor": "/8o0y2qiR54m6thkdgHgwg==:jZTXDFKbTkhKwvMx+CtsPVM=",
+            "policies": [
+              {
+                "id": "3455",
+                "incidentPreference": "PER_POLICY",
+                "name": "First Policy Name"
+              },
+              {
+                "id": "2123",
+                "incidentPreference": "PER_POLICY",
+                "name": "Another Policy"
+              }
+            ],
+            "totalCount": 745
+          }
+        }
+      }
+    }
+  }
+}

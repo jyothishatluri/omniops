@@ -1,0 +1,5 @@
+Running with gitlab-runner 16.11.1 (535ced5f)
+  on docker-runner s_89e5e9956577
+Preparing the "docker" executor
+$ bundle exec rspec
+ERROR: Job failed: exit code 1

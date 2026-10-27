@@ -1,0 +1,38 @@
+{
+  "meta": {
+    "status": "done",
+    "request_id": "MlNkM2lwdXpSMXExVndrWldqV2F0d3xYU1dqejF1Qm9QbU1STnF6RVQ4M3Jn",
+    "page": {
+      "after": "eyJhZnRlciI6eyJzdGF0dXMiOlsid2FybiIsIm5vdGljZSIsImluZm8iXX19"
+    },
+    "elapsed": 399
+  },
+  "data": {
+    "buckets": [
+      {
+        "computes": {
+          "c0": 644291
+        },
+        "by": {
+          "status": "warn"
+        }
+      },
+      {
+        "computes": {
+          "c0": 223652
+        },
+        "by": {
+          "status": "notice"
+        }
+      },
+      {
+        "computes": {
+          "c0": 2886959
+        },
+        "by": {
+          "status": "info"
+        }
+      }
+    ]
+  }
+}

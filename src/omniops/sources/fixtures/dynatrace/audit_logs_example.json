@@ -1,0 +1,42 @@
+{
+ "totalCount": 5820,
+ "nextPageKey": "vu8y3hPZ3q0AAAAAAi_neQJ8qUAAAAFu0T-ECgAAAW71TAgKAAAD6AAQZXZlbnRUeXBlKExPR0lOKQC-7zLeE9nerQ",
+ "auditLogs": [
+  {
+   "logId": "157607341600050000",
+   "eventType": "LOGIN",
+   "category": "WEB_UI",
+   "entityId": "240.204.62.255",
+   "environmentId": "yasmuoujsw",
+   "user": "Dynatrace support user #877988415",
+   "userType": "USER_NAME",
+   "userOrigin": "Forwarded: 240.204.62.255",
+   "timestamp": 1576073415531,
+   "success": true
+  },
+  {
+   "logId": "157607338800050000",
+   "eventType": "LOGIN",
+   "category": "WEB_UI",
+   "entityId": "55.199.177.119",
+   "environmentId": "yasmuoujsw",
+   "user": "Dynatrace support user #490812376",
+   "userType": "USER_NAME",
+   "userOrigin": "Forwarded: 55.199.177.119",
+   "timestamp": 1576073388150,
+   "success": true
+  },
+  {
+   "logId": "157607338300060000",
+   "eventType": "LOGIN",
+   "category": "WEB_UI",
+   "entityId": "75.16.11.184",
+   "environmentId": "umsaywsjuo",
+   "user": "Dynatrace support user #765684830",
+   "userType": "USER_NAME",
+   "userOrigin": "Forwarded: 75.16.11.184",
+   "timestamp": 1576073381543,
+   "success": true
+  }
+ ]
+}

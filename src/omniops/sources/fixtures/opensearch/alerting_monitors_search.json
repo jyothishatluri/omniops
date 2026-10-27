@@ -1,0 +1,82 @@
+{
+  "took": 17,
+  "timed_out": false,
+  "_shards": {
+    "total": 5,
+    "successful": 5,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": 1,
+    "max_score": 0.6931472,
+    "hits": [
+      {
+        "_index": ".opensearch-scheduled-jobs",
+        "_type": "_doc",
+        "_id": "eGQi7GcBRS7-AJEqfAnr",
+        "_score": 0.6931472,
+        "_source": {
+          "type": "monitor",
+          "name": "my-monitor-name",
+          "enabled": true,
+          "enabled_time": 1545854942426,
+          "schedule": {
+            "period": {
+              "interval": 1,
+              "unit": "MINUTES"
+            }
+          },
+          "inputs": [
+            {
+              "search": {
+                "indices": [
+                  "*"
+                ],
+                "query": {
+                  "size": 0,
+                  "query": {
+                    "bool": {
+                      "filter": [
+                        {
+                          "range": {
+                            "@timestamp": {
+                              "from": "{{period_end}}||-1h",
+                              "to": "{{period_end}}",
+                              "include_lower": true,
+                              "include_upper": true,
+                              "format": "epoch_millis",
+                              "boost": 1
+                            }
+                          }
+                        }
+                      ],
+                      "adjust_pure_negative": true,
+                      "boost": 1
+                    }
+                  },
+                  "aggregations": {}
+                }
+              }
+            }
+          ],
+          "triggers": [
+            {
+              "id": "Sooi7GcB53a0ewuj_6MH",
+              "name": "Over",
+              "severity": "1",
+              "condition": {
+                "script": {
+                  "source": "_ctx.results[0].hits.total > 400000",
+                  "lang": "painless"
+                }
+              },
+              "actions": []
+            }
+          ],
+          "last_update_time": 1545854975758
+        }
+      }
+    ]
+  }
+}

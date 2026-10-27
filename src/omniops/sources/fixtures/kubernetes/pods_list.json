@@ -1,0 +1,429 @@
+{
+ "kind": "PodList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "thumbnailer-6f7b9c8d5-k2v7p",
+    "generateName": "thumbnailer-6f7b9c8d5-",
+    "namespace": "batch",
+    "uid": "3d7f2c1e-5a8b-4c6d-9e0f-1a2b3c4d5e6f",
+    "resourceVersion": "48120",
+    "creationTimestamp": "2026-10-01T11:40:12Z",
+    "labels": {
+     "app": "thumbnailer",
+     "pod-template-hash": "6f7b9c8d5"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "thumbnailer-6f7b9c8d5",
+      "uid": "8a9b0c1d-2e3f-4a5b-6c7d-8e9f0a1b2c3d",
+      "controller": true,
+      "blockOwnerDeletion": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "main",
+      "image": "fixture.local/thumbnailer:v1",
+      "resources": {
+       "limits": {
+        "memory": "64Mi"
+       },
+       "requests": {
+        "cpu": "10m",
+        "memory": "32Mi"
+       }
+      },
+      "terminationMessagePath": "/dev/termination-log",
+      "terminationMessagePolicy": "File",
+      "imagePullPolicy": "IfNotPresent"
+     }
+    ],
+    "restartPolicy": "Always",
+    "terminationGracePeriodSeconds": 30,
+    "dnsPolicy": "ClusterFirst",
+    "serviceAccountName": "default",
+    "nodeName": "incident-bench-worker",
+    "schedulerName": "default-scheduler"
+   },
+   "status": {
+    "phase": "Running",
+    "conditions": [
+     {
+      "type": "PodReadyToStartContainers",
+      "status": "True",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:40:14Z"
+     },
+     {
+      "type": "Initialized",
+      "status": "True",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:40:12Z"
+     },
+     {
+      "type": "Ready",
+      "status": "False",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:52:20Z",
+      "reason": "ContainersNotReady",
+      "message": "containers with unready status: [main]"
+     },
+     {
+      "type": "ContainersReady",
+      "status": "False",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:52:20Z",
+      "reason": "ContainersNotReady",
+      "message": "containers with unready status: [main]"
+     },
+     {
+      "type": "PodScheduled",
+      "status": "True",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:40:12Z"
+     }
+    ],
+    "hostIP": "172.18.0.2",
+    "hostIPs": [
+     {
+      "ip": "172.18.0.2"
+     }
+    ],
+    "podIP": "10.244.1.23",
+    "podIPs": [
+     {
+      "ip": "10.244.1.23"
+     }
+    ],
+    "startTime": "2026-10-01T11:40:12Z",
+    "containerStatuses": [
+     {
+      "name": "main",
+      "state": {
+       "waiting": {
+        "reason": "CrashLoopBackOff",
+        "message": "back-off 1m20s restarting failed container=main pod=thumbnailer-6f7b9c8d5-k2v7p_batch(3d7f2c1e-5a8b-4c6d-9e0f-1a2b3c4d5e6f)"
+       }
+      },
+      "lastState": {
+       "terminated": {
+        "exitCode": 137,
+        "reason": "OOMKilled",
+        "startedAt": "2026-10-01T11:52:02Z",
+        "finishedAt": "2026-10-01T11:52:19Z",
+        "containerID": "containerd://65183c1877aaec2e8427bc95609cc52677a454b56fcb24340dbd22917c23b10f"
+       }
+      },
+      "ready": false,
+      "restartCount": 4,
+      "started": false,
+      "image": "fixture.local/thumbnailer:v1",
+      "imageID": "fixture.local/thumbnailer@sha256:5b2c0f1e9d8a7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a19087",
+      "containerID": "containerd://65183c1877aaec2e8427bc95609cc52677a454b56fcb24340dbd22917c23b10f"
+     }
+    ],
+    "qosClass": "Burstable"
+   }
+  },
+  {
+   "metadata": {
+    "name": "report-generator-5c6d7f8b9-qz4lm",
+    "generateName": "report-generator-5c6d7f8b9-",
+    "namespace": "batch",
+    "uid": "4e8f3d2a-6b9c-4d7e-8f1a-2b3c4d5e6f70",
+    "resourceVersion": "48120",
+    "creationTimestamp": "2026-10-01T11:40:12Z",
+    "labels": {
+     "app": "report-generator",
+     "pod-template-hash": "5c6d7f8b9"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "report-generator-5c6d7f8b9",
+      "uid": "8a9b0c1d-2e3f-4a5b-6c7d-8e9f0a1b2c3d",
+      "controller": true,
+      "blockOwnerDeletion": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "main",
+      "image": "fixture.local/report-generator:v1",
+      "resources": {
+       "limits": {
+        "memory": "64Mi"
+       },
+       "requests": {
+        "cpu": "10m",
+        "memory": "16Mi"
+       }
+      },
+      "terminationMessagePath": "/dev/termination-log",
+      "terminationMessagePolicy": "File",
+      "imagePullPolicy": "IfNotPresent"
+     }
+    ],
+    "restartPolicy": "Always",
+    "terminationGracePeriodSeconds": 30,
+    "dnsPolicy": "ClusterFirst",
+    "serviceAccountName": "default",
+    "nodeName": "incident-bench-worker",
+    "schedulerName": "default-scheduler"
+   },
+   "status": {
+    "phase": "Running",
+    "conditions": [
+     {
+      "type": "PodReadyToStartContainers",
+      "status": "True",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:40:14Z"
+     },
+     {
+      "type": "Initialized",
+      "status": "True",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:40:12Z"
+     },
+     {
+      "type": "Ready",
+      "status": "False",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:52:20Z",
+      "reason": "ContainersNotReady",
+      "message": "containers with unready status: [main]"
+     },
+     {
+      "type": "ContainersReady",
+      "status": "False",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:52:20Z",
+      "reason": "ContainersNotReady",
+      "message": "containers with unready status: [main]"
+     },
+     {
+      "type": "PodScheduled",
+      "status": "True",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:40:12Z"
+     }
+    ],
+    "hostIP": "172.18.0.2",
+    "hostIPs": [
+     {
+      "ip": "172.18.0.2"
+     }
+    ],
+    "podIP": "10.244.1.23",
+    "podIPs": [
+     {
+      "ip": "10.244.1.23"
+     }
+    ],
+    "startTime": "2026-10-01T11:40:12Z",
+    "containerStatuses": [
+     {
+      "name": "main",
+      "state": {
+       "waiting": {
+        "reason": "CrashLoopBackOff",
+        "message": "back-off 2m40s restarting failed container=main pod=report-generator-5c6d7f8b9-qz4lm_batch(4e8f3d2a-6b9c-4d7e-8f1a-2b3c4d5e6f70)"
+       }
+      },
+      "lastState": {
+       "terminated": {
+        "exitCode": 1,
+        "reason": "Error",
+        "startedAt": "2026-10-01T11:57:31Z",
+        "finishedAt": "2026-10-01T11:58:01Z",
+        "containerID": "containerd://9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d"
+       }
+      },
+      "ready": false,
+      "restartCount": 6,
+      "started": false,
+      "image": "fixture.local/report-generator:v1",
+      "imageID": "fixture.local/report-generator@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "containerID": "containerd://65183c1877aaec2e8427bc95609cc52677a454b56fcb24340dbd22917c23b10f"
+     }
+    ],
+    "qosClass": "Burstable"
+   }
+  },
+  {
+   "metadata": {
+    "name": "config-loader-7b8c9d6f5-m3n4p",
+    "generateName": "config-loader-7b8c9d6f5-",
+    "namespace": "batch",
+    "uid": "5f9a4e3b-7c0d-4e8f-9a1b-3c4d5e6f7081",
+    "creationTimestamp": "2026-10-01T11:40:20Z",
+    "labels": {
+     "app": "config-loader",
+     "pod-template-hash": "7b8c9d6f5"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "config-loader-7b8c9d6f5",
+      "uid": "6a0b5f4c-8d1e-4f9a-0b2c-4d5e6f708192",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "main",
+      "image": "fixture.local/config-loader:v1",
+      "env": [
+       {
+        "name": "ENDPOINT_URL",
+        "valueFrom": {
+         "configMapKeyRef": {
+          "name": "config-loader-settings",
+          "key": "ENDPOINT_URL"
+         }
+        }
+       }
+      ],
+      "resources": {
+       "limits": {
+        "memory": "32Mi"
+       },
+       "requests": {
+        "cpu": "10m",
+        "memory": "16Mi"
+       }
+      }
+     }
+    ],
+    "restartPolicy": "Always",
+    "nodeName": "incident-bench-worker",
+    "serviceAccountName": "default",
+    "automountServiceAccountToken": false
+   },
+   "status": {
+    "phase": "Pending",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "False",
+      "lastTransitionTime": "2026-10-01T11:40:20Z",
+      "reason": "ContainersNotReady",
+      "message": "containers with unready status: [main]"
+     },
+     {
+      "type": "PodScheduled",
+      "status": "True",
+      "lastTransitionTime": "2026-10-01T11:40:20Z"
+     }
+    ],
+    "hostIP": "172.18.0.2",
+    "podIP": "10.244.1.24",
+    "startTime": "2026-10-01T11:40:20Z",
+    "containerStatuses": [
+     {
+      "name": "main",
+      "state": {
+       "waiting": {
+        "reason": "CreateContainerConfigError",
+        "message": "couldn't find key ENDPOINT_URL in ConfigMap batch/config-loader-settings"
+       }
+      },
+      "lastState": {},
+      "ready": false,
+      "restartCount": 0,
+      "started": false,
+      "image": "fixture.local/config-loader:v1",
+      "imageID": ""
+     }
+    ],
+    "qosClass": "Burstable"
+   }
+  },
+  {
+   "metadata": {
+    "name": "archive-writer-6c7d8e9f0-r5s6t",
+    "generateName": "archive-writer-6c7d8e9f0-",
+    "namespace": "batch",
+    "uid": "7b1c6a5d-9e2f-4a0b-1c3d-5e6f70819203",
+    "creationTimestamp": "2026-10-01T11:40:25Z",
+    "labels": {
+     "app": "archive-writer",
+     "pod-template-hash": "6c7d8e9f0"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "archive-writer-6c7d8e9f0",
+      "uid": "8c2d7b6e-0f3a-4b1c-2d4e-6f7081920314",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "main",
+      "image": "fixture.local/archive-writer:v1",
+      "volumeMounts": [
+       {
+        "name": "archive",
+        "mountPath": "/archive"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "memory": "32Mi"
+       },
+       "requests": {
+        "cpu": "10m",
+        "memory": "16Mi"
+       }
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "archive",
+      "persistentVolumeClaim": {
+       "claimName": "archive-writer"
+      }
+     }
+    ],
+    "restartPolicy": "Always",
+    "serviceAccountName": "default"
+   },
+   "status": {
+    "phase": "Pending",
+    "conditions": [
+     {
+      "type": "PodScheduled",
+      "status": "False",
+      "lastProbeTime": null,
+      "lastTransitionTime": "2026-10-01T11:40:25Z",
+      "reason": "Unschedulable",
+      "message": "0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims. preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling."
+     }
+    ],
+    "qosClass": "Burstable"
+   }
+  }
+ ]
+}

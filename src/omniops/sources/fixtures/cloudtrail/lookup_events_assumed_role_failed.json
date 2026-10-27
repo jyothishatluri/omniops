@@ -1,0 +1,20 @@
+{
+ "Events": [
+  {
+   "EventId": "7d6c5b4a-3928-4170-9e8d-EXAMPLE0a1b2",
+   "EventName": "UpdateFunctionConfiguration20150331v2",
+   "ReadOnly": "false",
+   "AccessKeyId": "ASIAEXAMPLEKEYID",
+   "EventTime": 1790854867.0,
+   "EventSource": "lambda.amazonaws.com",
+   "Username": "ci-session",
+   "Resources": [
+    {
+     "ResourceType": "AWS::Lambda::Function",
+     "ResourceName": "checkout-api"
+    }
+   ],
+   "CloudTrailEvent": "{\"eventVersion\":\"1.09\",\"userIdentity\":{\"type\":\"AssumedRole\",\"principalId\":\"AROAEXAMPLEID:ci-session\",\"arn\":\"arn:aws:sts::123456789012:assumed-role/deploy-role/ci-session\",\"accountId\":\"123456789012\",\"accessKeyId\":\"ASIAEXAMPLEKEYID\",\"sessionContext\":{\"sessionIssuer\":{\"type\":\"Role\",\"principalId\":\"AROAEXAMPLEID\",\"arn\":\"arn:aws:iam::123456789012:role/deploy-role\",\"accountId\":\"123456789012\",\"userName\":\"deploy-role\"},\"attributes\":{\"creationDate\":\"2026-10-01T11:39:58Z\",\"mfaAuthenticated\":\"false\"}}},\"eventTime\":\"2026-10-01T11:41:07Z\",\"eventSource\":\"lambda.amazonaws.com\",\"eventName\":\"UpdateFunctionConfiguration20150331v2\",\"awsRegion\":\"us-east-1\",\"sourceIPAddress\":\"198.51.100.23\",\"userAgent\":\"aws-cli/2.17.0 Python/3.12.6\",\"errorCode\":\"AccessDenied\",\"errorMessage\":\"User: arn:aws:sts::123456789012:assumed-role/deploy-role/ci-session is not authorized to perform: lambda:UpdateFunctionConfiguration\",\"requestParameters\":null,\"responseElements\":null,\"requestID\":\"5f0c1d2e-3b4a-4c5d-8e9f-0a1b2c3d4e5f\",\"eventID\":\"7d6c5b4a-3928-4170-9e8d-EXAMPLE0a1b2\",\"readOnly\":false,\"eventType\":\"AwsApiCall\",\"managementEvent\":true,\"recipientAccountId\":\"123456789012\",\"eventCategory\":\"Management\"}"
+  }
+ ]
+}

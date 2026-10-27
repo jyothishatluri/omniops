@@ -1,0 +1,26 @@
+{
+  "took": 12,
+  "timed_out": false,
+  "_shards": {
+    "total": 2,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 1,
+    "failures": [
+      {
+        "shard": 0,
+        "index": ".ds-logs-checkout-default-2026.10.01-000001",
+        "node": "H5dfFeA",
+        "reason": {
+          "type": "query_shard_exception",
+          "reason": "failed to create query: For input string: \"timeout\""
+        }
+      }
+    ]
+  },
+  "hits": {
+    "total": {"value": 0, "relation": "eq"},
+    "max_score": null,
+    "hits": []
+  }
+}

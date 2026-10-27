@@ -1,0 +1,145 @@
+{
+ "data": [
+  {
+   "acknowledged_user_ids": [
+    "PRJ4208"
+   ],
+   "acknowledged_user_names": [
+    "John Smith"
+   ],
+   "acknowledgement_count": 1,
+   "active_user_count": 3,
+   "assigned_user_ids": [
+    "PRJ4208",
+    "PA02301"
+   ],
+   "assigned_user_names": [
+    "John Smith",
+    "Jane Doe"
+   ],
+   "assignment_count": 2,
+   "auto_resolved": false,
+   "business_hour_interruptions": 5,
+   "created_at": "2023-05-31T10:05:00",
+   "updated_at": "2023-06-04T00:00:00",
+   "description": "The server is on fire!",
+   "engaged_seconds": 3510,
+   "engaged_user_count": 10,
+   "escalation_count": 1,
+   "escalation_policy_id": "PDESCP1",
+   "escalation_policy_name": "Escalation Policy 1",
+   "id": "PYC0H08",
+   "incident_number": 928,
+   "incident_type_id": "PIJ90N7",
+   "incident_type_name": "incident_default",
+   "joined_user_ids": [
+    "PRJ4208",
+    "PA02301",
+    "P40D0J1"
+   ],
+   "joined_user_names": [
+    "John Smith",
+    "Jane Doe",
+    "Wanda Evans"
+   ],
+   "major": false,
+   "manual_escalation_count": 0,
+   "off_hour_interruptions": 4,
+   "priority_id": null,
+   "priority_name": null,
+   "priority_order": null,
+   "reassignment_count": 0,
+   "resolved_at": "2023-05-31T10:15:00",
+   "resolved_by_user_id": "PRJ4208",
+   "resolved_by_user_name": "John Smith",
+   "seconds_to_engage": 70,
+   "seconds_to_first_ack": 5,
+   "seconds_to_mobilize": 19,
+   "seconds_to_resolve": 3305,
+   "service_id": "PPSCXAN",
+   "service_name": "Engineering",
+   "sleep_hour_interruptions": 3,
+   "snoozed_seconds": 604,
+   "status": "resolved",
+   "team_id": null,
+   "team_name": null,
+   "timeout_escalation_count": 0,
+   "total_interruptions\"": null,
+   "total_notifications": 2,
+   "urgency": "low",
+   "user_defined_effort_seconds": null
+  },
+  {
+   "acknowledged_user_ids": [
+    "PMT4102"
+   ],
+   "acknowledged_user_names": [
+    "Sally Styles"
+   ],
+   "acknowledgement_count": 1,
+   "active_user_count": 1,
+   "assigned_user_ids": [
+    "PMT4102"
+   ],
+   "assigned_user_names": [
+    "Sally Styles"
+   ],
+   "assignment_count": 1,
+   "business_hour_interruptions": 2,
+   "created_at": "2023-05-31T10:00:00",
+   "updated_at": "2023-06-04T00:00:00",
+   "description": "Reply on social media",
+   "engaged_seconds": 521,
+   "engaged_user_count": 6,
+   "escalation_count": 1,
+   "escalation_policy_id": "PDESCP1",
+   "escalation_policy_name": "Escalation Policy 1",
+   "id": "PCOOHCY",
+   "incident_number": 929,
+   "incident_type_id": "PIJ90N7",
+   "incident_type_name": "incident_default",
+   "joined_user_ids": [
+    "PMT4102"
+   ],
+   "joined_user_names": [
+    "Sally Styles"
+   ],
+   "major": false,
+   "manual_escalation_count": 0,
+   "off_hour_interruptions": 3,
+   "priority_id": "POTCOTX",
+   "priority_name": "SEV-2",
+   "priority_order": null,
+   "reassignment_count": 0,
+   "resolved_at": "2023-05-30T10:00:05",
+   "resolved_by_user_id": "PMT4102",
+   "resolved_by_user_name": "Sally Styles",
+   "seconds_to_engage": 24,
+   "seconds_to_first_ack": 48,
+   "seconds_to_mobilize": 122,
+   "seconds_to_resolve": 2029,
+   "service_id": "PPSCXAN",
+   "service_name": "Social media tracking",
+   "sleep_hour_interruptions": 1,
+   "snoozed_seconds": 698,
+   "status": "resolved",
+   "team_id": null,
+   "team_name": "Marketing",
+   "timeout_escalation_count": 0,
+   "total_interruptions\"": null,
+   "total_notifications": 2,
+   "urgency": "low",
+   "user_defined_effort_seconds": null
+  }
+ ],
+ "ending_before": null,
+ "filters": {},
+ "first": "PYC0H08",
+ "last": "PCOOHCY",
+ "limit": 10,
+ "more": true,
+ "order": "desc",
+ "order_by": "created_at",
+ "starting_after": null,
+ "time_zone": "Etc/UTC"
+}

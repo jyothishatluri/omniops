@@ -1,0 +1,52 @@
+# Grafana Loki reached through Grafana's datasource proxy:
+#   GET {GRAFANA_URL}/api/datasources/proxy/uid/{GRAFANA_LOKI_UID}/loki/api/v1/...
+# (https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/data_source/#data-source-proxy-calls)
+# Grafana forwards the request to the Loki URL configured on the datasource and injects the
+# datasource's own credentials / tenant headers, so only a Grafana token is needed here. Bodies
+# come back unchanged, so every table, fixture and role comes from templates/loki.yaml (tables
+# are renamed grafana_loki_*). This is how the o11y-bench stack exposes Loki (datasource uid "loki").
+source: grafana_loki
+display_name: Grafana Loki (via Grafana datasource proxy)
+vendor: Grafana Labs
+description: Loki LogQL logs, metrics, labels, volume, patterns and ruler data queried through a Grafana Loki datasource (no direct Loki access or Loki credentials needed).
+extends: loki
+base_url: "{{ env.GRAFANA_URL }}/api/datasources/proxy/uid/{{ env.GRAFANA_LOKI_UID }}"
+ui_base_url: "{{ env.GRAFANA_URL }}"
+env:
+  - {name: GRAFANA_URL, description: "Grafana base URL, e.g. http://localhost:3000 or https://<stack>.grafana.net (no trailing slash)"}
+  - {name: GRAFANA_TOKEN, description: "Grafana service account token (Viewer is enough: datasources:query). Optional when anonymous access is enabled (o11y-bench).", secret: true}
+  - {name: GRAFANA_USERNAME, description: "Optional Grafana basic-auth user (only if basic auth is enabled; GRAFANA_TOKEN wins)"}
+  - {name: GRAFANA_PASSWORD, description: "Optional Grafana basic-auth password", secret: true}
+  - {name: GRAFANA_LOKI_UID, description: "UID of the Loki datasource in Grafana (Connections > Data sources, or GET /api/datasources)", default: loki}
+  - {name: GRAFANA_ORG_ID, description: "Optional Grafana org id (sent as X-Grafana-Org-Id); tokens are already org-scoped"}
+required_env: [GRAFANA_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Bearer ' ~ env.GRAFANA_TOKEN) if env.GRAFANA_TOKEN
+         else (('Basic ' ~ ((env.GRAFANA_USERNAME ~ ':' ~ (env.GRAFANA_PASSWORD or '')) | b64)) if env.GRAFANA_USERNAME else None) }}
+headers:
+  X-Grafana-Org-Id: "{{ env.GRAFANA_ORG_ID }}"
+rate_limit:
+  concurrency: 4
+  notes: >-
+    Grafana's data proxy times out after [dataproxy] timeout (default 30s) - shorter than Loki's
+    1m query_timeout - and answers 502/504; Loki's per-query limits still apply behind it
+    (max_entries_limit_per_query 5000, max_query_series 500, max_query_length 30d1h).
+append:
+  # Template pitfalls (renamed to grafana_loki_*) apply unchanged; these are proxy-specific.
+  pitfalls:
+    - "Grafana's data proxy gives up after [dataproxy] timeout (default 30s, shorter than Loki's 1m query_timeout) and answers HTTP 502/504: narrow the window or the selector - that is not a schema problem."
+    - "HTTP 401/403 is a Grafana permission problem (the token's role lacks datasources:query on this datasource); 404 'data source not found' means GRAFANA_LOKI_UID is wrong (list datasources to find the uid). The uid proxy route needs Grafana 9.0+."
+    - "Do not send X-Scope-OrgID yourself: the tenant and Loki credentials come from the datasource configuration in Grafana. A datasource pointing at the wrong tenant silently returns 0 rows."
+tables:
+  - name: grafana_loki_logs
+    ui_link: >-
+      {{ env.GRAFANA_URL }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'a': {'datasource': env.GRAFANA_LOKI_UID, 'queries': [{'refId': 'A', 'expr': (filters.query or ('{service_name="' ~ filters.service ~ '"}')), 'queryType': 'range', 'datasource': {'type': 'loki', 'uid': env.GRAFANA_LOKI_UID} }], 'range': {'from': (time.start | epoch_ms | string), 'to': (time.end | epoch_ms | string)} } } | tojson | urlencode }}
+  - name: grafana_loki_query_range
+    ui_link: >-
+      {{ env.GRAFANA_URL }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'a': {'datasource': env.GRAFANA_LOKI_UID, 'queries': [{'refId': 'A', 'expr': filters.query, 'queryType': 'range', 'datasource': {'type': 'loki', 'uid': env.GRAFANA_LOKI_UID} }], 'range': {'from': (time.start | epoch_ms | string), 'to': (time.end | epoch_ms | string)} } } | tojson | urlencode }}
+  - name: grafana_loki_query
+    ui_link: >-
+      {{ env.GRAFANA_URL }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'a': {'datasource': env.GRAFANA_LOKI_UID, 'queries': [{'refId': 'A', 'expr': filters.query, 'queryType': 'instant', 'datasource': {'type': 'loki', 'uid': env.GRAFANA_LOKI_UID} }], 'range': {'from': (time.start | epoch_ms | string), 'to': (time.end | epoch_ms | string)} } } | tojson | urlencode }}

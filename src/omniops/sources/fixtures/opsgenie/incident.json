@@ -1,0 +1,36 @@
+{
+ "data": {
+  "id": "70413a06-38d6-4c85-92b8-5ebc900d42e2",
+  "tinyId": "1791",
+  "message": "Incident with API create",
+  "status": "closed",
+  "tags": [
+   "OverwriteQuietHours",
+   "Critical"
+  ],
+  "createdAt": "2017-03-21T20:32:52.353Z",
+  "updatedAt": "2017-04-03T20:32:57.301Z",
+  "priority": "P5",
+  "responders": [
+   {
+    "type": "team",
+    "id": "fc1448b7-46b2-401d-9df8-c02675958e3b"
+   },
+   {
+    "type": "user",
+    "id": "fe954a67-813e-4356-87dc-afed1eec6b66"
+   }
+  ],
+  "impactedServices": [
+   "a9407318-5f34-4d1e-b8fa-0268ba2f43d0"
+  ],
+  "extraProperties": {
+   "serverName": "Zion",
+   "region": "Oregon"
+  },
+  "impactStartDate": "2017-03-21T20:32:52.353Z",
+  "impactDetectDate": "2017-04-03T20:32:57.301Z",
+  "impactEndDate": "2017-04-10T20:32:57.301Z"
+ },
+ "requestId": "9ae63dd7-ed00-4c81-86f0-c4ffd33142c9"
+}

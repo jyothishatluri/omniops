@@ -1,0 +1,14 @@
+{
+  "values": [
+    "debug",
+    "info",
+    "warn",
+    "error"
+  ],
+  "limit": 1000,
+  "stats": {
+    "summary": {
+      "totalBytesProcessed": 1024
+    }
+  }
+}

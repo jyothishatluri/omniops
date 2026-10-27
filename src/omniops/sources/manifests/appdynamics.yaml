@@ -1,0 +1,929 @@
+# Splunk AppDynamics (Cisco AppDynamics) Controller REST API, direct REST, no MCP.
+#
+# Reference (moved from docs.appdynamics.com to help.splunk.com; SaaS 26.10.0 checked 2026-10-27):
+#   https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis
+# Every /controller/rest/... endpoint defaults to XML: each table sends output=JSON. The JSON form
+# is a top-level array whose objects use the XML element names (shown in "Using the Controller
+# APIs" for /applications); fixtures are JSON renderings of the docs' XML examples.
+# Auth: OAuth 2.0 client credentials against /controller/api/oauth/access_token with an API
+# Client (client_id = <apiClientName>@<accountName>); tokens default to a 5-minute expiry and are
+# cached/refreshed by the engine. Research notes and doc links: docs/sources/appdynamics.md
+source: appdynamics
+display_name: Splunk AppDynamics (Controller REST API)
+vendor: Cisco Systems / Splunk
+description: >-
+  AppDynamics Controller REST API: application model (business applications, business
+  transactions, tiers, nodes, backends), metric browser tree and metric data (metric paths with
+  wildcards), health rule violations, events (deployments, config changes, restarts, errors,
+  diagnostic sessions), transaction snapshots, health rule definitions, anomaly detection with
+  suspected causes, and the Controller audit history.
+docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis
+categories: [metrics, traces, alerts, events, changes, topology, apm]
+base_url: "{{ env.APPD_CONTROLLER_URL }}"
+ui_base_url: "{{ env.APPD_CONTROLLER_URL }}/controller"
+env:
+  - name: APPD_CONTROLLER_URL
+    description: >-
+      Controller base URL WITHOUT /controller, e.g. https://acme.saas.appdynamics.com (SaaS) or
+      https://appd.example.com:8181 (on-premises; the API is served on the Controller's primary
+      UI/agent port).
+  - name: APPD_ACCOUNT_NAME
+    description: "Controller account (tenant) name, e.g. acme (SaaS) or customer1 (most on-premises Controllers)"
+  - name: APPD_API_CLIENT_NAME
+    description: "API Client name (Administration > API Clients); sent as client_id=<name>@<account>"
+  - name: APPD_API_CLIENT_SECRET
+    description: "API Client secret (UUID). Give the client a role with read access to the applications to investigate."
+    secret: true
+  - name: APPD_APPLICATION
+    description: "Optional default business application (name or numeric id) used when a query does not filter on application"
+    default: ""
+  - name: APPD_APPLICATION_ID
+    description: "Optional default numeric application id for the alerting/anomaly APIs (they reject names)"
+    default: ""
+  - name: APPD_METRIC_DATA_API
+    description: >-
+      metric-data (default; every Controller version) or metric-data-v2 (the method documented for
+      current SaaS Controllers: 1-minute data for any 24 h window within the last 8 days; older
+      Controllers return 404 for it).
+    default: metric-data
+required_env: [APPD_CONTROLLER_URL, APPD_ACCOUNT_NAME, APPD_API_CLIENT_NAME, APPD_API_CLIENT_SECRET]
+auth:
+  type: oauth2_client_credentials
+  token_url: "{{ env.APPD_CONTROLLER_URL }}/controller/api/oauth/access_token"
+  client_id: "{{ env.APPD_API_CLIENT_NAME }}@{{ env.APPD_ACCOUNT_NAME }}"
+  client_secret: "{{ env.APPD_API_CLIENT_SECRET }}"
+headers:
+  Accept: application/json
+rate_limit:
+  concurrency: 4
+  notes: >-
+    No published per-minute REST quota; the Controller shares threads with the UI, so keep calls
+    narrow (one application, short windows). Hard result caps: events 600 per call, transaction
+    snapshots 600 per call unless maximum-results is sent, audit history 24 h per call.
+retention:
+  metrics: "1-minute data for the last 8 days, older data at 60-minute granularity (SaaS defaults; >24 h windows return hourly points)"
+  events: "events, health rule violations and snapshots: about 2 weeks by default on SaaS (Controller setting events.retention.period / snapshots.retention.period)"
+  audit: "Controller audit history: per Controller retention setting"
+pitfalls:
+  - "Every /controller/rest endpoint returns XML unless output=JSON is sent; the tables always send it. A response that is an HTML page means a wrong APPD_CONTROLLER_URL (it must NOT include /controller)."
+  - "The application filter accepts the business application NAME or numeric ID in /controller/rest/... paths; the alerting (/controller/alerting/rest/v1) and anomaly APIs accept only the numeric ID: get it from appdynamics_applications."
+  - "AppDynamics vocabulary: business application ~ system, tier ~ service, node ~ instance/JVM, business transaction ~ endpoint/operation, backend ~ downstream dependency (DB, queue, HTTP)."
+  - "Time windows use time-range-type=BETWEEN_TIMES with start-time/end-time in epoch MILLISECONDS; the range includes the start and excludes the end."
+  - "Names in metric paths are case-sensitive and must match the metric browser exactly; an unknown path returns no data points (the series comes back with metricName 'METRIC DATA NOT FOUND' and no values), not an error: browse appdynamics_metric_tree first."
+  - "Basic auth (user@account:password) is not used: Cisco/SAML-identity users cannot use basic auth on the REST API; the source uses an API Client (OAuth client credentials)."
+query_languages:
+  appdynamics_metric_path: >-
+    Metric paths are the metric browser's pipe-separated full paths, e.g.
+    Overall Application Performance|Average Response Time (ms);
+    Business Transaction Performance|Business Transactions|<tier>|<BT name>|Errors per Minute;
+    Overall Application Performance|<tier>|Calls per Minute;
+    Application Infrastructure Performance|<tier>|Individual Nodes|<node>|Hardware Resources|CPU|%Busy;
+    Backends|Discovered backend call - <backend name>|Average Response Time (ms);
+    Overall Application Performance|<tier>|Exceptions per Minute.
+    '*' wildcards one segment (Business Transaction Performance|Business Transactions|ECommerce-Services|*|Calls per Minute).
+    Common leaf names: Average Response Time (ms), 95th Percentile Response Time (ms), Calls per Minute,
+    Errors per Minute, Number of Slow Calls, Number of Very Slow Calls, Stall Count, Exceptions per Minute,
+    Hardware Resources|CPU|%Busy, Hardware Resources|Memory|Used %, JVM|Garbage Collection|GC Time Spent Per Min (ms).
+    A literal | or \ inside a name must be escaped with an extra backslash. The All Other Traffic BT is _APPDYNAMICS_DEFAULT_TX_.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_applications
+    title: Business applications
+    description: >-
+      All business applications (and their numeric ids) visible to the API client. One row per
+      application. Use first to resolve the application name/id every other table needs.
+    kind: entities
+    request:
+      method: GET
+      path: /controller/rest/applications
+      query: {output: JSON}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id, description: "Numeric application id (needed by the alerting and anomaly APIs)"}
+      - {name: application, path: name, description: "Business application name"}
+      - {name: description, path: description}
+      - {name: account_guid, path: accountGuid}
+    pitfalls:
+      - "Only applications the API client's roles can see are returned; a missing application is a permission problem, not absence."
+    examples:
+      - sql: "SELECT id, application FROM appdynamics_applications ORDER BY application"
+        description: List business applications and their ids.
+      - sql: "SELECT id FROM appdynamics_applications WHERE application = 'ECommerce_E2E'"
+        description: Resolve an application name to the numeric id the health rule and anomaly APIs need.
+    fixtures:
+      - file: applications.json
+        note: "Verbatim JSON example (curl .../controller/rest/applications?output=JSON) from 'Using the Controller APIs' (trailing comma of the docs sample removed)."
+        expect_rows: 2
+        expect_columns: {id: 5, application: ECommerce_E2E, description: ""}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/application-model-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_business_transactions
+    title: Business transactions of an application
+    description: >-
+      Business transactions (entry points, the AppDynamics equivalent of endpoints/operations)
+      of one application, with the tier that owns each. One row per BT. Filter on application
+      (name or id; defaults to APPD_APPLICATION) and optionally excluded = true. Use to resolve
+      BT ids for appdynamics_snapshots and BT names for metric paths.
+    kind: entities
+    request:
+      method: GET
+      path: "/controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}/business-transactions"
+      query:
+        output: JSON
+        exclude: "{{ 'true' if filters.excluded else None }}"
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+      - {column: excluded, type: BOOLEAN, description: "true = list only BTs excluded from monitoring (default: monitored BTs)"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id, description: "Business transaction id (snapshot filter business_transaction_id)"}
+      - {name: business_transaction, path: name, description: "BT name as shown in the UI and in metric paths"}
+      - {name: resource, path: name, description: "Canonical alias of the BT name (endpoint/operation)"}
+      - {name: entry_point_type, path: entryPointType, description: "SERVLET, WEB_SERVICE, POJO, ASP_DOTNET, NODEJS_WEB, ..."}
+      - {name: internal_name, path: internalName}
+      - {name: tier_id, type: BIGINT, path: tierId}
+      - {name: tier, path: tierName, description: "Owning tier (~ service)"}
+      - {name: service, path: tierName, description: "Canonical alias of tier"}
+      - {name: background, type: BOOLEAN, path: background}
+      - {name: application, filter_only: true}
+      - {name: excluded, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "BT names are only unique per tier; join on (tier, business_transaction) or use the id."
+      - "Transactions over the registration limit are folded into 'All Other Traffic' (_APPDYNAMICS_DEFAULT_TX_) and do not appear individually."
+    examples:
+      - sql: "SELECT id, business_transaction, tier FROM appdynamics_business_transactions WHERE application = 'ECommerce_E2E' AND tier = 'ECommerce-Services'"
+        description: BTs owned by one tier (ids for snapshot filters, names for metric paths).
+    fixtures:
+      - file: business_transactions.json
+        note: "JSON rendering (output=JSON) of the docs' XML example for GET /controller/rest/applications/5/business-transactions (the '...' elision dropped)."
+        filters: {application: "5"}
+        expect_rows: 2
+        expect_columns: {id: 92, business_transaction: "/user/.POST", entry_point_type: WEB_SERVICE, tier: ECommerce-Services, background: false}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/application-model-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_tiers
+    title: Tiers of an application
+    description: >-
+      Tiers (the AppDynamics equivalent of services) of one application with their node count
+      and agent type. One row per tier. Filter on application (default APPD_APPLICATION).
+    kind: entities
+    request:
+      method: GET
+      path: "/controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}/tiers"
+      query: {output: JSON}
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id, description: "Tier id (snapshot filter tier_id)"}
+      - {name: tier, path: name}
+      - {name: service, path: name, description: "Canonical alias of tier"}
+      - {name: type, path: type, description: "Application Server, Web Server, ..."}
+      - {name: agent_type, path: agentType, description: "APP_AGENT, NATIVE_WEB_SERVER, PHP_APP_AGENT, NODEJS_APP_AGENT, DOT_NET_APP_AGENT, ..."}
+      - {name: node_count, type: BIGINT, path: numberOfNodes}
+      - {name: application, filter_only: true}
+    examples:
+      - sql: "SELECT tier, agent_type, node_count FROM appdynamics_tiers WHERE application = 'ECommerce_E2E' ORDER BY node_count DESC"
+        description: Service (tier) inventory of an application.
+    fixtures:
+      - file: tiers.json
+        note: "JSON rendering (output=JSON) of the docs' XML example for GET /controller/rest/applications/5/tiers."
+        filters: {application: "5"}
+        expect_rows: 6
+        expect_columns: {id: 8, tier: Address-Services, agent_type: APP_AGENT, node_count: 1}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/application-model-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_nodes
+    title: Nodes (instances) of an application or tier
+    description: >-
+      Nodes (JVM/CLR/process instances) with their tier, machine (host), OS and agent versions.
+      One row per node. Filter on application (default APPD_APPLICATION) and optionally tier
+      (name or id; uses the per-tier endpoint) or node (name or id; single-node endpoint).
+    kind: entities
+    request:
+      method: GET
+      path: >-
+        /controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}{% if filters.node %}/nodes/{{ filters.node | urlencode }}{% elif filters.tier %}/tiers/{{ filters.tier | urlencode }}/nodes{% else %}/nodes{% endif %}
+      query: {output: JSON}
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+      - {column: tier, description: "Tier name or id: only nodes of that tier", examples: [ECommerce-Services]}
+      - {column: node, description: "Node name or id: one node (adds ip_addresses)", examples: [Node_8002]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id, description: "Node id (snapshot filter node_id)"}
+      - {name: node, path: name}
+      - {name: type, path: type, description: "App server type, e.g. Tomcat 5.x, Other"}
+      - {name: tier_id, type: BIGINT, path: tierId}
+      - {name: tier, path: tierName}
+      - {name: service, path: tierName, description: "Canonical alias of tier"}
+      - {name: machine_id, type: BIGINT, path: machineId}
+      - {name: host, path: machineName, description: "Machine (host) name the node runs on"}
+      - {name: os_type, path: machineOSType}
+      - {name: machine_agent_present, type: BOOLEAN, path: machineAgentPresent}
+      - {name: machine_agent_version, path: machineAgentVersion}
+      - {name: app_agent_present, type: BOOLEAN, path: appAgentPresent}
+      - {name: app_agent_version, path: appAgentVersion}
+      - {name: agent_type, path: agentType}
+      - {name: ip_addresses, type: JSON, path: ipAddresses, description: "Node IP addresses as returned (present on per-tier and single-node responses)"}
+      - {name: application, filter_only: true}
+    pitfalls:
+      - "A node row means the node is registered, not that it is reporting now: check the Agent|App|Availability metric (appdynamics_metric_data) for liveness."
+      - "Container platforms create many short-lived nodes with generated names; filter by tier rather than node name."
+    examples:
+      - sql: "SELECT node, host, tier, app_agent_version FROM appdynamics_nodes WHERE application = 'ECommerce_E2E' AND tier = 'ECommerce-Services'"
+        description: Which instances (and hosts) serve a tier.
+      - sql: "SELECT host, count(*) AS nodes, string_agg(DISTINCT tier, ', ') AS tiers FROM appdynamics_nodes WHERE application = 'ECommerce_E2E' GROUP BY host ORDER BY nodes DESC"
+        description: Host inventory of an application with the tiers sharing each machine.
+    fixtures:
+      - file: nodes.json
+        note: "JSON rendering (output=JSON) of the docs' XML example for GET /controller/rest/applications/5/nodes ('...' elision dropped)."
+        filters: {application: "5"}
+        expect_rows: 2
+        expect_columns: {id: 7, node: Node_8000, tier: ECommerce Server, host: TIER1TOMCAT, app_agent_present: true}
+      - file: nodes_tier.json
+        note: "JSON rendering of the docs' XML example for GET /controller/rest/applications/25/tiers/70/nodes; the JSON form of the <ipAddresses> wrapper is inferred (the column keeps it as raw JSON)."
+        filters: {application: "25", tier: "70"}
+        expect_rows: 1
+        expect_columns: {node: PHP_Node, tier: PHP_Tier, machine_agent_present: false, agent_type: PHP_APP_AGENT, ip_addresses: {not_null: true}}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/application-model-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_backends
+    title: Backends (downstream dependencies)
+    description: >-
+      Registered backends (databases, queues, remote HTTP services, caches) the application
+      calls, with their discovery properties (HOST, PORT, URL, VENDOR, DESTINATION_NAME...).
+      One row per backend. Filter on application. Use to see what a failing app depends on and to
+      build 'Backends|...' metric paths.
+    kind: entities
+    request:
+      method: GET
+      path: "/controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}/backends"
+      query: {output: JSON}
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: backend, path: name, description: "Backend display name"}
+      - {name: exit_point_type, path: exitPointType, description: "JDBC, JMS, HTTP, CACHE, WEB_SERVICE, RABBITMQ, ..."}
+      - {name: host, expr: "(_.properties | selectattr('name', 'equalto', 'HOST') | map(attribute='value') | first) if _.properties is iterable and _.properties is not string and _.properties is not mapping else None", description: "HOST discovery property when present"}
+      - {name: properties, type: JSON, path: properties, description: "All discovery properties [{name, value}] (HOST, PORT, URL, SCHEMA, VENDOR, DESTINATION_NAME...)"}
+      - {name: tier_id, type: BIGINT, path: tierId, description: "0 when the backend is not resolved to a tier"}
+      - {name: node_id, type: BIGINT, path: applicationComponentNodeId}
+      - {name: application, filter_only: true}
+    examples:
+      - sql: "SELECT backend, exit_point_type, host, properties FROM appdynamics_backends WHERE application = 'ECommerce_E2E' AND exit_point_type = 'JDBC'"
+        description: Databases the application depends on.
+    fixtures:
+      - file: backends.json
+        note: "JSON rendering (output=JSON) of the docs' XML example for GET /controller/rest/applications/5/backends ('...' elision dropped; &amp; unescaped)."
+        filters: {application: "5"}
+        expect_rows: 2
+        expect_columns: {id: 10, backend: "INVENTORY-MySQL DB-DB", exit_point_type: JDBC, host: DB, tier_id: 0}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/application-model-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_metric_tree
+    title: Metric browser hierarchy
+    description: >-
+      One level of the metric browser tree under metric_path (the root when omitted): one row
+      per child with type folder | leaf. Walk it to build exact paths for
+      appdynamics_metric_data (names are case-sensitive and must match exactly).
+    kind: entities
+    request:
+      method: GET
+      path: "/controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}/metrics"
+      query:
+        output: JSON
+        metric-path: "{{ filters.metric_path }}"
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+      - {column: metric_path, description: "Parent folder path, e.g. 'Overall Application Performance' or 'Business Transaction Performance|Business Transactions'", examples: ['Overall Application Performance']}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: name, path: name, description: "Child name (one path segment)"}
+      - {name: type, path: type, description: "folder (expand further) | leaf (a metric)"}
+      - {name: full_path, expr: "((filters.metric_path ~ '|') if filters.metric_path else '') ~ _.name", description: "metric_path|name: paste into appdynamics_metric_data.metric_path"}
+      - {name: metric_path, filter_only: true}
+      - {name: application, filter_only: true}
+    examples:
+      - sql: "SELECT name, type, full_path FROM appdynamics_metric_tree WHERE application = 'ECommerce_E2E' AND metric_path = 'Overall Application Performance'"
+        description: Which application-wide metrics (and per-tier folders) exist.
+    fixtures:
+      - file: metric_tree.json
+        note: "JSON rendering (output=JSON) of the docs' XML example for GET /controller/rest/applications/ECommerce_E2E/metrics (root level)."
+        filters: {application: ECommerce_E2E, metric_path: null}
+        expect_rows: 9
+        expect_columns: {name: Backends, type: folder, full_path: Backends}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/metric-and-snapshot-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_metric_data
+    title: Metric data (metric path, wildcards)
+    description: >-
+      Metric values for a metric path (exact or with * wildcards) over the window, one row per
+      (metric, minute/hour). Filter on application (default APPD_APPLICATION), metric_path
+      (required, see query language appdynamics_metric_path) and ts. Sent as
+      time-range-type=BETWEEN_TIMES with epoch-ms start-time/end-time and rollup=false (set
+      rollup = true for one aggregated point per metric). Granularity: 1 minute for windows up
+      to ~24 h, 10 minutes up to ~49 h, 60 minutes beyond (metric-data); metric-data-v2 returns
+      1-minute data for any 24 h window within the last 8 days.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}/{{ env.APPD_METRIC_DATA_API or 'metric-data' }}"
+      query:
+        output: JSON
+        metric-path: "{{ filters.metric_path }}"
+        time-range-type: BETWEEN_TIMES
+        start-time: "{{ time.start | epoch_ms }}"
+        end-time: "{{ time.end | epoch_ms }}"
+        rollup: "{{ 'true' if filters.rollup else 'false' }}"
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+      - column: metric_path
+        required: true
+        description: "Full metric path, '|' separated, '*' wildcards one segment"
+        examples: ['Business Transaction Performance|Business Transactions|ECommerce-Services|*|Errors per Minute']
+      - {column: rollup, type: BOOLEAN, description: "true = one aggregated value per metric for the whole window (default false: every data point)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 365d}
+    response:
+      rows_path: "$"
+      expand:
+        - {explode: metricValues, as: v}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@v.startTimeInMillis", transform: epoch_ms, description: "Start of the data point's interval (UTC)"}
+      - {name: value, type: DOUBLE, path: "@v.value", description: "Average, sum or latest per the metric's time-rollup type"}
+      - {name: min, type: DOUBLE, path: "@v.min", description: "Min in the interval (not set for count/sum metrics: 2147483647 sentinel)"}
+      - {name: max, type: DOUBLE, path: "@v.max", description: "Max in the interval (-2147483648 sentinel when unused)"}
+      - {name: current, type: DOUBLE, path: "@v.current"}
+      - {name: sum, type: DOUBLE, path: "@v.sum"}
+      - {name: count, type: BIGINT, path: "@v.count", description: "Number of observations collected"}
+      - {name: standard_deviation, type: DOUBLE, path: "@v.standardDeviation"}
+      - {name: occurrences, type: BIGINT, path: "@v.occurrences"}
+      - {name: metric, path: metricPath, description: "Resolved full metric path (wildcards expanded)"}
+      - {name: metric_name, path: metricName, description: "Internal metric name, e.g. BTM|BTs|BT:125|Component:9|Calls per Minute"}
+      - {name: metric_id, type: BIGINT, path: metricId}
+      - {name: frequency, path: frequency, description: "ONE_MIN, TEN_MIN, SIXTY_MIN ... (granularity used)"}
+      - name: tier
+        expr: >-
+          (_.metricPath.split('|')[2] if _.metricPath.startswith('Business Transaction Performance|Business Transactions|') and (_.metricPath.split('|') | length) > 3
+          else (_.metricPath.split('|')[1] if (_.metricPath.startswith('Overall Application Performance|') or _.metricPath.startswith('Application Infrastructure Performance|')) and (_.metricPath.split('|') | length) > 2
+          else None)) if _.metricPath else None
+        description: "Tier parsed from the resolved path (BT paths: segment 3; Overall Application Performance / Application Infrastructure Performance paths: segment 2)"
+      - {name: service, expr: "(_.metricPath.split('|')[2] if _.metricPath.startswith('Business Transaction Performance|Business Transactions|') and (_.metricPath.split('|') | length) > 3 else (_.metricPath.split('|')[1] if (_.metricPath.startswith('Overall Application Performance|') or _.metricPath.startswith('Application Infrastructure Performance|')) and (_.metricPath.split('|') | length) > 2 else None)) if _.metricPath else None", description: "Canonical alias of tier"}
+      - {name: business_transaction, expr: "(_.metricPath.split('|')[3] if _.metricPath.startswith('Business Transaction Performance|Business Transactions|') and (_.metricPath.split('|') | length) > 4 else None) if _.metricPath else None", description: "BT name parsed from 'Business Transaction Performance|Business Transactions|<tier>|<BT>|<metric>' paths"}
+      - {name: node, expr: "(_.metricPath.split('|')[3] if (_.metricPath.split('|') | length) > 4 and _.metricPath.split('|')[2] == 'Individual Nodes' else None) if _.metricPath else None", description: "Node parsed from '...|<tier>|Individual Nodes|<node>|...' paths"}
+      - {name: metric_path, filter_only: true}
+      - {name: rollup, type: BOOLEAN, filter_only: true}
+      - {name: application, filter_only: true}
+    sort_hint: "Rows are grouped per metric, timestamps ascending."
+    pitfalls:
+      - "Count metrics (Calls per Minute, Errors per Minute) are per-minute values: AVG over minutes gives the rate, SUM(value) over 1-minute points gives the total; with hourly granularity value is still per minute."
+      - "min/max hold sentinels (2147483647 / -2147483648) for count/sum metrics: ignore them, use value/sum."
+      - "An unknown path yields 0 rows (or a 'METRIC DATA NOT FOUND' series without values): browse appdynamics_metric_tree; names such as tier and BT are case-sensitive."
+      - "Granularity coarsens with window length (1 min <= 24 h, 10 min <= 49 h, 60 min beyond): compare like-for-like windows; BEFORE_NOW-style partial last hours are avoided by the BETWEEN_TIMES window."
+      - "'*' matches exactly one segment; very broad wildcards (every node of every tier) are slow and capped: scope to one tier."
+    examples:
+      - sql: >-
+          SELECT business_transaction, sum(value) AS errors, max(value) AS peak_per_min, arg_max(ts, value) AS peak_at
+          FROM appdynamics_metric_data
+          WHERE application = 'ECommerce_E2E'
+            AND metric_path = 'Business Transaction Performance|Business Transactions|ECommerce-Services|*|Errors per Minute'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY errors DESC LIMIT 10
+        description: Business transactions of a tier with the most errors in the incident hour and when each peaked.
+      - sql: >-
+          SELECT ts, value AS avg_response_ms FROM appdynamics_metric_data
+          WHERE application = 'ECommerce_E2E' AND metric_path = 'Overall Application Performance|Average Response Time (ms)'
+          ORDER BY ts
+        description: Application-wide average response time curve over the analysis window.
+      - sql: >-
+          SELECT node, max(value) AS peak_cpu FROM appdynamics_metric_data
+          WHERE application = 'ECommerce_E2E'
+            AND metric_path = 'Application Infrastructure Performance|ECommerce-Services|Individual Nodes|*|Hardware Resources|CPU|%Busy'
+          GROUP BY node ORDER BY peak_cpu DESC
+        description: Nodes of a tier ranked by peak CPU.
+    tests:
+      - {sql: "SELECT count(*) AS n FROM appdynamics_metric_data WHERE metric_path = 'Overall Application Performance|Calls per Minute'", min_rows: 1, when_env: [APPD_APPLICATION]}
+    fixtures:
+      - file: metric_data_rollup_false.json
+        note: "JSON rendering (output=JSON) of the docs' 'Disabling Data Rollup' XML example (rollup=false, Overall Application Performance|Average Response Time (ms); the '...' elision dropped)."
+        filters: {application: ECommerce_E2E, metric_path: "Overall Application Performance|Average Response Time (ms)"}
+        expect_rows: 3
+        expect_columns: {ts: "2015-12-19T05:39:00Z", value: 334.0, max: 3340.0, count: 20, metric: "Overall Application Performance|Average Response Time (ms)", frequency: ONE_MIN, metric_id: 2339, tier: null}
+      - file: metric_data_wildcard.json
+        note: "JSON rendering of the docs' wildcard XML example (Application Infrastructure Performance|*|Individual Nodes|*|Hardware Resources|CPU|%Busy)."
+        filters: {application: ECommerce_E2E-Fulfillment, metric_path: "Application Infrastructure Performance|*|Individual Nodes|*|Hardware Resources|CPU|%Busy"}
+        expect_rows: 2
+        expect_columns: {value: 10.0, sum: 4474.0, tier: Fulfillment-Client-Services, node: FulfillmentClient, business_transaction: null, metric_name: "Hardware Resources|CPU|%Busy"}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/metric-and-snapshot-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_health_rule_violations
+    title: Health rule violations
+    description: >-
+      Health rule violations (AppDynamics alerts / incidents) of one application that were
+      active in the window: one row per violation with the health rule (triggered entity), the
+      affected entity (tier, node, BT...), severity, status and a Controller deep link. Filter on
+      application and ts.
+    kind: alerts
+    request:
+      method: GET
+      path: "/controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}/problems/healthrule-violations"
+      query:
+        output: JSON
+        time-range-type: BETWEEN_TIMES
+        start-time: "{{ time.start | epoch_ms }}"
+        end-time: "{{ time.end | epoch_ms }}"
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+    time: {column: ts, default_lookback: 24h, max_window: 14d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id, description: "Violation (incident) id"}
+      - {name: title, path: name, description: "Health rule name"}
+      - {name: ts, type: TIMESTAMP, path: startTimeInMillis, transform: epoch_ms, description: "Violation start"}
+      - {name: end_ts, type: TIMESTAMP, expr: "_.endTimeInMillis if _.endTimeInMillis else None", transform: epoch_ms, description: "Violation end (NULL while open)"}
+      - {name: detected_ts, type: TIMESTAMP, expr: "_.detectedTimeInMillis if _.detectedTimeInMillis else None", transform: epoch_ms}
+      - {name: state, path: incidentStatus, description: "OPEN | RESOLVED | CANCELLED (upper case)"}
+      - {name: severity, path: severity, description: "WARNING | CRITICAL"}
+      - {name: health_rule_id, type: BIGINT, path: "triggeredEntityDefinition.entityId", description: "Health rule id (appdynamics_health_rules.id)"}
+      - {name: triggered_entity_type, path: "triggeredEntityDefinition.entityType", description: "POLICY (health rule)"}
+      - {name: affected_entity_type, path: "affectedEntityDefinition.entityType", description: "APPLICATION, APPLICATION_COMPONENT (tier), APPLICATION_COMPONENT_NODE (node), BUSINESS_TRANSACTION, MACHINE_INSTANCE, BACKEND..."}
+      - {name: affected_entity_id, type: BIGINT, path: "affectedEntityDefinition.entityId"}
+      - {name: affected_entity, path: "affectedEntityDefinition.name", description: "Name of the tier/node/BT that violated"}
+      - {name: message, path: description, description: "Violation text (HTML markup) with the condition, observed value and threshold"}
+      - {name: url, path: deepLinkUrl, description: "Controller deep link to the incident"}
+      - {name: application, filter_only: true}
+    pitfalls:
+      - "Returns violations active in the window, including ones that started before it: filter state = 'OPEN' for what is still firing."
+      - "The observed value and threshold only appear in the HTML message; strip tags before quoting it."
+    examples:
+      - sql: >-
+          SELECT ts, title, severity, state, affected_entity_type, affected_entity, url
+          FROM appdynamics_health_rule_violations
+          WHERE application = 'ECommerce_E2E' AND ts >= TIMESTAMP '2026-10-01 10:00:00'
+          ORDER BY ts DESC
+        description: Health rule violations around the incident with what they affected.
+      - sql: "SELECT affected_entity, count(*) AS violations, max(severity) AS worst FROM appdynamics_health_rule_violations WHERE application = 'ECommerce_E2E' AND state = 'OPEN' GROUP BY 1 ORDER BY violations DESC"
+        description: Entities with open violations right now.
+    fixtures:
+      - file: health_rule_violations.json
+        note: "JSON rendering (output=JSON) of the docs' XML example for GET /controller/rest/applications/7/problems/healthrule-violations (HTML entities in description unescaped; the stray space in 'http: //' of the docs sample removed)."
+        filters: {application: "7"}
+        expect_rows: 2
+        expect_columns: {id: 266, title: CPU utilization is too high, ts: "2016-01-12T20:30:55Z", end_ts: "2016-01-12T20:31:55Z", detected_ts: null, state: RESOLVED, severity: WARNING, health_rule_id: 30, affected_entity_type: APPLICATION_COMPONENT_NODE, affected_entity: Fulfillment}
+    ui_link: "{{ source.base_url }}/controller/#/location=APP_INCIDENT_LIST"
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/alert-and-respond-api/events-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_events
+    title: Events (deployments, config changes, restarts, errors, diagnostics)
+    description: >-
+      Controller events of one application in the window: one row per event with type, subtype,
+      severity, summary, affected entities and a deep link. Filter on application, event_type
+      (default: change and failure types APPLICATION_DEPLOYMENT, APPLICATION_CONFIG_CHANGE,
+      APP_SERVER_RESTART, APPLICATION_ERROR, APPLICATION_CRASH, CLR_CRASH, DEADLOCK, STALL,
+      RESOURCE_POOL_LIMIT, DIAGNOSTIC_SESSION, CUSTOM, POLICY_OPEN_CRITICAL, POLICY_OPEN_WARNING,
+      ANOMALY_OPEN_CRITICAL, ANOMALY_OPEN_WARNING), severity (INFO/WARN/ERROR) and tier.
+    kind: events
+    request:
+      method: GET
+      path: "/controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}/events"
+      query:
+        output: JSON
+        time-range-type: BETWEEN_TIMES
+        start-time: "{{ time.start | epoch_ms }}"
+        end-time: "{{ time.end | epoch_ms }}"
+        event-types: "{{ filters.event_type | as_list | join(',') if filters.event_type else 'APPLICATION_DEPLOYMENT,APPLICATION_CONFIG_CHANGE,APP_SERVER_RESTART,APPLICATION_ERROR,APPLICATION_CRASH,CLR_CRASH,DEADLOCK,STALL,RESOURCE_POOL_LIMIT,DIAGNOSTIC_SESSION,CUSTOM,POLICY_OPEN_CRITICAL,POLICY_OPEN_WARNING,ANOMALY_OPEN_CRITICAL,ANOMALY_OPEN_WARNING' }}"
+        severities: "{{ filters.severity | as_list | join(',') if filters.severity else 'INFO,WARN,ERROR' }}"
+        tier: "{{ filters.tier }}"
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+      - {column: event_type, ops: ["=", "in"], fan_out: false, description: "Event type(s) from the Events Reference, e.g. APPLICATION_DEPLOYMENT, APP_SERVER_RESTART, APPLICATION_ERROR", examples: [APPLICATION_DEPLOYMENT]}
+      - {column: severity, ops: ["=", "in"], fan_out: false, description: "INFO, WARN, ERROR (UI: Info, Warning, Critical)", examples: [ERROR]}
+      - {column: tier, description: "Tier name: only events of that tier", examples: [ECommerce-Services]}
+    time: {column: ts, default_lookback: 6h, max_window: 14d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: event_type, path: type, description: "APPLICATION_DEPLOYMENT, APP_SERVER_RESTART, POLICY_OPEN_CRITICAL, ..."}
+      - {name: sub_type, path: subType}
+      - {name: ts, type: TIMESTAMP, path: eventTime, transform: epoch_ms}
+      - {name: severity, path: severity, description: "INFO | WARN | ERROR"}
+      - {name: title, path: summary, description: "Event summary"}
+      - {name: message, path: summary}
+      - {name: tier, expr: "(_.affectedEntities | selectattr('entityType', 'equalto', 'APPLICATION_COMPONENT') | map(attribute='name') | first) if _.affectedEntities is iterable and _.affectedEntities is not string and _.affectedEntities is not mapping else None", description: "Affected tier (from affectedEntities)"}
+      - {name: service, expr: "(_.affectedEntities | selectattr('entityType', 'equalto', 'APPLICATION_COMPONENT') | map(attribute='name') | first) if _.affectedEntities is iterable and _.affectedEntities is not string and _.affectedEntities is not mapping else None", description: "Canonical alias of tier"}
+      - {name: node, expr: "(_.affectedEntities | selectattr('entityType', 'equalto', 'APPLICATION_COMPONENT_NODE') | map(attribute='name') | first) if _.affectedEntities is iterable and _.affectedEntities is not string and _.affectedEntities is not mapping else None"}
+      - {name: business_transaction, expr: "(_.affectedEntities | selectattr('entityType', 'equalto', 'BUSINESS_TRANSACTION') | map(attribute='name') | first) if _.affectedEntities is iterable and _.affectedEntities is not string and _.affectedEntities is not mapping else None"}
+      - {name: host, expr: "(_.affectedEntities | selectattr('entityType', 'equalto', 'MACHINE_INSTANCE') | map(attribute='name') | first) if _.affectedEntities is iterable and _.affectedEntities is not string and _.affectedEntities is not mapping else None"}
+      - {name: affected_entities, type: JSON, path: affectedEntities, description: "[{entityType, entityId, name}]"}
+      - {name: triggered_entity_type, path: "triggeredEntity.entityType"}
+      - {name: triggered_entity, path: "triggeredEntity.name"}
+      - {name: marked_as_resolved, type: BOOLEAN, path: markedAsResolved}
+      - {name: archived, type: BOOLEAN, path: archived}
+      - {name: url, path: deepLinkUrl, description: "Controller deep link to the event"}
+      - {name: application, filter_only: true}
+    pitfalls:
+      - "At most 600 events per call: narrow the window or event types when you get exactly 600 rows."
+      - "event_type values must be exact Events Reference names (upper case); an unknown type returns an HTTP 400."
+      - "Deployment markers exist only if a pipeline posts APPLICATION_DEPLOYMENT events (or CUSTOM events); absence is not proof nothing was deployed."
+    examples:
+      - sql: >-
+          SELECT ts, event_type, tier, title, url FROM appdynamics_events
+          WHERE application = 'ECommerce_E2E' AND event_type IN ('APPLICATION_DEPLOYMENT', 'APPLICATION_CONFIG_CHANGE', 'APP_SERVER_RESTART')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 08:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Deploys, config changes and restarts before the incident.
+      - sql: "SELECT event_type, tier, count(*) AS n, min(ts) AS first_seen FROM appdynamics_events WHERE application = 'ECommerce_E2E' AND severity = 'ERROR' GROUP BY 1, 2 ORDER BY n DESC"
+        description: Error-severity events by type and tier.
+    fixtures:
+      - file: events.json
+        note: "JSON rendering (output=JSON) of the docs' XML example for GET /controller/rest/applications/6/events (event-types APPLICATION_ERROR,DIAGNOSTIC_SESSION); <affectedEntities><entity-definition> rendered as an array."
+        filters: {application: "6"}
+        expect_rows: 1
+        expect_columns: {id: 44658, event_type: DIAGNOSTIC_SESSION, sub_type: ERROR_DIAGNOSTIC_SESSION, ts: "2015-12-28T22:57:33.085Z", severity: WARN, tier: ECommerce-Services, node: ECommerce_WEB2, business_transaction: "/items/all.GET", host: ECommerce-web1, triggered_entity: ECommerce_WEB2}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/alert-and-respond-api/events-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_snapshots
+    title: Transaction snapshots
+    description: >-
+      Transaction snapshots (sampled/slow/error request segments, the AppDynamics trace) of one
+      application in the window: one row per request segment with BT, tier, node, response time,
+      user experience (NORMAL/SLOW/VERY_SLOW/STALL/ERROR) and error summary. Filter on application
+      and ts; narrow with error_only, user_experience, business_transaction_id, tier_id, node_id,
+      min_duration_ms, guid (request GUID across tiers) or need_props = true (error details,
+      HTTP params, log messages).
+    kind: spans
+    request:
+      method: GET
+      path: "/controller/rest/applications/{{ (filters.application or env.APPD_APPLICATION) | urlencode }}/request-snapshots"
+      query:
+        output: JSON
+        time-range-type: BETWEEN_TIMES
+        start-time: "{{ time.start | epoch_ms }}"
+        end-time: "{{ time.end | epoch_ms }}"
+        guids: "{{ filters.trace_id | as_list | join(',') if filters.trace_id else None }}"
+        business-transaction-ids: "{{ filters.business_transaction_id | as_list | join(',') if filters.business_transaction_id else None }}"
+        application-component-ids: "{{ filters.tier_id | as_list | join(',') if filters.tier_id else None }}"
+        application-component-node-ids: "{{ filters.node_id | as_list | join(',') if filters.node_id else None }}"
+        user-experience: "{{ filters.user_experience | as_list | join(',') if filters.user_experience else None }}"
+        error-occurred: "{{ 'true' if filters.error_only else None }}"
+        execution-time-in-milis: "{{ filters.min_duration_ms }}"
+        first-in-chain: "{{ 'true' if filters.first_in_chain else None }}"
+        need-props: "{{ 'true' if filters.need_props else None }}"
+        maximum-results: "{{ [limit or 600, 5000] | min }}"
+    filters:
+      - {column: application, description: "Business application name or numeric id (default APPD_APPLICATION)", examples: [ECommerce_E2E]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "Request GUID(s): every segment of one request across tiers", examples: ['18a9ae17-33a8-4d24-b3fa-558fe42b98b5']}
+      - {column: business_transaction_id, type: BIGINT, ops: ["=", "in"], fan_out: false, description: "BT id(s) from appdynamics_business_transactions", examples: ['113']}
+      - {column: tier_id, type: BIGINT, ops: ["=", "in"], fan_out: false, description: "Tier id(s) from appdynamics_tiers", examples: ['14']}
+      - {column: node_id, type: BIGINT, ops: ["=", "in"], fan_out: false, description: "Node id(s) from appdynamics_nodes"}
+      - {column: user_experience, ops: ["=", "in"], fan_out: false, description: "NORMAL, SLOW, VERY_SLOW, STALL, ERROR", examples: [ERROR]}
+      - {column: error_only, type: BOOLEAN, description: "true = only error requests (error-occurred=true)"}
+      - {column: min_duration_ms, type: BIGINT, description: "Only requests slower than this many ms"}
+      - {column: first_in_chain, type: BOOLEAN, description: "true = only the originating segment of each request"}
+      - {column: need_props, type: BOOLEAN, description: "true = include error details, HTTP params, log messages, transaction properties"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: trace_id, path: requestGUID, description: "Request GUID shared by the segments of one request across tiers"}
+      - {name: ts, type: TIMESTAMP, path: serverStartTime, transform: epoch_ms, description: "Segment start (Controller-normalised time)"}
+      - {name: duration_ms, type: DOUBLE, path: timeTakenInMilliSecs}
+      - {name: cpu_ms, type: DOUBLE, path: cpuTimeTakenInMilliSecs}
+      - {name: level, path: userExperience, description: "NORMAL | SLOW | VERY_SLOW | STALL | ERROR"}
+      - {name: error, type: BOOLEAN, path: errorOccured, description: "Error occurred (the API spells it errorOccured)"}
+      - {name: summary, path: summary}
+      - {name: message, expr: "_.errorSummary or _.summary"}
+      - {name: error_summary, path: errorSummary}
+      - {name: resource, path: URL, description: "Request URL path / entry point"}
+      - {name: business_transaction_id, type: BIGINT, path: businessTransactionId}
+      - {name: tier_id, type: BIGINT, path: applicationComponentId}
+      - {name: node_id, type: BIGINT, path: applicationComponentNodeId}
+      - {name: application_id, type: BIGINT, path: applicationId}
+      - {name: first_in_chain, type: BOOLEAN, path: firstInChain}
+      - {name: call_chain, path: callChain, description: "Tier chain, e.g. Component:14"}
+      - {name: deep_dive_policy, path: deepDivePolicy, description: "Why it was captured: TIME_SAMPLING, ERROR_SAMPLING, SLA_FAILURE, ON_DEMAND, ..."}
+      - {name: thread_name, path: threadName}
+      - {name: warning_threshold, path: warningThreshold}
+      - {name: critical_threshold, path: criticalThreshold}
+      - {name: error_ids, type: JSON, path: errorIDs}
+      - {name: error_details, type: JSON, path: errorDetails, description: "[{name, value}] exception class and message (need_props = true)"}
+      - {name: http_parameters, type: JSON, path: httpParameters}
+      - {name: log_messages, type: JSON, path: logMessages}
+      - {name: transaction_properties, type: JSON, path: transactionProperties}
+      - {name: http_session_id, path: httpSessionID}
+      - {name: diagnostic_session_guid, path: diagnosticSessionGUID}
+      - {name: application, filter_only: true}
+      - {name: user_experience, filter_only: true}
+      - {name: error_only, type: BOOLEAN, filter_only: true}
+      - {name: min_duration_ms, type: BIGINT, filter_only: true}
+      - {name: need_props, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "Snapshots are SAMPLES (periodic, slow/error-triggered, diagnostic sessions), not every request: use appdynamics_metric_data for rates and counts."
+      - "Without maximum-results the Controller returns at most 600 snapshots (the table sends the SQL LIMIT, default 600, capped at 5,000): filter on error_only/user_experience/business_transaction_id instead of widening the window."
+      - "BT, tier and node filters take numeric ids, not names: resolve them with appdynamics_business_transactions / appdynamics_tiers / appdynamics_nodes."
+      - "error_details/log_messages/http_parameters are empty unless need_props = true."
+    examples:
+      - sql: >-
+          SELECT ts, trace_id, business_transaction_id, tier_id, duration_ms, level, message
+          FROM appdynamics_snapshots
+          WHERE application = 'ECommerce_E2E' AND error_only = true AND need_props = true
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY ts DESC LIMIT 50
+        description: Error snapshots in the incident window with their error summaries.
+      - sql: "SELECT business_transaction_id, count(*) AS slow, quantile_cont(duration_ms, 0.95) AS p95_ms FROM appdynamics_snapshots WHERE application = 'ECommerce_E2E' AND user_experience IN ('SLOW', 'VERY_SLOW', 'STALL') GROUP BY 1 ORDER BY slow DESC"
+        description: Which business transactions produced the slow snapshots.
+    fixtures:
+      - file: snapshots.json
+        note: "JSON rendering (output=JSON) of the docs' XML example for GET .../ECommerce_E2E-Fulfillment/request-snapshots ('...' elision dropped; empty elements rendered as [])."
+        filters: {application: ECommerce_E2E-Fulfillment}
+        expect_rows: 2
+        expect_columns: {trace_id: 18a9ae17-33a8-4d24-b3fa-558fe42b98b5, ts: "2015-12-20T01:14:35.422Z", duration_ms: 3693.0, level: NORMAL, error: false, resource: /appdynamicspilot/rest/fulfillment, business_transaction_id: 113, tier_id: 14, deep_dive_policy: TIME_SAMPLING}
+      - file: snapshots_error_props.json
+        note: "JSON rendering of the docs' need-props=true XML example (HTTP Parameter data collector); errorIDs/<long> rendered as an array of numbers."
+        filters: {application: ECommerce_E2E-Fulfillment, need_props: true}
+        expect_rows: 1
+        expect_columns: {level: ERROR, error: true, deep_dive_policy: ON_DEMAND, http_session_id: 088B2A2DD0EF77424DD0EB3346A441F9, error_details: {not_null: true}}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/metric-and-snapshot-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_health_rules
+    title: Health rules (alert rule definitions)
+    description: >-
+      Health rules of one application (id, name, enabled), or one rule's full definition when
+      health_rule_id is given (affected entities, critical/warning conditions with metric paths,
+      thresholds/baselines, evaluation window). Filter on application_id (numeric; default
+      APPD_APPLICATION_ID). Use to read the rule behind a violation.
+    kind: entities
+    request:
+      method: GET
+      path: "/controller/alerting/rest/v1/applications/{{ filters.application_id or env.APPD_APPLICATION_ID }}/health-rules{{ ('/' ~ filters.health_rule_id) if filters.health_rule_id else '' }}"
+    filters:
+      - {column: application_id, type: BIGINT, description: "Numeric application id (appdynamics_applications.id; default APPD_APPLICATION_ID)", examples: ['5']}
+      - {column: health_rule_id, type: BIGINT, description: "One rule id (appdynamics_health_rule_violations.health_rule_id) for the full definition", examples: ['26']}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: health_rule_id, type: BIGINT, path: id}
+      - {name: name, path: name}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: affected_entity_type, path: "affects.affectedEntityType", description: "Detail only: BUSINESS_TRANSACTION_PERFORMANCE, TIER_NODE_HARDWARE, TIER_NODE_TRANSACTION_PERFORMANCE, BACKENDS, ..."}
+      - {name: affects, type: JSON, path: affects, description: "Detail only: scope of the rule"}
+      - {name: eval_window_min, type: BIGINT, path: useDataFromLastNMinutes, description: "Detail only: evaluation window (minutes)"}
+      - {name: wait_after_violation_min, type: BIGINT, path: waitTimeAfterViolation}
+      - {name: schedule, path: scheduleName}
+      - {name: critical_conditions, type: JSON, path: "evalCriterias.criticalCriteria.conditions", description: "Detail only: [{name, evalDetail{metricPath, metricExpression, metricEvalDetail{compareCondition, compareValue, baselineCondition...}}}]"}
+      - {name: warning_conditions, type: JSON, path: "evalCriterias.warningCriteria.conditions"}
+      - {name: critical_metric_paths, expr: "(_.evalCriterias.criticalCriteria.conditions | map(attribute='evalDetail') | map(attribute='metricPath') | select | join(', ')) if _.evalCriterias and _.evalCriterias.criticalCriteria and _.evalCriterias.criticalCriteria.conditions else None", description: "Detail only: single-metric condition paths (relative to the affected entity)"}
+      - {name: eval_criterias, type: JSON, path: evalCriterias}
+      - {name: application_id, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "The list form returns only id/name/enabled: filter on health_rule_id for conditions and thresholds."
+      - "Metric paths inside conditions are relative to the affected entity (e.g. 'Average CPU Used (ms)' of each BT), not full paths."
+    examples:
+      - sql: "SELECT health_rule_id, name, enabled FROM appdynamics_health_rules WHERE application_id = 5 ORDER BY name"
+        description: All health rules of an application.
+      - sql: "SELECT name, affected_entity_type, eval_window_min, critical_metric_paths, critical_conditions FROM appdynamics_health_rules WHERE application_id = 5 AND health_rule_id = 26"
+        description: The full definition (conditions, thresholds, window) of the rule that fired.
+    fixtures:
+      - file: health_rules.json
+        note: "Verbatim JSON example response of GET /controller/alerting/rest/v1/applications/<id>/health-rules from the Health Rule API page."
+        filters: {application_id: 5}
+        expect_rows: 6
+        expect_columns: {health_rule_id: 1, name: Machine Availability is too low, enabled: true}
+      - file: health_rule_detail.json
+        note: "Verbatim JSON example response of GET .../health-rules/{health-rule-id} from the Health Rule API page."
+        filters: {application_id: 5, health_rule_id: 26}
+        expect_rows: 1
+        expect_columns: {health_rule_id: 26, name: My new health rule, affected_entity_type: BUSINESS_TRANSACTION_PERFORMANCE, eval_window_min: 30, schedule: Always, critical_metric_paths: "Average CPU Used (ms)"}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/alert-and-respond-api/health-rule-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_anomalies
+    title: Anomaly detection violations
+    description: >-
+      Anomalies detected by AppDynamics Anomaly Detection for one application in the window:
+      one row per anomaly with status, affected entity (usually a business transaction) and
+      duration. Filter on application_id (numeric; default APPD_APPLICATION_ID) and ts. For the
+      suspected root causes use appdynamics_anomaly_causes.
+    kind: alerts
+    request:
+      method: GET
+      path: "/controller/anomaly/rest/api/v1/applications/{{ filters.application_id or env.APPD_APPLICATION_ID }}/anomalies"
+      query:
+        startTime: "{{ time.start | epoch_ms }}"
+        endTime: "{{ time.end | epoch_ms }}"
+        fetchSuspectedCause: "false"
+    filters:
+      - {column: application_id, type: BIGINT, description: "Numeric application id (default APPD_APPLICATION_ID)", examples: ['14']}
+    time: {column: ts, default_lookback: 24h, max_window: 14d}
+    pagination: {type: page, page_param: query.pageNumber, limit_param: query.pageSize, page_size: 100, start: 0, max_pages: 5}
+    response:
+      rows_path: "$.violationListItem[*]"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: state, path: status, description: "OPEN | RESOLVED ..."}
+      - {name: title, path: description}
+      - {name: ts, type: TIMESTAMP, path: startTime, transform: epoch_ms}
+      - {name: end_ts, type: TIMESTAMP, path: endTime, transform: epoch_ms}
+      - {name: duration_ms, type: DOUBLE, path: duration}
+      - {name: affected_entity_type, path: affectedEntityType, description: "BUSINESS_TRANSACTION, ..."}
+      - {name: affected_entity_id, type: BIGINT, path: affectedEntityId}
+      - {name: affected_entity, path: affectedEntityName}
+      - {name: application_id, type: BIGINT, filter_only: true}
+    examples:
+      - sql: "SELECT ts, end_ts, state, affected_entity, title FROM appdynamics_anomalies WHERE application_id = 14 AND ts >= TIMESTAMP '2026-10-01 00:00:00' ORDER BY ts DESC"
+        description: Anomalies around the incident and which business transactions deviated.
+    fixtures:
+      - file: anomalies.json
+        note: "Verbatim JSON example 1 (fetchSuspectedCause=false) of GET /controller/anomaly/rest/api/v1/applications/14/anomalies from the Anomaly Violation API page."
+        filters: {application_id: 14}
+        expect_rows: 2
+        expect_columns: {id: 1, state: RESOLVED, ts: "2025-08-28T09:44:00Z", duration_ms: 1200000.0, affected_entity: /orders, affected_entity_type: BUSINESS_TRANSACTION}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/anomaly-violation-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_anomaly_causes
+    title: Anomaly events and suspected causes (RCA)
+    description: >-
+      Anomaly state-change events (ANOMALY_OPEN_CRITICAL, ANOMALY_DOWNGRADED, ...) with the
+      suspected causes AppDynamics' automated root cause analysis found: one row per (anomaly,
+      event, suspected cause); events without causes keep one row with NULL cause columns. Filter
+      on application_id (numeric) and ts.
+    kind: incidents
+    request:
+      method: GET
+      path: "/controller/anomaly/rest/api/v1/applications/{{ filters.application_id or env.APPD_APPLICATION_ID }}/anomalies"
+      query:
+        startTime: "{{ time.start | epoch_ms }}"
+        endTime: "{{ time.end | epoch_ms }}"
+        fetchSuspectedCause: "true"
+    filters:
+      - {column: application_id, type: BIGINT, description: "Numeric application id (default APPD_APPLICATION_ID)", examples: ['14']}
+    time: {column: ts, default_lookback: 24h, max_window: 14d}
+    pagination: {type: page, page_param: query.pageNumber, limit_param: query.pageSize, page_size: 100, start: 0, max_pages: 5}
+    response:
+      rows_path: "$.violationListItem[*]"
+      expand:
+        - {entries: eventDetailMap, as: e}
+        - {explode: "@e.value.suspectedCauses", as: c, keep_empty: true}
+    columns:
+      - {name: anomaly_id, type: BIGINT, path: id}
+      - {name: state, path: status}
+      - {name: affected_entity, path: affectedEntityName}
+      - {name: affected_entity_type, path: affectedEntityType}
+      - {name: event_id, path: "@e.key"}
+      - {name: ts, type: TIMESTAMP, path: "@e.value.eventTime", transform: epoch_ms}
+      - {name: event_type, path: "@e.value.eventType", description: "ANOMALY_OPEN_CRITICAL, ANOMALY_OPEN_WARNING, ANOMALY_DOWNGRADED, ANOMALY_UPGRADED, ANOMALY_CLOSE_*"}
+      - {name: severity, path: "@e.value.eventSeverity", description: "ERROR | WARN"}
+      - {name: message, path: "@e.value.eventSummary"}
+      - {name: cause_entity_type, path: "@c.entityType", description: "Suspected cause entity type (APPLICATION_COMPONENT_NODE, BACKEND, ...)"}
+      - {name: cause_entity, path: "@c.entityName"}
+      - {name: cause_entity_id, type: BIGINT, path: "@c.entityId"}
+      - {name: rca_summary, path: "@c.rcaSummary", description: "e.g. '/orders is possibly affected by issue on OrderServiceNode'"}
+      - {name: cause_metrics, type: JSON, path: "@c.affectedEntityMetricIds", description: "Deviating metrics [{metricId, metricName}]"}
+      - {name: metric_bands, type: JSON, path: "@c.metricBandInfo", description: "Expected band per metric id {upper, lower}"}
+      - {name: application_id, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Suspected causes are heuristics: confirm with the cause entity's metrics (appdynamics_metric_data) before concluding."
+    examples:
+      - sql: >-
+          SELECT ts, affected_entity, event_type, cause_entity_type, cause_entity, rca_summary
+          FROM appdynamics_anomaly_causes WHERE application_id = 14 AND cause_entity IS NOT NULL
+          ORDER BY ts
+        description: Suspected root causes AppDynamics attached to anomalies in the window.
+    fixtures:
+      - file: anomalies_suspected_causes.json
+        note: "Verbatim JSON example 2 (fetchSuspectedCause=true) of GET /controller/anomaly/rest/api/v1/applications/14/anomalies from the Anomaly Violation API page."
+        filters: {application_id: 14}
+        expect_rows: 4
+        expect_columns: {anomaly_id: 1, event_id: "5713", event_type: ANOMALY_OPEN_CRITICAL, severity: ERROR, ts: "2025-08-28T09:44:00Z", cause_entity: null}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/anomaly-violation-api
+
+  # ------------------------------------------------------------------------------------------
+  - name: appdynamics_audit_history
+    title: Controller audit history (who changed what)
+    description: >-
+      Controller audit log: logins and configuration changes (health rules, BT/agent config,
+      application settings, objects created/deleted) with user, action, object and application.
+      One row per audit entry. Filter on ts (max 24 h per call), user_name, action, object_type,
+      application (all pushed down as include=<field>:<value>).
+    kind: changes
+    request:
+      method: GET
+      path: /controller/ControllerAuditHistory
+      query:
+        startTime: "{{ time.start | strftime('%Y-%m-%dT%H:%M:%S.000+0000') }}"
+        endTime: "{{ time.end | strftime('%Y-%m-%dT%H:%M:%S.000+0000') }}"
+        include: "{{ (filters.user_name | as_list | format_each('userName:{}')) + (filters.action | as_list | format_each('action:{}')) + (filters.object_type | as_list | format_each('objectType:{}')) + (filters.application | as_list | format_each('applicationName:{}')) }}"
+        exclude: "{{ ['action:LOGIN'] if filters.exclude_logins else None }}"
+    filters:
+      - {column: user_name, ops: ["=", "in"], fan_out: false, description: "Controller user name", examples: [user1]}
+      - {column: action, ops: ["=", "in"], fan_out: false, description: "LOGIN, OBJECT_CREATED, OBJECT_UPDATED, OBJECT_DELETED, APP_CONFIGURATION, ...", examples: [OBJECT_UPDATED]}
+      - {column: object_type, ops: ["=", "in"], fan_out: false, description: "APPLICATION, BUSINESS_TRANSACTION, AGENT_CONFIGURATION, POLICY, ...", examples: [AGENT_CONFIGURATION]}
+      - {column: application, ops: ["=", "in"], fan_out: false, description: "Application name", examples: [ACME]}
+      - {column: exclude_logins, type: BOOLEAN, description: "true = drop LOGIN entries (exclude=action:LOGIN)"}
+    time: {column: ts, default_lookback: 6h, max_window: 24h}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timeStamp, transform: epoch_ms}
+      - {name: audit_datetime, path: auditDateTime}
+      - {name: author, path: userName, description: "User who acted"}
+      - {name: user_name, path: userName}
+      - {name: action, path: action}
+      - {name: object_type, path: objectType}
+      - {name: object_name, path: objectName}
+      - {name: object_id, type: BIGINT, path: objectId}
+      - {name: application, path: applicationName}
+      - {name: account_name, path: accountName}
+      - {name: security_provider_type, path: securityProviderType, description: "INTERNAL, LDAP, SAML, ..."}
+      - {name: title, expr: "(_.action or '') ~ ((' ' ~ _.objectType) if _.objectType else '') ~ ((' ' ~ _.objectName) if _.objectName else '')", description: "action objectType objectName"}
+      - {name: exclude_logins, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "The range cannot exceed 24 hours: the engine clamps longer windows to the most recent 24 h; query consecutive days explicitly."
+      - "Times are sent as yyyy-MM-dd'T'HH:mm:ss.SSS+0000 (UTC); the '+' is URL-encoded, as the docs require for positive offsets."
+      - "Filters on the same field are OR-ed, different fields AND-ed (server side)."
+    examples:
+      - sql: >-
+          SELECT ts, author, action, object_type, object_name, application FROM appdynamics_audit_history
+          WHERE exclude_logins = true AND ts BETWEEN TIMESTAMP '2026-10-01 06:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Configuration changes made in the Controller before the incident.
+    fixtures:
+      - file: audit_history.json
+        note: "Verbatim JSON example (include=applicationName:ACME) of GET /controller/ControllerAuditHistory from the Controller Audit History API page."
+        filters: {application: ACME}
+        expect_rows: 1
+        expect_columns: {ts: "2019-05-28T18:00:15.823Z", author: user1, action: LOGIN, application: ACME, object_id: 0}
+      - file: audit_history_changes.json
+        note: "The complete objects of the first verbatim JSON example on the Controller Audit History API page (the truncated '...' tail dropped)."
+        expect_rows: 5
+        expect_columns: {ts: "2015-12-20T00:03:41.811Z", author: user1, action: LOGIN, title: LOGIN}
+    docs_url: https://help.splunk.com/en/appdynamics-saas/extend-splunk-appdynamics/26.10.0/extend-splunk-appdynamics/splunk-appdynamics-apis/controller-audit-history-api
+
+roles:
+  metrics:
+    table: appdynamics_metric_data
+    query_language: appdynamics_metric_path
+    columns: {query: metric_path, ts: ts, value: value, metric: metric}
+    notes: "Requires an application (filter or APPD_APPLICATION). Tier = service: 'Overall Application Performance|<tier>|Calls per Minute' etc."
+  services:
+    table: appdynamics_tiers
+    columns: {id: id, service: tier}
+    notes: "AppDynamics tiers are the services of a business application."
+  hosts:
+    table: appdynamics_nodes
+    columns: {id: id, host: host, service: tier}
+  active_alerts:
+    table: appdynamics_health_rule_violations
+    filters: {state: OPEN}
+    columns: {id: id, ts: ts, title: title, state: state, severity: severity, service: affected_entity, url: url}
+  alert_history:
+    table: appdynamics_health_rule_violations
+    columns: {id: id, ts: ts, title: title, state: state, severity: severity, service: affected_entity, url: url}
+  incidents:
+    table: appdynamics_health_rule_violations
+    columns: {id: id, ts: ts, title: title, state: state, severity: severity, service: affected_entity, url: url}
+  alert_rules:
+    table: appdynamics_health_rules
+    filters: {health_rule_id: "{{ rule_id or '' }}"}
+    columns: {id: health_rule_id, name: name}
+    notes: "Needs the numeric application_id (or APPD_APPLICATION_ID)."
+  change_events:
+    - table: appdynamics_events
+      filters: {event_type: "{{ ['APPLICATION_DEPLOYMENT', 'APPLICATION_CONFIG_CHANGE', 'APP_SERVER_RESTART'] }}", tier: "{{ service or '' }}"}
+      columns: {ts: ts, service: tier, title: title, url: url}
+    - table: appdynamics_audit_history
+      filters: {exclude_logins: "{{ true }}"}
+      columns: {ts: ts, title: title, author: author}
+  traces:
+    table: appdynamics_snapshots
+    filters: {error_only: "{{ true if error_only else '' }}"}
+    columns: {ts: ts, trace_id: trace_id, duration_ms: duration_ms, level: level, message: message, resource: resource}
+  trace_detail:
+    table: appdynamics_snapshots
+    columns: {ts: ts, trace_id: trace_id, duration_ms: duration_ms, level: level, message: message}
+    notes: "Filter trace_id = '<request GUID>' to get every segment of one request."
+  errors:
+    table: appdynamics_events
+    filters: {event_type: "{{ ['APPLICATION_ERROR', 'APPLICATION_CRASH', 'CLR_CRASH', 'DEADLOCK', 'STALL'] }}", tier: "{{ service or '' }}"}
+    columns: {ts: ts, service: tier, title: title, level: severity, url: url}

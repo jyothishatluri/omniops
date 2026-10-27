@@ -1,0 +1,47 @@
+{
+  "platform": "coralogix",
+  "description": "Coralogix alert sent to a Slack webhook integration: alert name linked to Coralogix, description and the alert's severity, application, subsystem, id and trigger time.",
+  "provenance": "Coralogix docs (Slack integration for alerts: notifications carry the alert name, description, severity, application / subsystem, alert id and a link back to the alert or the matching logs; resolved notifications when the alert stops). Attachment layout reconstructed from those fields.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B16CORALOG",
+    "username": "Coralogix",
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "danger",
+        "fallback": "Alert triggered: Checkout errors spike",
+        "pretext": "Alert triggered",
+        "title": "Checkout errors spike",
+        "title_link": "https://acme.app.coralogix.com/#/insights?id=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "text": "More than 100 error logs in 5 minutes for subsystem checkout",
+        "fields": [
+          {"title": "Severity", "value": "Critical", "short": true},
+          {"title": "Application", "value": "shop", "short": true},
+          {"title": "Subsystem", "value": "checkout", "short": true},
+          {"title": "Alert ID", "value": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "short": false},
+          {"title": "Triggered at", "value": "2026-10-20T14:02:00Z", "short": false}
+        ],
+        "footer": "Coralogix"
+      }
+    ],
+    "ts": "1792504957.001000",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.001000",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "coralogix",
+    "rule_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "rule_name": "Checkout errors spike",
+    "status": "firing",
+    "raw_status": "Triggered",
+    "severity": "Critical",
+    "service": "checkout",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "url": "https://acme.app.coralogix.com/#/insights?id=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "tags": {"application": "shop", "subsystem": "checkout"}
+  }
+}

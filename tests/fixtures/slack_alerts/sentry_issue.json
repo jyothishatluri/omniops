@@ -1,0 +1,38 @@
+{
+  "platform": "sentry",
+  "description": "Sentry issue alert in Slack: new issue title linked to the issue (with alert_rule_id), culprit, state context, actions, and the alert rule link in the footer context.",
+  "provenance": "Sentry Slack integration docs (issue alerts post the issue title linked to the issue with referrer/alert_rule_id parameters, culprit, State / First Seen context, Resolve / Archive / Assign actions, and the triggering alert rule). Issue URLs are https://<org>.sentry.io/issues/<issue id>/; issue alert rule URLs are /organizations/<org>/alerts/rules/<project-slug>/<rule id>/details/.",
+  "event": {
+    "type": "message",
+    "user": "U08SENTRY1",
+    "bot_id": "B08SENTRY1",
+    "app_id": "A08SENTRY1",
+    "bot_profile": {"id": "B08SENTRY1", "app_id": "A08SENTRY1", "name": "Sentry", "deleted": false, "team_id": "T01ACME"},
+    "text": "[checkout-backend] ZeroDivisionError: division by zero",
+    "blocks": [
+      {"type": "section", "block_id": "s1", "text": {"type": "mrkdwn", "text": ":red_circle: <https://acme.sentry.io/issues/5123456789/?referrer=slack&amp;notification_uuid=3f2e1d0c-9b8a-4c7d-8e6f-5a4b3c2d1e0f&amp;alert_rule_id=1234567&amp;alert_type=issue|*ZeroDivisionError: division by zero*>"}},
+      {"type": "section", "block_id": "s2", "text": {"type": "mrkdwn", "text": "payments.tax in compute_tax"}},
+      {"type": "context", "block_id": "s3", "elements": [{"type": "mrkdwn", "text": "State: *New*   First Seen: *2 minutes ago*"}]},
+      {"type": "actions", "block_id": "s4", "elements": [
+        {"type": "button", "action_id": "resolve_dialog", "text": {"type": "plain_text", "text": "Resolve"}, "value": "resolve_dialog"},
+        {"type": "button", "action_id": "archive_dialog", "text": {"type": "plain_text", "text": "Archive"}, "value": "archive_dialog"}
+      ]},
+      {"type": "context", "block_id": "s5", "elements": [{"type": "mrkdwn", "text": "CHECKOUT-BACKEND-1A2 via <https://acme.sentry.io/organizations/acme/alerts/rules/checkout-backend/1234567/details/|Checkout errors to #alerts>"}]}
+    ],
+    "ts": "1792504961.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504961.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "sentry",
+    "title": "ZeroDivisionError: division by zero",
+    "rule_id": "1234567",
+    "rule_name": "Checkout errors to #alerts",
+    "status": "firing",
+    "raw_status": "New",
+    "service": "checkout-backend",
+    "incident_id": "5123456789",
+    "url": "https://acme.sentry.io/issues/5123456789/?referrer=slack&notification_uuid=3f2e1d0c-9b8a-4c7d-8e6f-5a4b3c2d1e0f&alert_rule_id=1234567&alert_type=issue"
+  }
+}

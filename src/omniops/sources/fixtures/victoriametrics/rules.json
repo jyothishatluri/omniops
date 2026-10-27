@@ -1,0 +1,77 @@
+{
+ "data": {
+  "groups": [
+   {
+    "rules": [
+     {
+      "alerts": [
+       {
+        "activeAt": "2018-07-04T20:27:12.60602144+02:00",
+        "annotations": {
+         "summary": "High request latency"
+        },
+        "labels": {
+         "alertname": "HighRequestLatency",
+         "severity": "page"
+        },
+        "state": "firing",
+        "value": "1e+00"
+       }
+      ],
+      "annotations": {
+       "summary": "High request latency"
+      },
+      "duration": 600,
+      "health": "ok",
+      "labels": {
+       "severity": "page"
+      },
+      "name": "HighRequestLatency",
+      "query": "job:request_latency_seconds:mean5m{job=\"myjob\"} > 0.5",
+      "type": "alerting",
+      "state": "firing",
+      "id": "11483540384185702862",
+      "group_id": "13916400863425340342",
+      "group_name": "example",
+      "datasourceType": "prometheus",
+      "lastSamples": 1,
+      "lastSeriesFetched": 3,
+      "evaluationTime": 0.0021,
+      "lastEvaluation": "2026-10-01T11:59:30Z",
+      "lastError": "",
+      "keep_firing_for": 0
+     },
+     {
+      "health": "ok",
+      "name": "job:http_inprogress_requests:sum",
+      "query": "sum by (job) (http_inprogress_requests)",
+      "type": "recording",
+      "state": "nomatch",
+      "id": "6612283409186722339",
+      "group_id": "13916400863425340342",
+      "group_name": "example",
+      "datasourceType": "prometheus",
+      "lastSamples": 0,
+      "lastSeriesFetched": 0,
+      "evaluationTime": 0.0009,
+      "lastEvaluation": "2026-10-01T11:59:30Z",
+      "lastError": ""
+     }
+    ],
+    "file": "/rules.yaml",
+    "interval": 60,
+    "limit": 0,
+    "name": "example",
+    "id": "13916400863425340342",
+    "type": "prometheus",
+    "concurrency": 1,
+    "lastEvaluation": "2026-10-01T11:59:30Z",
+    "states": {
+     "firing": 1,
+     "ok": 1
+    }
+   }
+  ]
+ },
+ "status": "success"
+}

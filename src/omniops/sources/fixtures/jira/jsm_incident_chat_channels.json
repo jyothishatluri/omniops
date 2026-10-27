@@ -1,0 +1,10 @@
+{
+  "channels": [
+    {
+      "active": true,
+      "connectionId": "e3cc821f-cd95-4cc7-a24f-fa855dd19677",
+      "channelType": "slack",
+      "name": "sip-0"
+    }
+  ]
+}

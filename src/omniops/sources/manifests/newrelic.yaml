@@ -1,0 +1,1983 @@
+# New Relic NerdGraph (GraphQL) API.
+# One endpoint: POST https://api.newrelic.com/graphql (EU: api.eu.newrelic.com, JP: api.jp.newrelic.com)
+# with header `API-Key: <user key>`. Every table is a GraphQL document; NRQL tables send the NRQL as the
+# `Nrql!` variable with the engine's time window injected as `SINCE <epoch ms> UNTIL <epoch ms>`.
+# Research notes, endpoint -> doc URL table and pitfalls: docs/sources/newrelic.md
+source: newrelic
+display_name: New Relic
+vendor: New Relic, Inc.
+description: >-
+  New Relic via NerdGraph (GraphQL, no MCP): NRQL over every NRDB event type (Transaction, Span, Log,
+  Metric, NrAiIncident, ChangeTrackingEvent, Deployment ...), entity search with golden metrics/tags/
+  relationships, alert issues and incidents (former violations), alert policies, NRQL conditions and
+  muting rules, change tracking events/deployments, service levels (SLIs/SLOs) and distributed traces.
+docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/get-started/introduction-new-relic-nerdgraph/
+categories: [metrics, logs, traces, alerts, incidents, events, changes, entities, errors, slo]
+base_url: "https://{{ 'api.eu.newrelic.com' if (env.NEW_RELIC_REGION | lower) == 'eu' else ('api.jp.newrelic.com' if (env.NEW_RELIC_REGION | lower) == 'jp' else 'api.newrelic.com') }}"
+env:
+  - {name: NEW_RELIC_API_KEY, description: "User API key (NRAK-...). NerdGraph needs a USER key; license/ingest keys are rejected.", secret: true}
+  - {name: NEW_RELIC_ACCOUNT_ID, description: "Numeric account id that NRQL, alerts and change searches run against"}
+  - {name: NEW_RELIC_REGION, description: "Data center region: us (default), eu or jp. Picks api[.eu|.jp].newrelic.com", default: us}
+required_env: [NEW_RELIC_API_KEY, NEW_RELIC_ACCOUNT_ID]
+auth:
+  type: headers
+  headers:
+    API-Key: "{{ env.NEW_RELIC_API_KEY }}"
+rate_limit:
+  concurrency: 5
+  requests_per_minute: 1000
+  notes: >-
+    NerdGraph: 25 concurrent requests per USER (not per key), HTTP 429 above that. NRQL: 3,000 API queries
+    per account per minute; the SAME NRQL from the same user is limited to 120/min (HTTP 429). New Relic
+    asks for <= 5 concurrent complex (FACET/TIMESERIES) queries. NRQL duration limit: 1 min (Original Data)
+    / 10 min (Data Plus); the default NerdGraph NRQL timeout is only 5 s, so tables send timeout: 60.
+retention:
+  logs: 30d
+  spans: 8d
+  traces: 8d
+errors:
+  - path: "$.errors"
+    non_empty: true
+    message: "$.errors"
+    hint: >-
+      NerdGraph answers HTTP 200 with an errors[] array. NRQL syntax errors, unknown fields,
+      ACCESS_DENIED (wrong NEW_RELIC_ACCOUNT_ID, key without access, or a missing experimental opt-in),
+      TIMEOUT (narrow the ts window or aggregate more). Fix the query; do not retry it unchanged.
+ui_base_url: "https://{{ 'one.eu.newrelic.com' if (env.NEW_RELIC_REGION | lower) == 'eu' else 'one.newrelic.com' }}"
+query_languages:
+  nrql: >-
+    NRQL: SELECT <attrs | aggregates> FROM <EventType> WHERE ... FACET a, b TIMESERIES 1 minute LIMIT n.
+    Strings use single quotes; dotted attribute names are fine (service.name, trace.id); names with odd
+    characters need backticks. Aggregates: count(*), average(x), max(x), percentile(x, 95), uniqueCount(x),
+    latest(x), rate(count(*), 1 minute), percentage(count(*), WHERE error IS TRUE), filter(count(*), WHERE ...).
+    Booleans use IS TRUE / IS FALSE (never = true). LIKE is case-insensitive with % wildcards; = and IN are
+    case-sensitive. Do NOT write SINCE/UNTIL: filter the ts column and the engine injects SINCE/UNTIL in epoch
+    ms. Without LIMIT, FACET returns only 10 groups and SELECT * only 100 rows: the engine appends LIMIT MAX
+    (5,000) to non-TIMESERIES queries that have no LIMIT; add LIMIT n yourself to FACET ... TIMESERIES.
+    TIMESERIES returns at most 366 buckets. Common event types: Transaction, TransactionError, Span, Log
+    (default partition only; other partitions are Log_<name>), Metric, SystemSample, ProcessSample,
+    K8sPodSample, K8sContainerSample, NrAiIncident, Deployment, ChangeTrackingEvent, PageView, JavaScriptError.
+pitfalls:
+  - "NerdGraph returns HTTP 200 with errors[] for bad NRQL/fields/permissions; the engine raises them. A query that 'returns nothing' with an error is NOT evidence of absence."
+  - "All account-scoped tables use NEW_RELIC_ACCOUNT_ID. Data in another (sub-)account is invisible unless you pass account_id (newrelic_nrql) - an empty result can mean the wrong account."
+  - "NRQL = and IN are case-sensitive and exact: appName 'Checkout' != 'checkout'. Confirm names with newrelic_entities or a FACET query before filtering; use LIKE (case-insensitive) when unsure."
+  - "APM agents name services appName/entity.name; OpenTelemetry uses service.name and has NO Transaction events (use Span/Metric). The tables below match both where possible."
+  - "Retention defaults (Original Data option): APM events and Span 8 days, Logs 30 days, Metric aggregates 13 months, change-tracking markers 13 months. Data Plus accounts keep more."
+  - "Repeating the identical NRQL more than 120 times/minute returns HTTP 429: do not poll the same query in a loop."
+
+tables:
+  # ------------------------------------------------------------------------------------------
+  # NRQL (generic)
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_nrql
+    title: NRQL query (any event type)
+    description: >-
+      Runs any NRQL through NerdGraph actor.account(id).nrql against NEW_RELIC_ACCOUNT_ID. Required: query
+      (the NRQL, WITHOUT SINCE/UNTIL - filter ts instead; the engine injects SINCE/UNTIL as epoch ms).
+      One row per result object: TIMESERIES -> one row per bucket (x facet) with ts = bucket start and
+      ts_end = bucket end; FACET -> one row per facet value (facet holds the value, multi-facet values are
+      joined with ' | '); SELECT * / SELECT attr -> one row per event (ts = event timestamp); a single
+      aggregate -> one row whose ts is the midpoint of the query window (window_start/window_end hold the
+      real range). value = the row's first numeric aggregate (single-percentile maps are unwrapped).
+      Every result key is ALSO a column, lower-cased with non-alphanumerics turned into '_':
+      average(duration) -> average_duration, percentile(duration, 95) -> percentile_duration_95,
+      AS 'p95' -> p95, appName -> appname, error.class -> error_class. result = the raw row as JSON.
+      Use it for metrics (FROM Metric / Transaction / SystemSample / K8s*), ad-hoc event analysis and
+      anything the specialised tables do not cover.
+    kind: timeseries
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      timeout_s: 90
+      body:
+        query: &nrql_doc >-
+          query($accountId: Int!, $nrql: Nrql!, $timeout: Seconds) { actor { account(id: $accountId) {
+          nrql(query: $nrql, timeout: $timeout) { results metadata { eventTypes facets messages
+          timeWindow { begin end since until } } } } } }
+        variables:
+          accountId: "{{ (filters.account_id or env.NEW_RELIC_ACCOUNT_ID) | int }}"
+          timeout: 60
+          nrql: >-
+            {%- set q = (filters.query | string | trim) -%}
+            {%- set ql = ' ' ~ (q | lower | replace('\n', ' ') | replace('\t', ' ')) ~ ' ' -%}
+            {{ q }}
+            {%- if ' since ' not in ql %} SINCE {{ time.start | epoch_ms }} UNTIL {{ time.end | epoch_ms }}{% endif -%}
+            {%- if ' limit ' not in ql and ' timeseries' not in ql %} LIMIT MAX{% endif -%}
+    filters:
+      - column: query
+        required: true
+        description: "Full NRQL statement without SINCE/UNTIL (the ts predicate supplies the window)."
+        examples: ["SELECT count(*) FROM TransactionError FACET appName TIMESERIES 1 minute LIMIT 20"]
+      - column: account_id
+        type: BIGINT
+        description: "Run against another account id (default NEW_RELIC_ACCOUNT_ID); the user key must have access."
+    time: {column: ts, default_lookback: 1h, target_points: 300, reapply: false, control_lookback: 6h}
+    response:
+      rows_path: "$.data.actor.account.nrql.results[*]"
+      expand:
+        - {explode: "$.data.actor.account.nrql.metadata.timeWindow", as: w, keep_empty: true}
+      dynamic: "."
+    columns:
+      - name: ts
+        type: TIMESTAMP
+        transform: auto_time
+        description: "Bucket start (TIMESERIES), event time (raw events) or the window midpoint (single aggregates)."
+        expr: >-
+          _.beginTimeSeconds if _.beginTimeSeconds is number else (_.timestamp if _.timestamp is number else
+          (((w.begin + w.end) / 2) if (w and w.begin is number and w.end is number) else none))
+      - name: ts_end
+        type: TIMESTAMP
+        transform: auto_time
+        description: "Bucket end (TIMESERIES) or query window end."
+        expr: "_.endTimeSeconds if _.endTimeSeconds is number else (w.end if (w and w.end is number) else none)"
+      - {name: facet, path: facet, transform: join, transform_arg: " | ", description: "FACET value(s); multi-attribute facets joined with ' | '"}
+      - name: value
+        type: DOUBLE
+        description: "First numeric aggregate of the row (a single-percentile map {\"95\": x} is unwrapped)."
+        expr: >-
+          ((_.items() | list | rejectattr('0', 'in', ['beginTimeSeconds', 'endTimeSeconds', 'facet', 'timestamp'])
+          | map(attribute='1') | select('number') | list)
+          + (_.items() | list | rejectattr('0', 'in', ['beginTimeSeconds', 'endTimeSeconds', 'facet', 'timestamp'])
+          | map(attribute='1') | select('mapping') | map('dictsort') | map('first') | map(attribute='1')
+          | select('number') | list)) | first
+      - {name: result, type: JSON, path: ".", description: "The raw result object (use result->>'appName', result->>'average.duration')"}
+      - {name: window_start, type: TIMESTAMP, path: "@w.begin", transform: epoch_ms, description: "Query window start as resolved by NRDB (may snap to roll-up boundaries)"}
+      - {name: window_end, type: TIMESTAMP, path: "@w.end", transform: epoch_ms}
+      - {name: nrdb_messages, type: JSON, path: "$.data.actor.account.nrql.metadata.messages", description: "NRDB warnings (time range adjusted, metric query transformed...)"}
+      - {name: query, filter_only: true, description: "The NRQL statement"}
+      - {name: account_id, type: BIGINT, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Raw-event rows are newest first; TIMESERIES rows are bucket-ordered per facet; FACET rows are ordered by the first aggregate, descending."
+    pitfalls:
+      - "Never write SINCE/UNTIL in the NRQL: the engine appends SINCE <epoch ms> UNTIL <epoch ms> from the ts predicate, and NRDB's window is authoritative (the ts predicate is NOT re-applied to rows, so roll-up-snapped Metric buckets are kept). If you do write SINCE, nothing is injected and the NRQL's own window silently replaces your ts range."
+      - "The default NerdGraph NRQL timeout is 5 s; this table sends timeout: 60 (the Original Data query duration limit is 1 minute, Data Plus 10 minutes). A TIMEOUT error means: narrow ts, add WHERE filters or aggregate more - not 'no data'."
+      - "FACET without LIMIT returns only the top 10 facets; SELECT * without LIMIT only 100 rows. The engine appends LIMIT MAX (5,000) when the query has no LIMIT and no TIMESERIES. For FACET ... TIMESERIES add LIMIT n yourself (default stays 10)."
+      - "TIMESERIES is capped at 366 buckets; use TIMESERIES AUTO or a bucket size that fits the window."
+      - "COMPARE WITH puts results in currentResults/previousResults, which this table does not read: query the two windows as two occurrences of the table (e.g. a baseline CTE) instead."
+      - "Metric queries snap the window to roll-up boundaries (see window_start/window_end and nrdb_messages); raw events with FROM Metric ... RAW do not."
+      - "Booleans: WHERE error IS TRUE, not error = true. LIKE is case-insensitive; = / IN are exact."
+      - "Raw-event queries return at most 5,000 rows (LIMIT MAX). Aggregate in NRQL (FACET/TIMESERIES) instead of pulling events into SQL."
+      - "Single aggregates (no FACET/TIMESERIES) carry no timestamp: ts is set to the window midpoint (window_start/window_end hold the real range); do not read that ts as an event time."
+    examples:
+      - sql: >-
+          SELECT ts, facet AS service, value AS errors
+          FROM newrelic_nrql
+          WHERE query = 'SELECT count(*) FROM TransactionError FACET appName TIMESERIES 1 minute LIMIT 20'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts, errors DESC
+        description: Error count per service per minute around an incident.
+      - sql: >-
+          WITH cur AS (
+            SELECT facet AS service, value AS p95_s FROM newrelic_nrql
+            WHERE query = 'SELECT percentile(duration, 95) FROM Transaction FACET appName LIMIT 50'
+              AND ts BETWEEN TIMESTAMP '2026-10-01 11:30:00' AND TIMESTAMP '2026-10-01 12:00:00'),
+          base AS (
+            SELECT facet AS service, value AS p95_s FROM newrelic_nrql
+            WHERE query = 'SELECT percentile(duration, 95) FROM Transaction FACET appName LIMIT 50'
+              AND ts BETWEEN TIMESTAMP '2026-09-30 11:30:00' AND TIMESTAMP '2026-09-30 12:00:00')
+          SELECT cur.service, base.p95_s AS baseline_p95_s, cur.p95_s, cur.p95_s / NULLIF(base.p95_s, 0) AS ratio
+          FROM cur LEFT JOIN base USING (service) ORDER BY ratio DESC NULLS LAST
+        description: p95 latency per service now vs the same half hour yesterday.
+      - sql: >-
+          SELECT ts, facet AS pod, value AS cpu_cores
+          FROM newrelic_nrql
+          WHERE query = 'SELECT average(cpuUsedCores) FROM K8sContainerSample WHERE deploymentName = ''checkout'' FACET podName TIMESERIES 1 minute LIMIT 30'
+            AND ts >= TIMESTAMP '2026-10-01 11:00:00'
+          ORDER BY cpu_cores DESC LIMIT 20
+        description: Kubernetes container CPU per pod (Kubernetes integration data) - spot a hot pod.
+      - sql: >-
+          SELECT ts, result->>'name' AS txn, result->>'duration' AS duration_s
+          FROM newrelic_nrql
+          WHERE query = 'SELECT name, duration, http.statusCode FROM Transaction WHERE appName = ''checkout-service'' AND duration > 2'
+            AND ts > TIMESTAMP '2026-10-01 11:45:00'
+          ORDER BY ts DESC LIMIT 50
+        description: Slow individual transactions (raw events) for one service.
+    tests:
+      - {sql: "SELECT value FROM newrelic_nrql WHERE query = 'SELECT count(*) FROM Transaction'", min_rows: 1}
+    fixtures:
+      - file: nrql_facet_timeseries.json
+        note: "Verbatim (first 3 buckets) from New Relic's official NerdGraph workshop, github.com/newrelic/nr1-workshop lab4/4-QueryWithNRQL.md: SELECT count(*) FROM PageView FACET appName SINCE 1 day ago TIMESERIES AUTO."
+        filters: {query: "SELECT count(*) FROM PageView FACET appName TIMESERIES AUTO"}
+        expect_rows: 3
+        expect_columns: {ts: "2019-01-31T14:50:38Z", ts_end: "2019-01-31T15:20:38Z", facet: "Origami Portal", value: 601.0, appname: "Origami Portal", count: 601}
+      - file: nrql_count.json
+        note: "Verbatim from the NerdGraph NRQL tutorial (docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-nrql-tutorial/): SELECT count(*) FROM Transaction SINCE 1 HOUR AGO. No metadata requested, so ts is null."
+        filters: {query: "SELECT count(*) FROM Transaction"}
+        expect_rows: 1
+        expect_columns: {value: 1000.0, count: 1000}
+      - file: nrql_facet_timeseries_metadata.json
+        note: "Verbatim NerdGraph response used by New Relic's official Go client tests (newrelic-client-go pkg/nrdb/nrdb_customized_unit_test.go testNRDBQueryArrayResponse), including metadata.timeWindow in epoch ms."
+        filters: {query: "SELECT count(*) FROM Transaction FACET appName TIMESERIES 1 hour LIMIT 3"}
+        expect_rows: 2
+        expect_columns: {ts: "2025-06-03T00:33:46Z", appname: App1, value: 100.0, window_start: "2024-03-03T05:09:53Z"}
+      - file: nrql_aggregate_metadata.json
+        note: "Verbatim from newrelic-client-go pkg/nrdb/nrdb_customized_unit_test.go testNRDBQueryNullResponse: a single aggregate; ts becomes the midpoint of metadata.timeWindow (1709442593550..1709446193550 ms)."
+        filters: {query: "SELECT count(*) FROM Transaction"}
+        expect_rows: 1
+        expect_columns: {ts: "2024-03-03T05:39:53Z", value: 1542.0, window_end: "2024-03-03T06:09:53Z"}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-nrql-tutorial/
+
+  # ------------------------------------------------------------------------------------------
+  # Logs (NRQL on Log)
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_logs
+    title: Log search (NRQL on Log)
+    description: >-
+      Raw log lines from New Relic Logs (SELECT * FROM Log via NRQL), newest first, up to 5,000 per query.
+      Filter on service (entity.name or service.name), level (case-insensitive across level/log.level/
+      severity.text), host (hostname/host), trace_id, message (= or LIKE/ILIKE, case-insensitive in NR),
+      query (an extra NRQL WHERE condition, e.g. "k8s.namespace.name = 'prod' AND message LIKE '%timeout%'")
+      and partition (Log_<name> partitions; default 'Log'). Every log attribute is also exposed as a column
+      (dots -> '_', lower-cased: k8s.pod.name -> k8s_pod_name) and in attributes (JSON).
+    kind: logs
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      timeout_s: 90
+      body:
+        query: *nrql_doc
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+          timeout: 60
+          nrql: >-
+            {%- set w = [
+              ('(' ~ filters.query ~ ')') if filters.query else none,
+              ('(entity.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ') OR service.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ '))') if filters.service else none,
+              ('(hostname = ' ~ (filters.host | squote) ~ ' OR host = ' ~ (filters.host | squote) ~ ')') if filters.host else none,
+              ('(lower(level) = ' ~ (filters.level | lower | squote) ~ ' OR lower(log.level) = ' ~ (filters.level | lower | squote) ~ ' OR lower(severity.text) = ' ~ (filters.level | lower | squote) ~ ')') if filters.level else none,
+              ('trace.id IN (' ~ (filters.trace_id | as_list | map('squote') | join(', ')) ~ ')') if filters.trace_id else none,
+              (('message LIKE ' if filters.message__op == 'like' else 'message = ') ~ (filters.message | squote)) if filters.message else none
+            ] | select | join(' AND ') -%}
+            SELECT * FROM {{ (filters.partition | as_list | join(', ')) if filters.partition else 'Log' }}
+            {%- if w %} WHERE {{ w }}{% endif %} SINCE {{ time.start | epoch_ms }} UNTIL {{ time.end | epoch_ms }}
+            LIMIT {{ limit if (limit and limit < 5000) else 'MAX' }}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "entity.name (APM logs in context) or service.name (OTel)", examples: ["checkout-service"]}
+      - {column: level, ops: ["=", "in"], max_fan_out: 6, description: "Log level, matched case-insensitively on level, log.level and severity.text", examples: ["error"]}
+      - {column: host, variants: hostname, description: "hostname (APM/infra agents) or host attribute", examples: ["ip-10-0-3-17.ec2.internal"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "trace.id (logs in context)", examples: ["4bf92f3577b34da6a3ce929d0e0e4736"]}
+      - {column: message, ops: ["=", "like"], description: "Exact message or LIKE pattern with % (New Relic LIKE is case-insensitive: use ILIKE in SQL)", examples: ["%timeout%"]}
+      - {column: query, description: "Extra NRQL WHERE condition ANDed in, e.g. k8s.namespace.name = 'prod'", examples: ["message LIKE '%timeout%'"]}
+      - {column: partition, ops: ["=", "in"], fan_out: false, description: "Log partition(s) to read, e.g. Log_nginx (default: Log only)", examples: ["Log"]}
+    time: {column: ts, default_lookback: 15m, max_window: 7d, retention: 30d, control_lookback: 6h}
+    response:
+      rows_path: "$.data.actor.account.nrql.results[*]"
+      dynamic: "."
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms, description: "Log timestamp (epoch ms in NRDB)"}
+      - {name: message, path: message}
+      - name: level
+        description: "level / log.level / severity.text as sent (case preserved)"
+        expr: >-
+          filters.level if (filters.level is string and ((_.level or _['log.level'] or _['severity.text'] or '') | string | lower) == (filters.level | lower))
+          else (_.level or _['log.level'] or _['severity.text'] or none)
+      - name: service
+        description: "service.name, else entity.name, else appName"
+        expr: >-
+          filters.service if (filters.service is string and filters.service in [_['entity.name'], _['service.name'], _.appName])
+          else (_['service.name'] or _['entity.name'] or _.appName or none)
+      - name: host
+        expr: "filters.host if (filters.host is string and filters.host in [_.hostname, _.host]) else (_.hostname or _.host or none)"
+      - {name: trace_id, expr: "_['trace.id'] or _.traceId or none"}
+      - {name: span_id, expr: "_['span.id'] or _.spanId or none"}
+      - {name: entity_guid, path: "['entity.guid']"}
+      - {name: attributes, type: JSON, path: ".", description: "All attributes of the log record"}
+      - {name: query, filter_only: true}
+      - {name: partition, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Newest first (NRQL raw-event order)."
+    pitfalls:
+      - "FROM Log reads only the default partition. Logs routed to a data partition are only visible with partition = 'Log_<name>' (or IN ('Log', 'Log_x'))."
+      - "At most 5,000 lines per query (LIMIT MAX). For volume or error-rate questions use newrelic_log_counts, not row counts here."
+      - "Level names differ by shipper (ERROR, error, err, SEVERE, 50). level is matched case-insensitively, but numeric levels need query = 'level = 50'."
+      - "Logs in context carry entity.name/hostname/trace.id only when the APM agent or forwarder decorates them; OTel logs use service.name."
+      - "message LIKE in New Relic is case-insensitive while SQL LIKE is not: write message ILIKE '%timeout%' so DuckDB keeps the same rows."
+      - "Long messages (> 4,094 chars) are split into blob attributes (newrelic.ext.message); LIKE on message does not search them."
+    examples:
+      - sql: >-
+          SELECT ts, level, host, message, trace_id FROM newrelic_logs
+          WHERE service = 'checkout-service' AND level IN ('error', 'fatal')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:40:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Error logs of one service in the incident window.
+      - sql: >-
+          SELECT ts, service, host, message FROM newrelic_logs
+          WHERE message ILIKE '%connection refused%' AND ts > TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY ts LIMIT 100
+        description: Find which services/hosts log a specific error string.
+      - sql: >-
+          SELECT ts, service, level, message FROM newrelic_logs
+          WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736' ORDER BY ts
+        description: All log lines of one distributed trace (logs in context).
+    fixtures:
+      - file: nrql_logs.json
+        note: "Built from the documented NerdGraph raw-event result shape (flat objects with dotted keys and epoch-ms timestamp, as in newrelic-client-go pkg/nrdb unit fixtures) and the logs-in-context attributes documented at docs.newrelic.com/docs/logs/logs-context/ (entity.guid, entity.name, hostname, trace.id, span.id); no verbatim Log example is published."
+        filters: {service: "checkout-service", level: "error"}
+        expect_rows: 2
+        expect_columns: {ts: "2025-10-01T12:41:00Z", level: error, service: checkout-service, host: "ip-10-0-3-17.ec2.internal", trace_id: "4bf92f3577b34da6a3ce929d0e0e4736", span_id: "a2fb4a1d1a96d312", entity_name: checkout-service}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-nrql-tutorial/
+
+  - name: newrelic_log_counts
+    title: Log volume over time (NRQL count by level)
+    description: >-
+      Log counts per time bucket, faceted by group_by (default level), from SELECT count(*) FROM Log ...
+      FACET <group_by> TIMESERIES <auto step>. Use it to see when an error burst started/ended and how
+      big it is, instead of counting raw lines. Filter service, level, query (NRQL WHERE), partition,
+      group_by (any log attribute, e.g. hostname or k8s.pod.name) and top (max facets, default 20).
+    kind: timeseries
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      timeout_s: 90
+      body:
+        query: *nrql_doc
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+          timeout: 60
+          nrql: >-
+            {%- set w = [
+              ('(' ~ filters.query ~ ')') if filters.query else none,
+              ('(entity.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ') OR service.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ '))') if filters.service else none,
+              ('lower(level) IN (' ~ (filters.level | as_list | map('lower') | map('squote') | join(', ')) ~ ')') if filters.level else none
+            ] | select | join(' AND ') -%}
+            SELECT count(*) AS 'count' FROM {{ (filters.partition | as_list | join(', ')) if filters.partition else 'Log' }}
+            {%- if w %} WHERE {{ w }}{% endif %} FACET {{ filters.group_by or 'level' }}
+            SINCE {{ time.start | epoch_ms }} UNTIL {{ time.end | epoch_ms }} TIMESERIES {{ time.step_s }} seconds
+            LIMIT {{ filters.top or 20 }}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, examples: ["checkout-service"]}
+      - {column: level, ops: ["=", "in"], fan_out: false, description: "Only these levels (case-insensitive)"}
+      - {column: query, description: "Extra NRQL WHERE condition"}
+      - {column: partition, ops: ["=", "in"], fan_out: false, description: "Log partition(s); default Log"}
+      - {column: group_by, description: "Attribute to FACET by (default level)", examples: ["level"]}
+      - {column: top, type: BIGINT, description: "Max facet values (NRQL LIMIT, default 20)"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d, retention: 30d, target_points: 120, reapply: false, control_lookback: 6h}
+    response:
+      rows_path: "$.data.actor.account.nrql.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: beginTimeSeconds, transform: epoch_s, description: "Bucket start"}
+      - {name: ts_end, type: TIMESTAMP, path: endTimeSeconds, transform: epoch_s}
+      - {name: facet, path: facet, transform: join, transform_arg: " | ", description: "Value of group_by (e.g. the level)"}
+      - {name: count, type: BIGINT, path: count}
+      - {name: value, type: DOUBLE, path: count}
+      - {name: service, filter_only: true}
+      - {name: level, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: partition, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "FACET level groups exact strings: 'ERROR' and 'error' are different facets; logs without a level attribute (log.level only) are not counted under any level facet."
+      - "Bucket size is auto-sized to ~120 points (NRQL caps TIMESERIES at 366 buckets). NRDB chooses the bucket boundaries, so the first/last bucket may not line up exactly with the requested ts range; the API window is authoritative (ts is not re-applied)."
+      - "Only the top N facets (top, default 20) are returned per query."
+    examples:
+      - sql: >-
+          SELECT ts, facet AS level, count FROM newrelic_log_counts
+          WHERE service = 'checkout-service' AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Log volume by level for a service - when did the error burst start and stop?
+      - sql: >-
+          SELECT facet AS pod, sum(count) AS errors FROM newrelic_log_counts
+          WHERE level = 'error' AND group_by = 'k8s.pod.name' AND ts > TIMESTAMP '2026-10-01 11:00:00'
+          GROUP BY 1 ORDER BY errors DESC LIMIT 10
+        description: Which pods emit the most error logs.
+    fixtures:
+      - file: nrql_log_counts.json
+        note: "Built from the documented FACET + TIMESERIES result shape (beginTimeSeconds/endTimeSeconds/facet/<facet attribute>/<aggregate alias>) shown verbatim in github.com/newrelic/nr1-workshop lab4; values illustrative."
+        filters: {service: "checkout-service"}
+        expect_rows: 4
+        expect_columns: {ts: "2025-10-01T12:30:00Z", facet: ERROR, count: 3, value: 3.0}
+    docs_url: https://docs.newrelic.com/docs/nrql/nrql-syntax-clauses-functions/
+
+  # ------------------------------------------------------------------------------------------
+  # Traces
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_spans
+    title: Span search (NRQL on Span)
+    description: >-
+      Individual spans from distributed tracing (SELECT * FROM Span), newest first, up to 5,000 per query.
+      Filter service (entity.name / service.name / appName), trace_id, name (= or LIKE), is_error,
+      duration_ms (>, >=, <, <=, BETWEEN; pushed down as duration.ms / duration) and query (extra NRQL
+      WHERE). Columns normalise APM and OpenTelemetry attribute names (trace.id/traceId, id/guid,
+      parent.id/parentId, duration.ms/duration seconds). Other attributes appear as columns
+      (http.url -> http_url) and in attributes (JSON).
+    kind: spans
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      timeout_s: 90
+      body:
+        query: *nrql_doc
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+          timeout: 60
+          nrql: >-
+            {%- set op = filters.duration_ms__op or '=' -%}
+            {%- set w = [
+              ('(' ~ filters.query ~ ')') if filters.query else none,
+              ('(entity.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ') OR service.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ') OR appName IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ '))') if filters.service else none,
+              ('(trace.id IN (' ~ (filters.trace_id | as_list | map('squote') | join(', ')) ~ ') OR traceId IN (' ~ (filters.trace_id | as_list | map('squote') | join(', ')) ~ '))') if filters.trace_id else none,
+              (('name LIKE ' if filters.name__op == 'like' else 'name = ') ~ (filters.name | squote)) if filters.name else none,
+              '(error IS TRUE OR otel.status_code = \'ERROR\')' if (filters.is_error is sameas true) else none,
+              '(error IS NULL OR error IS FALSE)' if (filters.is_error is sameas false) else none,
+              ('((duration.ms >= ' ~ filters.duration_ms[0] ~ ' AND duration.ms <= ' ~ filters.duration_ms[1] ~ ') OR (duration >= ' ~ (filters.duration_ms[0] / 1000) ~ ' AND duration <= ' ~ (filters.duration_ms[1] / 1000) ~ '))') if (filters.duration_ms is not string and filters.duration_ms is iterable and op == 'between') else none,
+              ('(duration.ms ' ~ op ~ ' ' ~ filters.duration_ms ~ ' OR duration ' ~ op ~ ' ' ~ (filters.duration_ms / 1000) ~ ')') if (filters.duration_ms is number) else none
+            ] | select | join(' AND ') -%}
+            SELECT * FROM Span{% if w %} WHERE {{ w }}{% endif %}
+            SINCE {{ time.start | epoch_ms }} UNTIL {{ time.end | epoch_ms }}
+            LIMIT {{ limit if (limit and limit < 5000) else 'MAX' }}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, examples: ["checkout-service"]}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, examples: ["4bf92f3577b34da6a3ce929d0e0e4736"]}
+      - {column: name, ops: ["=", "like"], description: "Span name (LIKE is case-insensitive in NR: use ILIKE in SQL)"}
+      - {column: is_error, type: BOOLEAN, description: "true = error spans (error IS TRUE or otel.status_code = 'ERROR')"}
+      - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<=", "between"], description: "Span duration threshold in milliseconds", examples: ["1000"]}
+      - {column: query, description: "Extra NRQL WHERE condition, e.g. span.kind = 'client'"}
+    time: {column: ts, default_lookback: 15m, max_window: 1d, retention: 8d, control_lookback: 6h}
+    response:
+      rows_path: "$.data.actor.account.nrql.results[*]"
+      dynamic: "."
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms, description: "Span start"}
+      - {name: trace_id, expr: "_['trace.id'] or _.traceId or none"}
+      - {name: span_id, expr: "_.id or _.guid or none"}
+      - {name: parent_id, expr: "_['parent.id'] or _.parentId or none"}
+      - {name: name, path: name}
+      - name: service
+        expr: >-
+          filters.service if (filters.service is string and filters.service in [_['entity.name'], _['service.name'], _.appName])
+          else (_['service.name'] or _['entity.name'] or _.appName or none)
+      - name: duration_ms
+        type: DOUBLE
+        description: "duration.ms, else duration (seconds) x 1000"
+        expr: "_['duration.ms'] if _['duration.ms'] is number else ((_.duration * 1000) if _.duration is number else none)"
+      - {name: is_error, type: BOOLEAN, expr: "(_.error in [true, 'true']) or (_['otel.status_code'] == 'ERROR')"}
+      - {name: status_code, type: BIGINT, expr: "_['http.statusCode'] or _['http.response.status_code'] or _['response.statusCode'] or _.httpResponseCode or none"}
+      - {name: error_message, expr: "_['error.message'] or _['otel.status_description'] or none"}
+      - {name: span_kind, path: "['span.kind']"}
+      - {name: category, path: category, description: "generic | datastore | http"}
+      - {name: host, expr: "_.host or _.hostname or none"}
+      - {name: entity_guid, path: "['entity.guid']"}
+      - {name: attributes, type: JSON, path: "."}
+      - {name: query, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Newest first."
+    pitfalls:
+      - "Spans are sampled (adaptive/tail sampling): absence of a span is not proof a request did not happen; use newrelic_nrql on Transaction/Metric for rates."
+      - "Only 5,000 spans per query. Push service, is_error and duration_ms down instead of filtering a huge pull in SQL."
+      - "APM spans carry duration in seconds (duration) and often duration.ms; OTel spans may only have duration.ms. duration_ms normalises both."
+      - "Span retention defaults to 8 days."
+    examples:
+      - sql: >-
+          SELECT name, count(*) AS n, avg(duration_ms) AS avg_ms, max(duration_ms) AS max_ms
+          FROM newrelic_spans
+          WHERE service = 'checkout-service' AND duration_ms >= 1000
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:45:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY name ORDER BY n DESC LIMIT 20
+        description: Which operations are slow (>= 1s) in one service.
+      - sql: >-
+          SELECT ts, service, name, status_code, error_message, trace_id FROM newrelic_spans
+          WHERE is_error = true AND span_kind = 'client' AND ts > TIMESTAMP '2026-10-01 11:50:00'
+          ORDER BY ts DESC LIMIT 100
+        description: Failing outbound calls - which dependency is erroring.
+    fixtures:
+      - file: nrql_spans.json
+        note: "Built from the documented raw-event result shape (newrelic-client-go pkg/nrdb fixtures) and Span attributes from the New Relic data dictionary (docs.newrelic.com/attribute-dictionary/?event=Span): trace.id/traceId, id/guid, parentId, duration (s), duration.ms, error, span.kind, http.statusCode."
+        filters: {service: "checkout-service"}
+        expect_rows: 2
+        expect_columns: {ts: "2025-10-01T12:40:00Z", trace_id: "4bf92f3577b34da6a3ce929d0e0e4736", span_id: "a2fb4a1d1a96d312", parent_id: "00f067aa0ba902b7", service: checkout-service, duration_ms: 1801.2, is_error: true, status_code: 504, span_kind: client}
+    docs_url: https://docs.newrelic.com/attribute-dictionary/?event=Span
+
+  - name: newrelic_trace
+    title: One distributed trace (NerdGraph distributedTracing.trace)
+    description: >-
+      All spans of one trace by trace_id from NerdGraph actor.distributedTracing.trace, with New Relic's
+      computed span metadata: process_boundary (ENTRY/EXIT/IN_PROCESS), client_type (DATASTORE/EXTERNAL)
+      and span anomalies (spans slower than their recent average). Use it to walk the critical path of
+      a trace found in newrelic_spans or newrelic_logs.
+    kind: traces
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      body:
+        query: >-
+          { actor { distributedTracing { trace(traceId: {{ filters.trace_id | json }}) { id timestamp durationMs
+          entityCount spans { id name parentId traceId timestamp durationMs entityGuid clientType processBoundary
+          attributes spanAnomalies { anomalousValue anomalyType averageMeasure } } } } } }
+    filters:
+      - {column: trace_id, required: true, ops: ["=", "in"], max_fan_out: 5, examples: ["4bf92f3577b34da6a3ce929d0e0e4736"]}
+    response:
+      rows_path: "$.data.actor.distributedTracing.trace.spans[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: trace_id, path: traceId}
+      - {name: span_id, path: id}
+      - {name: parent_id, path: parentId}
+      - {name: is_root, type: BOOLEAN, expr: "not _.parentId"}
+      - {name: name, path: name}
+      - {name: service, expr: "_.attributes['service.name'] or _.attributes['entity.name'] or _.attributes.appName or none"}
+      - {name: duration_ms, type: DOUBLE, path: durationMs}
+      - {name: process_boundary, path: processBoundary}
+      - {name: client_type, path: clientType}
+      - {name: is_error, type: BOOLEAN, expr: "(_.attributes.error in [true, 'true']) or (_.attributes['otel.status_code'] == 'ERROR')"}
+      - {name: status_code, type: BIGINT, expr: "_.attributes['http.statusCode'] or _.attributes['http.response.status_code'] or _.attributes.httpResponseCode or none"}
+      - {name: entity_guid, path: entityGuid}
+      - {name: attributes, type: JSON, path: attributes}
+      - {name: anomalies, type: JSON, path: spanAnomalies}
+      - {name: trace_duration_ms, type: DOUBLE, path: "$.data.actor.distributedTracing.trace.durationMs"}
+      - {name: entity_count, type: BIGINT, path: "$.data.actor.distributedTracing.trace.entityCount"}
+    pitfalls:
+      - "Traces older than the Span retention (8 days by default) return null spans (0 rows)."
+      - "Spans from accounts the user key cannot read are missing from the trace."
+    examples:
+      - sql: >-
+          SELECT ts, service, name, duration_ms, process_boundary, is_error, anomalies
+          FROM newrelic_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736'
+          ORDER BY duration_ms DESC
+        description: Slowest spans of one trace (critical-path candidates) and New Relic's anomaly flags.
+    fixtures:
+      - file: distributed_trace.json
+        note: "Built strictly from the documented selection set of the NerdGraph distributed tracing tutorial (docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-distributed-trace-data-tutorial/: trace id/timestamp/durationMs/entityCount, spans id/name/parentId/traceId/timestamp/durationMs/entityGuid/clientType/processBoundary/attributes/spanAnomalies); the page publishes no response example."
+        filters: {trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"}
+        expect_rows: 2
+        expect_columns: {span_id: "00f067aa0ba902b7", is_root: true, service: checkout-service, duration_ms: 1840.5, is_error: true, status_code: 500, process_boundary: ENTRY, trace_duration_ms: 1840.5}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-distributed-trace-data-tutorial/
+
+  # ------------------------------------------------------------------------------------------
+  # APM convenience tables (NRQL)
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_errors
+    title: APM error groups (NRQL on TransactionError)
+    description: >-
+      Errors grouped like an error inbox: one row per (service, error class, transaction) with occurrences,
+      latest message, first/last seen, a sample trace id and the number of hosts, from
+      SELECT ... FROM TransactionError FACET appName, error.class, transactionName. Expected errors
+      (error.expected) are excluded unless include_expected = true. ts = last_seen.
+    kind: events
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      timeout_s: 90
+      body:
+        query: *nrql_doc
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+          timeout: 60
+          nrql: >-
+            {%- set w = [
+              none if (filters.include_expected is sameas true) else '(error.expected IS NULL OR error.expected IS FALSE)',
+              ('(' ~ filters.query ~ ')') if filters.query else none,
+              ('appName IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ')') if filters.service else none,
+              (('error.class LIKE ' if filters.error_class__op == 'like' else 'error.class = ') ~ (filters.error_class | squote)) if filters.error_class else none
+            ] | select | join(' AND ') -%}
+            SELECT count(*) AS 'occurrences', latest(error.message) AS 'message', min(timestamp) AS 'first_seen',
+            max(timestamp) AS 'last_seen', latest(trace.id) AS 'sample_trace_id', uniqueCount(host) AS 'hosts'
+            FROM TransactionError{% if w %} WHERE {{ w }}{% endif %}
+            FACET appName, error.class, transactionName
+            SINCE {{ time.start | epoch_ms }} UNTIL {{ time.end | epoch_ms }} LIMIT {{ filters.top or 200 }}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "appName", examples: ["checkout-service"]}
+      - {column: error_class, ops: ["=", "like"], description: "error.class (exact or LIKE)"}
+      - {column: query, description: "Extra NRQL WHERE condition on TransactionError"}
+      - {column: include_expected, type: BOOLEAN, description: "Also count errors marked expected"}
+      - {column: top, type: BIGINT, description: "Max groups (NRQL LIMIT, default 200)"}
+    time: {column: ts, default_lookback: 1h, max_window: 8d, retention: 8d, reapply: false}
+    response:
+      rows_path: "$.data.actor.account.nrql.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: last_seen, transform: epoch_ms, description: "= last_seen"}
+      - {name: service, path: appName}
+      - {name: error_class, path: "['error.class']"}
+      - {name: transaction, path: transactionName}
+      - {name: title, expr: "(_['error.class'] or '') ~ ': ' ~ (_.message or '')"}
+      - {name: message, path: message}
+      - {name: occurrences, type: BIGINT, path: occurrences}
+      - {name: first_seen, type: TIMESTAMP, path: first_seen, transform: epoch_ms}
+      - {name: last_seen, type: TIMESTAMP, path: last_seen, transform: epoch_ms}
+      - {name: sample_trace_id, path: sample_trace_id}
+      - {name: hosts, type: BIGINT, path: hosts}
+      - {name: query, filter_only: true}
+      - {name: include_expected, type: BOOLEAN, filter_only: true}
+      - {name: top, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "TransactionError covers APM agents only; OpenTelemetry errors are spans with otel.status_code = 'ERROR' (use newrelic_spans is_error = true)."
+      - "first_seen is the first occurrence INSIDE the window, not the first ever: widen the window (or compare with a baseline window) before calling an error new."
+      - "Groups are ranked by occurrences and capped by top (default 200)."
+    examples:
+      - sql: >-
+          SELECT service, error_class, transaction, occurrences, first_seen, message, sample_trace_id
+          FROM newrelic_errors
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:30:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY occurrences DESC LIMIT 20
+        description: Top error groups across services during the incident.
+      - sql: >-
+          WITH now_w AS (SELECT error_class, sum(occurrences) AS n FROM newrelic_errors
+                         WHERE service = 'checkout-service' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00' GROUP BY 1),
+               base AS (SELECT error_class, sum(occurrences) AS n FROM newrelic_errors
+                         WHERE service = 'checkout-service' AND ts BETWEEN TIMESTAMP '2026-09-30 11:00:00' AND TIMESTAMP '2026-09-30 12:00:00' GROUP BY 1)
+          SELECT now_w.error_class, now_w.n AS now_n, coalesce(base.n, 0) AS base_n
+          FROM now_w LEFT JOIN base USING (error_class) ORDER BY now_n - coalesce(base.n, 0) DESC
+        description: Which error classes are new or growing vs the same hour yesterday.
+    fixtures:
+      - file: nrql_errors_facet.json
+        note: "Built from the documented FACET result shape (one object per facet with the faceted attribute keys plus one key per aggregate alias; github.com/newrelic/nr1-workshop lab4 and newrelic-client-go pkg/nrdb fixtures) and TransactionError attributes from the data dictionary; values illustrative."
+        filters: {service: "checkout-service"}
+        expect_rows: 2
+        expect_columns: {service: checkout-service, error_class: java.net.SocketTimeoutException, occurrences: 412, ts: "2025-10-01T12:59:50Z", first_seen: "2025-10-01T12:30:15Z", title: "java.net.SocketTimeoutException: Read timed out"}
+    docs_url: https://docs.newrelic.com/attribute-dictionary/?event=TransactionError
+
+  - name: newrelic_apm_golden_signals
+    title: APM golden signals per service over time (NRQL on Transaction)
+    description: >-
+      Throughput (rpm), average and p95 latency (ms), error rate (%) and error count per service per time
+      bucket from Transaction events: SELECT rate(count(*), 1 minute), average(duration),
+      percentile(duration, 95), percentage(count(*), WHERE error IS TRUE), filter(count(*), WHERE error
+      IS TRUE) ... FACET appName TIMESERIES <auto step>. Required: service (one or many). Optional query
+      (extra NRQL WHERE, e.g. transactionType = 'Web' or name = 'WebTransaction/...').
+    kind: timeseries
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      timeout_s: 90
+      body:
+        query: *nrql_doc
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+          timeout: 60
+          nrql: >-
+            SELECT rate(count(*), 1 minute) AS 'throughput_rpm', average(duration) AS 'latency_avg_s',
+            percentile(duration, 95) AS 'latency_p95_s', percentage(count(*), WHERE error IS TRUE) AS 'error_rate_pct',
+            filter(count(*), WHERE error IS TRUE) AS 'errors'
+            FROM Transaction WHERE appName IN ({{ filters.service | as_list | map('squote') | join(', ') }})
+            {%- if filters.query %} AND ({{ filters.query }}){% endif %}
+            FACET appName SINCE {{ time.start | epoch_ms }} UNTIL {{ time.end | epoch_ms }}
+            TIMESERIES {{ time.step_s }} seconds LIMIT {{ (filters.service | as_list | length) + 1 }}
+    filters:
+      - {column: service, required: true, ops: ["=", "in"], fan_out: false, description: "appName(s)", examples: ["checkout-service"]}
+      - {column: query, description: "Extra NRQL WHERE condition on Transaction"}
+    time: {column: ts, default_lookback: 1h, max_window: 8d, retention: 8d, target_points: 120, reapply: false}
+    response:
+      rows_path: "$.data.actor.account.nrql.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: beginTimeSeconds, transform: epoch_s}
+      - {name: ts_end, type: TIMESTAMP, path: endTimeSeconds, transform: epoch_s}
+      - {name: service, path: appName}
+      - {name: throughput_rpm, type: DOUBLE, path: throughput_rpm}
+      - {name: latency_avg_ms, type: DOUBLE, expr: "(_.latency_avg_s * 1000) if _.latency_avg_s is number else none"}
+      - name: latency_p95_ms
+        type: DOUBLE
+        description: "p95 latency in ms (unwraps a {\"95\": seconds} map if NRDB returns one)"
+        expr: >-
+          (_.latency_p95_s * 1000) if _.latency_p95_s is number else
+          (((_.latency_p95_s | dictsort | map(attribute='1') | select('number') | first) * 1000)
+          if (_.latency_p95_s is mapping and (_.latency_p95_s | dictsort | map(attribute='1') | select('number') | list)) else none)
+      - {name: error_rate_pct, type: DOUBLE, path: error_rate_pct}
+      - {name: errors, type: BIGINT, path: errors}
+      - {name: value, type: DOUBLE, path: error_rate_pct, description: "= error_rate_pct (for generic timeseries digests)"}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Transaction events exist only for APM agents. OpenTelemetry services have none: use newrelic_nrql on Span or Metric (e.g. FROM Metric SELECT ... WHERE service.name = ...)."
+      - "error_rate_pct counts transactions with error IS TRUE, which includes expected errors only if the agent did not mark them expected."
+      - "Bucket size is auto (~120 buckets); throughput_rpm is per minute regardless of bucket size."
+    examples:
+      - sql: >-
+          SELECT ts, service, throughput_rpm, latency_p95_ms, error_rate_pct
+          FROM newrelic_apm_golden_signals
+          WHERE service IN ('checkout-service', 'payments-api')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY service, ts
+        description: Golden signals of two services side by side through the incident.
+      - sql: >-
+          SELECT min(ts) AS degraded_since FROM newrelic_apm_golden_signals
+          WHERE service = 'checkout-service' AND error_rate_pct > 5 AND ts > TIMESTAMP '2026-10-01 10:00:00'
+        description: When did the error rate first exceed 5%?
+    fixtures:
+      - file: nrql_golden_signals.json
+        note: "Built from the documented FACET + TIMESERIES result shape (github.com/newrelic/nr1-workshop lab4) with the aggregate AS aliases as keys; second row shows the percentile map form, which latency_p95_ms unwraps. Values illustrative."
+        filters: {service: "checkout-service"}
+        expect_rows: 2
+        expect_columns: {ts: "2025-10-01T12:30:00Z", service: checkout-service, throughput_rpm: 1790.0, latency_avg_ms: 231.0, latency_p95_ms: 612.0, error_rate_pct: 0.4, errors: 7}
+    docs_url: https://docs.newrelic.com/attribute-dictionary/?event=Transaction
+
+  # ------------------------------------------------------------------------------------------
+  # Alerts: NrAiIncident events (alert history via NRQL)
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_alert_events
+    title: Alert incident open/close events (NRQL on NrAiIncident)
+    description: >-
+      Alert history from the NrAiIncident event type: one row per incident open or close event with
+      condition and policy names, the targeted entity, priority, threshold/operator, the condition's NRQL,
+      degradation/recovery times and close cause. Filter service (entity.name or targetName), event
+      ('open'/'close'), priority (lowercase), condition_name and policy_name (= or LIKE), incident_id,
+      condition_id, query (extra NRQL WHERE).
+    kind: alerts
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      timeout_s: 90
+      body:
+        query: *nrql_doc
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+          timeout: 60
+          nrql: >-
+            {%- set w = [
+              ('(' ~ filters.query ~ ')') if filters.query else none,
+              ('(entity.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ') OR targetName IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ '))') if filters.service else none,
+              ('event = ' ~ (filters.event | squote)) if filters.event else none,
+              ('priority IN (' ~ (filters.priority | as_list | map('squote') | join(', ')) ~ ')') if filters.priority else none,
+              (('conditionName LIKE ' if filters.condition_name__op == 'like' else 'conditionName = ') ~ (filters.condition_name | squote)) if filters.condition_name else none,
+              (('policyName LIKE ' if filters.policy_name__op == 'like' else 'policyName = ') ~ (filters.policy_name | squote)) if filters.policy_name else none,
+              ('incidentId IN (' ~ (filters.incident_id | as_list | join(', ')) ~ ')') if filters.incident_id else none,
+              ('conditionId IN (' ~ (filters.condition_id | as_list | join(', ')) ~ ')') if filters.condition_id else none
+            ] | select | join(' AND ') -%}
+            SELECT * FROM NrAiIncident{% if w %} WHERE {{ w }}{% endif %}
+            SINCE {{ time.start | epoch_ms }} UNTIL {{ time.end | epoch_ms }} LIMIT MAX
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "entity.name or targetName", examples: ["checkout-service"]}
+      - {column: event, description: "open | close"}
+      - {column: priority, ops: ["=", "in"], fan_out: false, description: "low | medium | high | critical (lowercase)"}
+      - {column: condition_name, ops: ["=", "like"]}
+      - {column: policy_name, ops: ["=", "like"]}
+      - {column: incident_id, type: BIGINT, ops: ["=", "in"], fan_out: false}
+      - {column: condition_id, type: BIGINT, ops: ["=", "in"], fan_out: false}
+      - {column: query, description: "Extra NRQL WHERE condition on NrAiIncident"}
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    response:
+      rows_path: "$.data.actor.account.nrql.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms, description: "Time of this open/close event"}
+      - {name: event, path: event, description: "open | close"}
+      - {name: state, expr: "'firing' if _.event == 'open' else ('resolved' if _.event == 'close' else _.event)"}
+      - {name: incident_id, type: BIGINT, path: incidentId}
+      - {name: title, path: title}
+      - {name: priority, path: priority}
+      - {name: severity, path: priority}
+      - {name: condition_id, type: BIGINT, path: conditionId}
+      - {name: condition_name, path: conditionName}
+      - {name: policy_id, type: BIGINT, path: policyId}
+      - {name: policy_name, path: policyName}
+      - name: service
+        expr: >-
+          filters.service if (filters.service is string and filters.service in [_['entity.name'], _.targetName])
+          else (_['entity.name'] or _.targetName or none)
+      - {name: entity_guid, path: "['entity.guid']"}
+      - {name: entity_type, path: "['entity.type']"}
+      - {name: target_name, path: targetName}
+      - {name: open_time, type: TIMESTAMP, path: openTime, transform: epoch_ms}
+      - {name: close_time, type: TIMESTAMP, path: closeTime, transform: epoch_ms}
+      - {name: degradation_time, type: TIMESTAMP, path: degradationTime, transform: epoch_ms, description: "When the signal started breaching (before open_time)"}
+      - {name: recovery_time, type: TIMESTAMP, path: recoveryTime, transform: epoch_ms}
+      - {name: close_cause, path: closeCause}
+      - {name: evaluation_type, path: evaluationType, description: "threshold | expiration (signal loss) | ..."}
+      - {name: operator, path: operator}
+      - {name: threshold, type: DOUBLE, path: threshold}
+      - {name: nrql_query, path: nrqlQuery}
+      - {name: runbook_url, path: runbookUrl}
+      - {name: muted, type: BOOLEAN, path: muted, description: "true when a muting rule suppressed notifications for this incident"}
+      - {name: muting_rule_id, type: BIGINT, path: mutingRuleId, description: "Muting rule that matched (join newrelic_muting_rules.id)"}
+      - {name: attributes, type: JSON, path: "."}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Each incident has an 'open' row and, once closed, a separate 'close' row: count incidents with count(DISTINCT incident_id), not count(*)."
+      - "priority values are lowercase here (critical) but uppercase in newrelic_issues (CRITICAL)."
+      - "degradation_time is when the signal started breaching; open_time adds the threshold duration. Use degradation_time to line up with deploys."
+      - "evaluation_type = 'expiration' means signal loss (no data), not a threshold breach."
+      - "muted = true means the incident opened but a muting rule suppressed notifications: 'nobody was paged' is then expected (see muting_rule_id / newrelic_muting_rules)."
+    examples:
+      - sql: >-
+          SELECT ts, event, condition_name, policy_name, service, priority, title, degradation_time
+          FROM newrelic_alert_events
+          WHERE service = 'checkout-service' AND ts > TIMESTAMP '2026-09-30 12:00:00'
+          ORDER BY ts
+        description: Alert history (open/close) for a service over the last day.
+      - sql: >-
+          SELECT condition_name, count(DISTINCT incident_id) AS incidents, min(open_time) AS first_open
+          FROM newrelic_alert_events
+          WHERE event = 'open' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY first_open
+        description: Which conditions fired first - the earliest symptom is often closest to the cause.
+    fixtures:
+      - file: nrql_alert_events.json
+        note: "Built from the documented raw-event result shape (newrelic-client-go pkg/nrdb fixtures) using NrAiIncident attributes from the New Relic data dictionary (docs.newrelic.com/attribute-dictionary/?event=NrAiIncident); values illustrative."
+        filters: {service: "checkout-service"}
+        expect_rows: 2
+        expect_columns: {ts: "2025-10-01T12:42:00Z", event: open, state: firing, incident_id: 4129812340, condition_name: High error rate, policy_name: Checkout golden signals, service: checkout-service, degradation_time: "2025-10-01T12:37:00Z", threshold: 5.0}
+    docs_url: https://docs.newrelic.com/attribute-dictionary/?event=NrAiIncident
+
+  # ------------------------------------------------------------------------------------------
+  # Entities
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_entities
+    title: Entity search (services, hosts, monitors...)
+    description: >-
+      NerdGraph actor.entitySearch: monitored entities (APM services, OTel services, hosts, browser apps,
+      monitors, dashboards...) with alert severity, reporting status, tags, a permalink and summary
+      metrics (APM: apdex, error rate, response time, throughput; hosts: CPU/memory/disk). Filter name
+      (= / IN / LIKE substring), domain (APM, EXT, INFRA, BROWSER, MOBILE, SYNTH, VIZ...), type
+      (APPLICATION, SERVICE, HOST, MONITOR, DASHBOARD...), alert_severity, reporting, guid, account_id
+      (default NEW_RELIC_ACCOUNT_ID) or a raw entity-search query (e.g. "tags.team = 'payments'").
+    kind: entities
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      body:
+        query: >-
+          query($query: String!, $cursor: String) { actor { entitySearch(query: $query) { count
+          results(cursor: $cursor) { nextCursor entities { guid name entityType domain type accountId reporting
+          permalink lastReportingChangeAt tags { key values } ... on AlertableEntityOutline { alertSeverity }
+          ... on ApmApplicationEntityOutline { applicationId language apmSummary { apdexScore errorRate hostCount
+          instanceCount responseTimeAverage throughput webResponseTimeAverage webThroughput } }
+          ... on InfrastructureHostEntityOutline { hostSummary { cpuUtilizationPercent diskUsedPercent
+          memoryUsedPercent networkReceiveRate networkTransmitRate servicesCount } } } } } } }
+        variables:
+          query: >-
+            {{ [
+              ('(' ~ filters.query ~ ')') if filters.query else none,
+              'accountId = ' ~ ((filters.account_id or env.NEW_RELIC_ACCOUNT_ID) | int),
+              (('name LIKE ' ~ (filters.name | replace('%', '') | squote)) if filters.name__op == 'like'
+                else ('name IN (' ~ (filters.name | as_list | map('squote') | join(', ')) ~ ')')) if filters.name else none,
+              ('domain IN (' ~ (filters.domain | as_list | map('upper') | map('squote') | join(', ')) ~ ')') if filters.domain else none,
+              ('type IN (' ~ (filters.type | as_list | map('upper') | map('squote') | join(', ')) ~ ')') if filters.type else none,
+              ('alertSeverity IN (' ~ (filters.alert_severity | as_list | map('upper') | map('squote') | join(', ')) ~ ')') if filters.alert_severity else none,
+              ('id IN (' ~ (filters.guid | as_list | map('squote') | join(', ')) ~ ')') if filters.guid else none,
+              'reporting is true' if (filters.reporting is sameas true) else none,
+              'reporting is false' if (filters.reporting is sameas false) else none
+            ] | select | join(' AND ') }}
+    filters:
+      - {column: name, ops: ["=", "in", "like"], fan_out: false, description: "Entity name; LIKE is a case-insensitive substring match in entity search", examples: ["checkout-service"]}
+      - {column: domain, ops: ["=", "in"], fan_out: false, description: "APM | EXT | INFRA | BROWSER | MOBILE | SYNTH | VIZ | NR1 (uppercase)", examples: ["APM"]}
+      - {column: type, ops: ["=", "in"], fan_out: false, description: "APPLICATION | SERVICE | HOST | MONITOR | DASHBOARD ... (uppercase)", examples: ["APPLICATION"]}
+      - {column: alert_severity, ops: ["=", "in"], fan_out: false, description: "CRITICAL | WARNING | NOT_ALERTING | NOT_CONFIGURED"}
+      - {column: reporting, type: BOOLEAN, description: "true = currently sending data"}
+      - {column: guid, ops: ["=", "in"], fan_out: false, description: "Entity GUID(s)"}
+      - {column: account_id, type: BIGINT, description: "Account to search (default NEW_RELIC_ACCOUNT_ID)"}
+      - {column: query, description: "Raw entity-search condition, e.g. tags.environment = 'production'"}
+    pagination: {type: cursor, cursor_path: "$.data.actor.entitySearch.results.nextCursor", cursor_param: body.variables.cursor, max_pages: 5}
+    response:
+      rows_path: "$.data.actor.entitySearch.results.entities[*]"
+    columns:
+      - {name: guid, path: guid}
+      - {name: name, path: name}
+      - {name: service, expr: "_.name if _.domain in ['APM', 'EXT'] else none", description: "= name for APM / EXT (OpenTelemetry) service entities, else null"}
+      - {name: host, expr: "_.name if (_.domain == 'INFRA' and _.type == 'HOST') else none", description: "= name for infrastructure hosts, else null"}
+      - {name: entity_type, path: entityType}
+      - {name: domain, path: domain}
+      - {name: type, path: type}
+      - {name: account_id, type: BIGINT, path: accountId}
+      - {name: alert_severity, path: alertSeverity, description: "CRITICAL | WARNING | NOT_ALERTING | NOT_CONFIGURED"}
+      - {name: reporting, type: BOOLEAN, path: reporting}
+      - {name: last_reporting_change_at, type: TIMESTAMP, path: lastReportingChangeAt, transform: epoch_ms}
+      - {name: url, path: permalink}
+      - {name: tags, type: JSON, path: tags, description: "List of {key, values}; e.g. list_contains(json_extract_string(tags, '$[*].key'), 'team')"}
+      - name: env
+        expr: >-
+          ((_.tags or []) | selectattr('key', 'in', ['environment', 'env', 'Environment', 'deployment.environment'])
+          | map(attribute='values') | map('first') | first) or none
+      - {name: language, path: language}
+      - {name: application_id, type: BIGINT, path: applicationId}
+      - {name: apm_apdex, type: DOUBLE, path: apmSummary.apdexScore}
+      - {name: apm_error_rate, type: DOUBLE, path: apmSummary.errorRate, description: "Share of transactions with an error, as reported by apmSummary"}
+      - {name: apm_response_time_ms, type: DOUBLE, path: apmSummary.responseTimeAverage, transform: s_to_ms, description: "Average response time (API returns seconds)"}
+      - {name: apm_throughput_rpm, type: DOUBLE, path: apmSummary.throughput}
+      - {name: apm_host_count, type: BIGINT, path: apmSummary.hostCount}
+      - {name: apm_instance_count, type: BIGINT, path: apmSummary.instanceCount}
+      - {name: host_cpu_pct, type: DOUBLE, path: hostSummary.cpuUtilizationPercent}
+      - {name: host_mem_pct, type: DOUBLE, path: hostSummary.memoryUsedPercent}
+      - {name: host_disk_pct, type: DOUBLE, path: hostSummary.diskUsedPercent}
+      - {name: query, filter_only: true}
+    max_rows: 1000
+    pitfalls:
+      - "entitySearch returns at most 200 entities per page (5 pages = 1,000 here); always narrow by domain/type/name."
+      - "Only entities indexed in the entity platform are returned; long-inactive apps disappear (reporting = false first)."
+      - "Entity names are not unique across accounts/environments: scope with account_id and check tags/env before using a guid."
+      - "Summary metrics (apm_*, host_*) are a recent snapshot, not values for your ts window: use NRQL for time-bounded numbers."
+      - "Custom root-level properties cannot be filtered; filter by tags with query = \"tags.team = 'x'\"."
+    examples:
+      - sql: >-
+          SELECT name, alert_severity, reporting, apm_error_rate, apm_response_time_ms, apm_throughput_rpm, url
+          FROM newrelic_entities WHERE domain = 'APM' AND type = 'APPLICATION'
+          ORDER BY apm_error_rate DESC NULLS LAST LIMIT 20
+        description: APM services ranked by current error rate, with their alert severity.
+      - sql: >-
+          SELECT name, guid, domain, type, env, tags FROM newrelic_entities WHERE name LIKE '%checkout%'
+        description: Resolve a service name to its entity GUID(s) and tags before querying by guid.
+      - sql: >-
+          SELECT name, host_cpu_pct, host_mem_pct, host_disk_pct FROM newrelic_entities
+          WHERE domain = 'INFRA' AND type = 'HOST' AND reporting = true ORDER BY host_cpu_pct DESC LIMIT 10
+        description: Hottest hosts right now.
+    tests:
+      - {sql: "SELECT guid, name FROM newrelic_entities WHERE domain = 'APM' LIMIT 5", min_rows: 0}
+    fixtures:
+      - file: entities_search.json
+        note: "Built strictly from the documented entitySearch selection set (docs.newrelic.com/docs/apis/rest-api-v2/migrate-to-nerdgraph/ and the entities tutorial) and field types from newrelic-client-go pkg/entities/types.go (EntityOutline, ApmApplicationSummaryData, InfrastructureHostSummaryData); the docs publish no entitySearch response body."
+        filters: {domain: "APM"}
+        expect_rows: 2
+        expect_columns: {guid: "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA", name: checkout-service, service: checkout-service, domain: APM, alert_severity: CRITICAL, reporting: true, env: production, apm_response_time_ms: 412.0, url: "https://one.newrelic.com/redirect/entity/MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA"}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-entities-api-tutorial/
+
+  - name: newrelic_entity_golden_metrics
+    title: Golden metrics and golden tags of an entity
+    description: >-
+      The golden metrics New Relic defines for an entity (name, title, unit and the ready-to-run NRQL,
+      already filtered to that entity) plus its golden tag keys, from actor.entity(guid).goldenMetrics /
+      goldenTags. Filter guid, or service (resolved to the first APM/EXT entity with that exact name in
+      NEW_RELIC_ACCOUNT_ID). Run a metric's query through newrelic_nrql (strip its SINCE if any).
+    kind: entities
+    steps:
+      - &resolve_entity
+        name: resolve_entity
+        when: "not filters.guid and filters.service"
+        method: POST
+        path: /graphql
+        body_format: graphql
+        body:
+          query: "query($q: String!) { actor { entitySearch(query: $q) { results { entities { guid name } } } } }"
+          variables:
+            q: "name = {{ filters.service | squote }} AND accountId = {{ env.NEW_RELIC_ACCOUNT_ID | int }} AND domain IN ('APM', 'EXT')"
+        capture: {guid: "$.data.actor.entitySearch.results.entities[0].guid"}
+      - name: golden_metrics
+        when: "filters.guid or captures.guid"
+        method: POST
+        path: /graphql
+        body_format: graphql
+        body:
+          query: >-
+            { actor { entity(guid: {{ (filters.guid or captures.guid) | json }}) { guid name entityType
+            goldenMetrics { metrics { name title query unit metricName } } goldenTags { tags { key } } } } }
+    filters:
+      - {column: guid, description: "Entity GUID", examples: ["MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA"]}
+      - {column: service, description: "Exact entity name (APM or OTel service); resolved to a GUID first"}
+    require_one_of: [[guid, service]]
+    response:
+      rows_path: "$.data.actor.entity.goldenMetrics.metrics[*]"
+    columns:
+      - {name: entity_guid, path: "$.data.actor.entity.guid"}
+      - {name: entity_name, path: "$.data.actor.entity.name"}
+      - {name: entity_type, path: "$.data.actor.entity.entityType"}
+      - {name: metric, path: name}
+      - {name: title, path: title}
+      - {name: query, path: query, description: "NRQL for this golden metric, already scoped to the entity"}
+      - {name: unit, path: unit}
+      - {name: metric_name, path: metricName}
+      - {name: golden_tags, type: JSON, path: "$.data.actor.entity.goldenTags.tags[*].key"}
+      - {name: guid, filter_only: true}
+      - {name: service, filter_only: true}
+    pitfalls:
+      - "A service name that matches no APM/EXT entity yields 0 rows (the GUID lookup failed): resolve it with newrelic_entities and pass guid."
+      - "Golden metric queries may already contain TIMESERIES and sometimes SINCE; remove SINCE/UNTIL before passing them to newrelic_nrql."
+    examples:
+      - sql: >-
+          SELECT metric, title, unit, query FROM newrelic_entity_golden_metrics WHERE service = 'checkout-service'
+        description: The standard health metrics (and their NRQL) for a service.
+    fixtures:
+      - file: entity_golden_metrics.json
+        note: "Built from the golden metrics tutorial (docs.newrelic.com/docs/apis/nerdgraph/examples/golden-metrics-entities-nerdgraph-api-tutorial/): its goldenMetrics { metrics { query title } } / goldenTags { tags { key } } queries and the DynamoDB golden-metric NRQL shown there, plus EntityGoldenMetric fields (name, unit, metricName) from newrelic-client-go; no response body is published."
+        filters: {guid: "MXxJTkZSQXxOQXwyNzQ4NzYxMTIzNDU2Nzg5"}
+        expect_rows: 1
+        expect_columns: {entity_name: orders-table, metric: getItemLatency, title: "GetItem latency (ms)", unit: MS, golden_tags: "[\"aws.awsRegion\",\"aws.accountId\"]"}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/golden-metrics-entities-nerdgraph-api-tutorial/
+
+  - name: newrelic_entity_relationships
+    title: Service map / entity relationships
+    description: >-
+      Upstream and downstream relationships of one entity from actor.entity(guid).relatedEntities:
+      CALLS (service dependencies), HOSTS, CONTAINS, SERVES, BUILT_FROM... direction = outbound when the
+      entity is the source (it calls/hosts the related entity), inbound otherwise. Filter guid or service
+      (resolved to the first APM/EXT entity with that exact name).
+    kind: entities
+    steps:
+      - *resolve_entity
+      - name: related
+        when: "filters.guid or captures.guid"
+        method: POST
+        path: /graphql
+        body_format: graphql
+        body:
+          query: >-
+            { actor { entity(guid: {{ (filters.guid or captures.guid) | json }}) { guid name relatedEntities {
+            nextCursor results { type createdAt source { guid accountId entity { guid name entityType } }
+            target { guid accountId entity { guid name entityType } } } } } } }
+    filters:
+      - {column: guid, description: "Entity GUID", examples: ["MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA"]}
+      - {column: service, description: "Exact entity name; resolved to a GUID first"}
+    require_one_of: [[guid, service]]
+    response:
+      rows_path: "$.data.actor.entity.relatedEntities.results[*]"
+    columns:
+      - {name: entity_guid, path: "$.data.actor.entity.guid"}
+      - {name: entity_name, path: "$.data.actor.entity.name"}
+      - {name: direction, expr: "'outbound' if _.source.guid == root.data.actor.entity.guid else 'inbound'"}
+      - {name: relationship, path: type, description: "CALLS | HOSTS | CONTAINS | SERVES | BUILT_FROM | ..."}
+      - {name: related_guid, expr: "_.target.guid if _.source.guid == root.data.actor.entity.guid else _.source.guid"}
+      - {name: related_name, expr: "(_.target.entity.name if _.source.guid == root.data.actor.entity.guid else _.source.entity.name) or none"}
+      - {name: related_type, expr: "(_.target.entity.entityType if _.source.guid == root.data.actor.entity.guid else _.source.entity.entityType) or none"}
+      - {name: source_guid, path: source.guid}
+      - {name: source_name, path: source.entity.name}
+      - {name: target_guid, path: target.guid}
+      - {name: target_name, path: target.entity.name}
+      - {name: created_at, type: TIMESTAMP, path: createdAt, transform: epoch_ms}
+      - {name: guid, filter_only: true}
+      - {name: service, filter_only: true}
+    pitfalls:
+      - "Only the first page of relationships is fetched (large hubs can have more); related entities in accounts the key cannot read have a null name."
+      - "CALLS relationships come from distributed tracing / agent data; a dependency that sent no traces recently may be missing."
+    examples:
+      - sql: >-
+          SELECT direction, relationship, related_name, related_type FROM newrelic_entity_relationships
+          WHERE service = 'checkout-service' AND relationship = 'CALLS' ORDER BY direction, related_name
+        description: Callers (inbound) and dependencies (outbound) of a service - candidates for blast radius and root cause.
+    fixtures:
+      - file: entity_related.json
+        note: "Built from the relatedEntities query in the entities tutorial (docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-entities-api-tutorial/#list-relationships: results { source { entity { guid name } } target { entity { guid name } } type }) and EntityRelationshipEdge/Vertex fields (createdAt, guid, accountId) from newrelic-client-go; no response body is published."
+        filters: {guid: "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA"}
+        expect_rows: 2
+        expect_columns: {direction: outbound, relationship: CALLS, related_name: payments-api, related_guid: "MXxBUE18QVBQTElDQVRJT058MzIxNzY1NA", entity_name: checkout-service}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-entities-api-tutorial/
+
+  # ------------------------------------------------------------------------------------------
+  # Alerts: issues / incidents (aiIssues)
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_issues
+    title: Alert issues (what notifies people)
+    description: >-
+      Issues from NerdGraph actor.account.aiIssues.issues: the unit New Relic notifies on (one issue groups
+      one or more incidents). State CREATED -> ACTIVATED -> (DEACTIVATED) -> CLOSED. Filter issue_id
+      (UUID from the notification), state, priority (LOW/MEDIUM/HIGH/CRITICAL), entity_guid, and ts (the
+      API timeWindow in epoch ms; default last 24h). Columns include titles, entity names, condition
+      name, created/activated/closed times and the deep link (url).
+    kind: alerts
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      headers: {nerd-graph-unsafe-experimental-opt-in: AiIssues}
+      body:
+        query: >-
+          query($accountId: Int!, $cursor: String) { actor { account(id: $accountId) { aiIssues {
+          issues(cursor: $cursor, timeWindow: { startTime: {{ time.start | epoch_ms }}, endTime: {{ time.end | epoch_ms }} }
+          {%- set parts = [
+            ('ids: ' ~ (filters.issue_id | as_list | json)) if filters.issue_id else none,
+            ('states: [' ~ (filters.state | as_list | map('upper') | select('in', ['CREATED', 'ACTIVATED', 'DEACTIVATED', 'CLOSED']) | join(', ')) ~ ']') if filters.state else none,
+            ('priority: ' ~ (filters.priority | as_list | map('upper') | list | json)) if filters.priority else none,
+            ('entityGuids: ' ~ (filters.entity_guid | as_list | json)) if filters.entity_guid else none,
+            ('entityTypes: ' ~ (filters.entity_type | as_list | json)) if filters.entity_type else none
+          ] | select | list -%}
+          {%- if parts %}, filter: { {{ parts | join(', ') }} }{% endif %}) { nextCursor issues { issueId title priority
+          state createdAt activatedAt closedAt updatedAt acknowledgedAt acknowledgedBy closedBy description
+          entityGuids entityNames entityTypes sources origins totalIncidents incidentIds isCorrelated isIdle
+          accountIds conditionName conditionFamilyId policyIds policyName mutingState deepLinkUrl } } } } } }
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+    filters:
+      - {column: issue_id, ops: ["=", "in"], fan_out: false, examples: ["1a3a0581-aefc-4027-91a0-a941072101c0"]}
+      - {column: state, ops: ["=", "in"], fan_out: false, description: "CREATED | ACTIVATED | DEACTIVATED | CLOSED (uppercase)", examples: ["ACTIVATED"]}
+      - {column: priority, ops: ["=", "in"], fan_out: false, description: "LOW | MEDIUM | HIGH | CRITICAL"}
+      - {column: entity_guid, ops: ["=", "in"], fan_out: false, description: "Issues touching this entity GUID"}
+      - {column: entity_type, ops: ["=", "in"], fan_out: false, description: "Entity type(s) of the issue's entities (API filter entityTypes), e.g. APPLICATION", examples: ["APPLICATION"]}
+    time: {column: ts, default_lookback: 24h}
+    pagination: {type: cursor, cursor_path: "$.data.actor.account.aiIssues.issues.nextCursor", cursor_param: body.variables.cursor, max_pages: 10}
+    response:
+      rows_path: "$.data.actor.account.aiIssues.issues.issues[*]"
+    columns:
+      - {name: issue_id, path: issueId}
+      - {name: title, path: title, transform: join, transform_arg: " | ", description: "Underlying incident titles"}
+      - {name: priority, path: priority}
+      - {name: severity, path: priority}
+      - {name: state, path: state}
+      - {name: created_at, type: TIMESTAMP, path: createdAt, transform: epoch_ms}
+      - {name: activated_at, type: TIMESTAMP, path: activatedAt, transform: epoch_ms, description: "createdAt + grace period; when notifications went out"}
+      - {name: closed_at, type: TIMESTAMP, path: closedAt, transform: epoch_ms}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: epoch_ms}
+      - {name: acknowledged_at, type: TIMESTAMP, path: acknowledgedAt, transform: epoch_ms}
+      - {name: acknowledged_by, path: acknowledgedBy}
+      - {name: closed_by, path: closedBy}
+      - {name: description, path: description, transform: join, transform_arg: " | "}
+      - {name: service, path: entityNames, transform: first, description: "First entity name"}
+      - {name: entity_names, path: entityNames, transform: join, transform_arg: ", "}
+      - {name: entity_guids, type: JSON, path: entityGuids}
+      - {name: entity_types, path: entityTypes, transform: join, transform_arg: ", "}
+      - {name: condition_name, path: conditionName, transform: join, transform_arg: " | "}
+      - {name: condition_family_id, path: conditionFamilyId, transform: join, transform_arg: ","}
+      - {name: total_incidents, type: BIGINT, path: totalIncidents}
+      - {name: incident_ids, type: JSON, path: incidentIds, description: "Underlying incident ids (join newrelic_incidents.incident_id via list_contains)"}
+      - {name: is_correlated, type: BOOLEAN, path: isCorrelated}
+      - {name: is_idle, type: BOOLEAN, path: isIdle}
+      - {name: policy_ids, path: policyIds, transform: join, transform_arg: ","}
+      - {name: policy_name, path: policyName, transform: join, transform_arg: " | "}
+      - {name: muting_state, path: mutingState, description: "NOT_MUTED | PARTIALLY_MUTED | FULLY_MUTED (muted issues notify nobody)"}
+      - {name: sources, type: JSON, path: sources}
+      - {name: origins, type: JSON, path: origins}
+      - {name: account_ids, type: JSON, path: accountIds}
+      - {name: url, path: deepLinkUrl}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Drives the API timeWindow; use created_at/activated_at for times"}
+      - {name: entity_guid, filter_only: true}
+      - {name: entity_type, filter_only: true}
+    pitfalls:
+      - "ts only sets the API timeWindow (epoch ms; default last 24h). An issue opened before the window may not be returned: widen ts (e.g. 7 days) when looking for still-open issues."
+      - "title/description are lists of the underlying incident titles, joined with ' | '."
+      - "aiIssues requires the header nerd-graph-unsafe-experimental-opt-in: AiIssues (sent automatically). Without it NerdGraph answers 200 with ACCESS_DENIED; with it, ACCESS_DENIED means the key's user lacks alert permissions on NEW_RELIC_ACCOUNT_ID."
+      - "At most 10 cursor pages are fetched; filter by state/priority/entity_guid when a window has more issues."
+      - "muting_state FULLY_MUTED explains an issue that opened without paging anyone."
+    examples:
+      - sql: >-
+          SELECT issue_id, priority, state, title, service, activated_at, url FROM newrelic_issues
+          WHERE state IN ('ACTIVATED', 'CREATED') AND ts > TIMESTAMP '2026-09-24 12:00:00'
+          ORDER BY activated_at DESC
+        description: Currently open issues (look back a week so long-running ones are included).
+      - sql: >-
+          SELECT issue_id, title, condition_name, entity_names, created_at, activated_at, closed_at, total_incidents
+          FROM newrelic_issues WHERE issue_id = '1a3a0581-aefc-4027-91a0-a941072101c0'
+        description: Details of the issue that triggered the investigation.
+      - sql: >-
+          SELECT issue_id, title, priority, state, muting_state, policy_name, condition_name, created_at
+          FROM newrelic_issues
+          WHERE entity_guid = 'MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA' AND ts > TIMESTAMP '2026-09-30 12:00:00'
+          ORDER BY created_at DESC
+        description: Issues on one entity in the last day, including muted ones (why was nobody paged?).
+    fixtures:
+      - file: ai_issues.json
+        note: "Verbatim from the NerdGraph issues tutorial (docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-issues-api-via-github/, 'Filter issues' by entityGuids result), with the truncated closing braces completed."
+        filters: {state: "CLOSED"}
+        expect_rows: 2
+        expect_columns: {issue_id: "1a3a0581-aefc-4027-91a0-a941072101c0", priority: CRITICAL, state: CLOSED, service: "hour-timeslice-writer (eu-production)", entity_types: Application}
+      - file: ai_issues_cursor.json
+        note: "Verbatim from the same tutorial's 'Cursor pagination' initial results (nextCursor '=ATN'), closing braces completed."
+        expect_rows: 3
+        expect_columns: {issue_id: "bda33b52-c70b-47b9-abe3-9e859a394037", state: ACTIVATED, title: "Signal lost for 5 minutes on 'Percent All Facet'"}
+      - file: ai_issues_optin_error.json
+        note: "Verbatim HTTP-200 error body from the same tutorial ('Running from the command line' callout: ACCESS_DENIED when the experimental opt-in header is missing, trailing shell '%' removed). Proves the source-level errors[] rule fires instead of returning 0 rows."
+        expect_error: "nerd-graph-unsafe-experimental-opt-in"
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-issues-api-via-github/
+
+  - name: newrelic_incidents
+    title: Alert incidents (violations)
+    description: >-
+      Incidents from actor.account.aiIssues.incidents - one per condition breach per entity/signal (the
+      former 'violations'); they roll up into issues (newrelic_issues.incident_ids lists them). State
+      CREATED or CLOSED. Filter incident_id, state, priority, entity_guid, entity_type and ts (API
+      timeWindow, epoch ms, default 24h). New Relic incidents also carry policy_ids and
+      condition_family_id (the NRQL condition id).
+    kind: incidents
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      headers: {nerd-graph-unsafe-experimental-opt-in: AiIssues}
+      body:
+        query: >-
+          query($accountId: Int!, $cursor: String) { actor { account(id: $accountId) { aiIssues {
+          incidents(cursor: $cursor, timeWindow: { startTime: {{ time.start | epoch_ms }}, endTime: {{ time.end | epoch_ms }} }
+          {%- set parts = [
+            ('ids: ' ~ (filters.incident_id | as_list | json)) if filters.incident_id else none,
+            ('states: [' ~ (filters.state | as_list | map('upper') | select('in', ['CREATED', 'CLOSED']) | join(', ')) ~ ']') if filters.state else none,
+            ('priority: ' ~ (filters.priority | as_list | map('upper') | list | json)) if filters.priority else none,
+            ('entityGuids: ' ~ (filters.entity_guid | as_list | json)) if filters.entity_guid else none,
+            ('entityTypes: ' ~ (filters.entity_type | as_list | json)) if filters.entity_type else none
+          ] | select | list -%}
+          {%- if parts %}, filter: { {{ parts | join(', ') }} }{% endif %}) { nextCursor incidents { incidentId
+          title description priority state createdAt closedAt updatedAt timestamp entityGuids entityNames
+          entityTypes ... on AiIssuesNewRelicIncident { policyIds conditionFamilyId accountIds } } } } } } }
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+    filters:
+      - {column: incident_id, ops: ["=", "in"], fan_out: false, examples: ["a86493e4-2d25-4023-a9e5-975bfaae19a8"]}
+      - {column: state, ops: ["=", "in"], fan_out: false, description: "CREATED | CLOSED"}
+      - {column: priority, ops: ["=", "in"], fan_out: false, description: "LOW | MEDIUM | HIGH | CRITICAL"}
+      - {column: entity_guid, ops: ["=", "in"], fan_out: false}
+      - {column: entity_type, ops: ["=", "in"], fan_out: false, description: "API filter entityTypes, e.g. APPLICATION"}
+    time: {column: ts, default_lookback: 24h}
+    pagination: {type: cursor, cursor_path: "$.data.actor.account.aiIssues.incidents.nextCursor", cursor_param: body.variables.cursor, max_pages: 10}
+    response:
+      rows_path: "$.data.actor.account.aiIssues.incidents.incidents[*]"
+    columns:
+      - {name: incident_id, path: incidentId}
+      - name: title
+        description: "Incident title (the API returns a JSON-array string; unwrapped here)"
+        expr: >-
+          none if (_.title is undefined or _.title is none) else
+          (((_.title[2:-2] | replace('","', ' | ') | replace('\\"', '"')) if (_.title.startswith('["') and _.title.endswith('"]')) else _.title)
+          if _.title is string else (_.title | join(' | ')))
+      - {name: title_raw, path: title}
+      - {name: description, path: description, transform: join, transform_arg: " | "}
+      - {name: priority, path: priority}
+      - {name: severity, path: priority}
+      - {name: state, path: state}
+      - {name: created_at, type: TIMESTAMP, path: createdAt, transform: epoch_ms}
+      - {name: closed_at, type: TIMESTAMP, path: closedAt, transform: epoch_ms}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: epoch_ms}
+      - {name: event_at, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: service, path: entityNames, transform: first}
+      - {name: entity_names, path: entityNames, transform: join, transform_arg: ", "}
+      - {name: entity_guids, path: entityGuids, transform: join, transform_arg: ","}
+      - {name: entity_types, path: entityTypes, transform: join, transform_arg: ", "}
+      - {name: policy_ids, path: policyIds, transform: join, transform_arg: ","}
+      - {name: condition_family_id, path: conditionFamilyId, transform: join, transform_arg: ",", description: "NRQL condition id (join to newrelic_nrql_conditions.id)"}
+      - {name: account_ids, path: accountIds, transform: join, transform_arg: ","}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Drives the API timeWindow"}
+      - {name: entity_guid, filter_only: true}
+      - {name: entity_type, filter_only: true}
+    pitfalls:
+      - "ts only sets the API timeWindow (default last 24h). Use created_at/closed_at for the incident's own times."
+      - "Anomaly and REST (external) incidents have no policy_ids/condition_family_id."
+      - "title comes back as a JSON-array string ('[\"...\"]'); title is unwrapped, title_raw keeps the original."
+      - "Incidents do not carry their issue id; go from an issue to its incidents with newrelic_issues.incident_ids (list_contains(json_extract_string(incident_ids, '$[*]'), incident_id))."
+    examples:
+      - sql: >-
+          SELECT created_at, closed_at, priority, state, title, description, condition_family_id, policy_ids
+          FROM newrelic_incidents
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY created_at
+        description: Every condition breach in the incident hour, in order.
+      - sql: >-
+          SELECT i.issue_id, i.title AS issue_title, n.incident_id, n.title AS incident_title, n.condition_family_id, n.created_at
+          FROM newrelic_issues i
+          JOIN newrelic_incidents n ON list_contains(json_extract_string(i.incident_ids, '$[*]'), n.incident_id)
+          WHERE i.issue_id = '1a3a0581-aefc-4027-91a0-a941072101c0'
+            AND i.ts > TIMESTAMP '2026-09-24 12:00:00' AND n.ts > TIMESTAMP '2026-09-24 12:00:00'
+        description: Break one issue down into the condition breaches (incidents) it groups.
+    fixtures:
+      - file: ai_incidents.json
+        note: "Verbatim (first 3 incidents) from the NerdGraph issues tutorial 'List incidents' result (docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-issues-api-via-github/), closing braces completed."
+        filters: {state: "CREATED"}
+        expect_rows: 3
+        expect_columns: {incident_id: "a86493e4-2d25-4023-a9e5-975bfaae19a8", title: "PageView query result is > 1.3 for 2 minutes on 'RB PV '", priority: HIGH, policy_ids: "195617", condition_family_id: "685305", updated_at: "2022-04-27T11:22:12Z"}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-issues-api-via-github/
+
+  - name: newrelic_issue_events
+    title: Issue lifecycle events
+    description: >-
+      Issue change events from actor.account.aiIssues.issuesEvents (INCIDENT_ADDED, STATE_CHANGE,
+      ATTRIBUTES_UPDATED, USER_ACTION, INCIDENT_CLOSED ...): who/what changed an issue and when. Filter
+      issue_id, entity_guid and ts (API timeWindow, epoch ms, default 24h).
+    kind: events
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      headers: {nerd-graph-unsafe-experimental-opt-in: AiIssues}
+      body:
+        query: >-
+          query($accountId: Int!, $cursor: String) { actor { account(id: $accountId) { aiIssues {
+          issuesEvents(cursor: $cursor, timeWindow: { startTime: {{ time.start | epoch_ms }}, endTime: {{ time.end | epoch_ms }} }
+          {%- set parts = [
+            ('ids: ' ~ (filters.issue_id | as_list | json)) if filters.issue_id else none,
+            ('entityGuids: ' ~ (filters.entity_guid | as_list | json)) if filters.entity_guid else none
+          ] | select | list -%}
+          {%- if parts %}, filter: { {{ parts | join(', ') }} }{% endif %}) { nextCursor issues { issueId eventType state
+          priority title entityGuids entityNames createdAt activatedAt closedAt updatedAt } } } } } }
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+    filters:
+      - {column: issue_id, ops: ["=", "in"], fan_out: false, examples: ["fe0d512f-36c7-4b7a-8a80-4c47c040807a"]}
+      - {column: entity_guid, ops: ["=", "in"], fan_out: false}
+    time: {column: ts, default_lookback: 24h}
+    pagination: {type: cursor, cursor_path: "$.data.actor.account.aiIssues.issuesEvents.nextCursor", cursor_param: body.variables.cursor, max_pages: 10}
+    response:
+      rows_path: "$.data.actor.account.aiIssues.issuesEvents.issues[*]"
+    columns:
+      - {name: issue_id, path: issueId}
+      - {name: event_type, path: eventType}
+      - {name: state, path: state}
+      - {name: priority, path: priority}
+      - {name: title, path: title, transform: join, transform_arg: " | "}
+      - {name: service, path: entityNames, transform: first}
+      - {name: entity_guids, type: JSON, path: entityGuids}
+      - {name: created_at, type: TIMESTAMP, path: createdAt, transform: epoch_ms}
+      - {name: activated_at, type: TIMESTAMP, path: activatedAt, transform: epoch_ms}
+      - {name: closed_at, type: TIMESTAMP, path: closedAt, transform: epoch_ms}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: epoch_ms, description: "Time of this change"}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+      - {name: entity_guid, filter_only: true}
+    pitfalls:
+      - "Each row is a snapshot of the issue after an event; consecutive ATTRIBUTES_UPDATED rows are common and not separate incidents."
+    examples:
+      - sql: >-
+          SELECT updated_at, event_type, state, priority, title FROM newrelic_issue_events
+          WHERE issue_id = 'fe0d512f-36c7-4b7a-8a80-4c47c040807a' ORDER BY updated_at
+        description: Timeline of one issue (created, activated, acknowledged, closed).
+    fixtures:
+      - file: ai_issues_events.json
+        note: "Verbatim (first 3 events) from the NerdGraph issues tutorial 'Filter issue events' result, closing braces completed."
+        filters: {issue_id: "fe0d512f-36c7-4b7a-8a80-4c47c040807a"}
+        expect_rows: 3
+        expect_columns: {issue_id: "fe0d512f-36c7-4b7a-8a80-4c47c040807a", event_type: ATTRIBUTES_UPDATED, state: ACTIVATED, priority: CRITICAL}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-issues-api-via-github/
+
+  - name: newrelic_incident_events
+    title: Incident lifecycle events
+    description: >-
+      Incident change events from actor.account.aiIssues.incidentsEvents (an incident CREATED, then
+      CLOSED). Filter incident_id, entity_guid and ts (API timeWindow, epoch ms, default 24h).
+    kind: events
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      headers: {nerd-graph-unsafe-experimental-opt-in: AiIssues}
+      body:
+        query: >-
+          query($accountId: Int!, $cursor: String) { actor { account(id: $accountId) { aiIssues {
+          incidentsEvents(cursor: $cursor, timeWindow: { startTime: {{ time.start | epoch_ms }}, endTime: {{ time.end | epoch_ms }} }
+          {%- set parts = [
+            ('ids: ' ~ (filters.incident_id | as_list | json)) if filters.incident_id else none,
+            ('entityGuids: ' ~ (filters.entity_guid | as_list | json)) if filters.entity_guid else none
+          ] | select | list -%}
+          {%- if parts %}, filter: { {{ parts | join(', ') }} }{% endif %}) { nextCursor incidents { incidentId priority
+          state title description createdAt updatedAt timestamp ... on AiIssuesNewRelicIncident { accountIds policyIds conditionFamilyId } } } } } } }
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+    filters:
+      - {column: incident_id, ops: ["=", "in"], fan_out: false, examples: ["693b7dcb-5a6b-4923-acaa-9d4e7e568ae5"]}
+      - {column: entity_guid, ops: ["=", "in"], fan_out: false}
+    time: {column: ts, default_lookback: 24h}
+    pagination: {type: cursor, cursor_path: "$.data.actor.account.aiIssues.incidentsEvents.nextCursor", cursor_param: body.variables.cursor, max_pages: 10}
+    response:
+      rows_path: "$.data.actor.account.aiIssues.incidentsEvents.incidents[*]"
+    columns:
+      - {name: incident_id, path: incidentId}
+      - {name: state, path: state}
+      - {name: priority, path: priority}
+      - name: title
+        expr: >-
+          none if (_.title is undefined or _.title is none) else
+          (((_.title[2:-2] | replace('","', ' | ') | replace('\\"', '"')) if (_.title.startswith('["') and _.title.endswith('"]')) else _.title)
+          if _.title is string else (_.title | join(' | ')))
+      - {name: description, path: description, transform: join, transform_arg: " | "}
+      - {name: created_at, type: TIMESTAMP, path: createdAt, transform: epoch_ms}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: epoch_ms}
+      - {name: event_at, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: policy_ids, path: policyIds, transform: join, transform_arg: ","}
+      - {name: condition_family_id, path: conditionFamilyId, transform: join, transform_arg: ","}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+      - {name: entity_guid, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT updated_at, incident_id, state, priority, title FROM newrelic_incident_events
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00' AND state = 'CLOSED'
+          ORDER BY updated_at
+        description: Which incidents closed during the hour (recoveries).
+    fixtures:
+      - file: ai_incidents_events.json
+        note: "Verbatim (first 3 events) from the NerdGraph issues tutorial 'List incident events' result, closing braces completed."
+        expect_rows: 3
+        expect_columns: {incident_id: "693b7dcb-5a6b-4923-acaa-9d4e7e568ae5", state: CLOSED, title: "Provider . Burst Balance . Average < 1 at least once in 2 minutes on 'vol-03e3199dd4b4ffac4'"}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-issues-api-via-github/
+
+  # ------------------------------------------------------------------------------------------
+  # Alert configuration
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_alert_policies
+    title: Alert policies
+    description: >-
+      Alert policies from actor.account.alerts.policiesSearch: id, name and incident preference
+      (PER_POLICY / PER_CONDITION / PER_CONDITION_AND_TARGET - how incidents roll up into issues). Filter
+      id (= / IN) or name (= exact, LIKE -> case-insensitive substring).
+    kind: entities
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      body:
+        query: >-
+          query($accountId: Int!, $cursor: String, $criteria: AlertsPoliciesSearchCriteriaInput) { actor {
+          account(id: $accountId) { alerts { policiesSearch(cursor: $cursor, searchCriteria: $criteria) {
+          nextCursor totalCount policies { id name incidentPreference accountId entityGuid } } } } } }
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+          criteria:
+            ids: "{{ (filters.id | as_list | map('string') | list) if filters.id else none }}"
+            name: "{{ filters.name if (filters.name and filters.name__op != 'like') else none }}"
+            nameLike: "{{ (filters.name | replace('%', '')) if (filters.name and filters.name__op == 'like') else none }}"
+    filters:
+      - {column: id, type: BIGINT, ops: ["=", "in"], fan_out: false, examples: ["707052"]}
+      - {column: name, ops: ["=", "like"], description: "Exact (case-insensitive) name, or LIKE for a substring match"}
+    pagination: {type: cursor, cursor_path: "$.data.actor.account.alerts.policiesSearch.nextCursor", cursor_param: body.variables.cursor, max_pages: 10}
+    response:
+      rows_path: "$.data.actor.account.alerts.policiesSearch.policies[*]"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: name, path: name}
+      - {name: incident_preference, path: incidentPreference}
+      - {name: account_id, type: BIGINT, path: accountId}
+      - {name: entity_guid, path: entityGuid}
+      - {name: total_count, type: BIGINT, path: "$.data.actor.account.alerts.policiesSearch.totalCount"}
+    examples:
+      - sql: "SELECT id, name, incident_preference FROM newrelic_alert_policies WHERE name LIKE '%checkout%'"
+        description: Find the policies that cover a service.
+    fixtures:
+      - file: alerts_policies_search.json
+        note: "Verbatim from the alert policies NerdGraph tutorial (docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-api-alerts-policies/, cursor pagination result) with the '// ... more policies' comment line removed to make it valid JSON."
+        expect_rows: 2
+        expect_columns: {id: 3455, name: First Policy Name, incident_preference: PER_POLICY, total_count: 745}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-api-alerts-policies/
+
+  - name: newrelic_nrql_conditions
+    title: NRQL alert conditions (definitions)
+    description: >-
+      NRQL alert conditions from actor.account.alerts.nrqlConditionsSearch with their NRQL, critical/warning
+      thresholds, durations, signal settings (aggregation window/method/delay, fill), expiration (signal
+      loss) and runbook. Filter id (the condition id = conditionFamilyId in issues/incidents; looked up
+      first, then searched by its policy and name), policy_id, name (= or LIKE) or query (the NRQL, = or
+      LIKE substring).
+    kind: entities
+    steps:
+      - name: lookup_id
+        when: "filters.id"
+        method: POST
+        path: /graphql
+        body_format: graphql
+        body:
+          query: "query($accountId: Int!, $id: ID!) { actor { account(id: $accountId) { alerts { nrqlCondition(id: $id) { id name policyId } } } } }"
+          variables:
+            accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+            id: "{{ filters.id | string }}"
+        capture:
+          policy_id: "$.data.actor.account.alerts.nrqlCondition.policyId"
+          name: "$.data.actor.account.alerts.nrqlCondition.name"
+      - name: search
+        method: POST
+        path: /graphql
+        body_format: graphql
+        body:
+          query: >-
+            query($accountId: Int!, $cursor: String, $criteria: AlertsNrqlConditionsSearchCriteriaInput) { actor {
+            account(id: $accountId) { alerts { nrqlConditionsSearch(searchCriteria: $criteria, cursor: $cursor) {
+            nextCursor totalCount nrqlConditions { id name type enabled description policyId runbookUrl entityGuid
+            titleTemplate nrql { query dataAccountId } signal { aggregationWindow aggregationMethod aggregationDelay
+            aggregationTimer fillOption fillValue slideBy evaluationDelay } terms { operator priority threshold
+            thresholdDuration thresholdOccurrences } expiration { closeViolationsOnExpiration expirationDuration
+            openViolationOnExpiration } violationTimeLimitSeconds ... on AlertsNrqlBaselineCondition { baselineDirection }
+            ... on AlertsNrqlStaticCondition { valueFunction } } } } } } }
+          variables:
+            accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+            criteria:
+              policyId: "{{ (captures.policy_id or filters.policy_id) | string if (captures.policy_id or filters.policy_id) else none }}"
+              name: "{{ captures.name or (filters.name if (filters.name and filters.name__op != 'like') else none) }}"
+              nameLike: "{{ (filters.name | replace('%', '')) if (filters.name and filters.name__op == 'like' and not captures.name) else none }}"
+              query: "{{ filters.query if (filters.query and filters.query__op != 'like') else none }}"
+              queryLike: "{{ (filters.query | replace('%', '')) if (filters.query and filters.query__op == 'like') else none }}"
+    filters:
+      - {column: id, type: BIGINT, description: "Condition id (conditionFamilyId in incidents)", examples: ["1284850"]}
+      - {column: policy_id, type: BIGINT}
+      - {column: name, ops: ["=", "like"], description: "Exact (case-insensitive) or LIKE substring"}
+      - {column: query, ops: ["=", "like"], description: "The condition's NRQL, exact or LIKE substring"}
+    pagination: {type: cursor, cursor_path: "$.data.actor.account.alerts.nrqlConditionsSearch.nextCursor", cursor_param: body.variables.cursor, max_pages: 10}
+    response:
+      rows_path: "$.data.actor.account.alerts.nrqlConditionsSearch.nrqlConditions[*]"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: name, path: name}
+      - {name: type, path: type, description: "STATIC | BASELINE | OUTLIER"}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: policy_id, type: BIGINT, path: policyId}
+      - {name: description, path: description}
+      - {name: runbook_url, path: runbookUrl}
+      - {name: query, path: nrql.query, description: "The condition's NRQL (no SINCE: evaluated per aggregation window)"}
+      - {name: data_account_id, type: BIGINT, path: nrql.dataAccountId}
+      - {name: operator, expr: "(_.terms or []) | selectattr('priority', 'equalto', 'CRITICAL') | map(attribute='operator') | first"}
+      - {name: critical_threshold, type: DOUBLE, expr: "(_.terms or []) | selectattr('priority', 'equalto', 'CRITICAL') | map(attribute='threshold') | first"}
+      - {name: critical_duration_s, type: BIGINT, expr: "(_.terms or []) | selectattr('priority', 'equalto', 'CRITICAL') | map(attribute='thresholdDuration') | first"}
+      - {name: critical_occurrences, expr: "(_.terms or []) | selectattr('priority', 'equalto', 'CRITICAL') | map(attribute='thresholdOccurrences') | first"}
+      - {name: warning_threshold, type: DOUBLE, expr: "(_.terms or []) | selectattr('priority', 'equalto', 'WARNING') | map(attribute='threshold') | first"}
+      - {name: terms, type: JSON, path: terms}
+      - {name: aggregation_window_s, type: BIGINT, path: signal.aggregationWindow}
+      - {name: aggregation_method, path: signal.aggregationMethod, description: "EVENT_FLOW | EVENT_TIMER | CADENCE"}
+      - {name: aggregation_delay_s, type: BIGINT, path: signal.aggregationDelay}
+      - {name: fill_option, path: signal.fillOption}
+      - {name: expiration_duration_s, type: BIGINT, path: expiration.expirationDuration, description: "Signal-loss window"}
+      - {name: open_violation_on_expiration, type: BOOLEAN, path: expiration.openViolationOnExpiration}
+      - {name: violation_time_limit_s, type: BIGINT, path: violationTimeLimitSeconds}
+      - {name: baseline_direction, path: baselineDirection}
+      - {name: value_function, path: valueFunction}
+      - {name: entity_guid, path: entityGuid}
+      - {name: title_template, path: titleTemplate}
+      - {name: signal, type: JSON, path: signal}
+    pitfalls:
+      - "Thresholds are evaluated on aggregation_window_s buckets after aggregation_delay_s; a condition can open minutes after the metric moved."
+      - "critical_duration_s with critical_occurrences = ALL means every bucket in that window breached; AT_LEAST_ONCE means any single bucket."
+      - "A condition's id equals conditionFamilyId in newrelic_incidents/newrelic_issues."
+    examples:
+      - sql: >-
+          SELECT name, type, query, operator, critical_threshold, critical_duration_s, critical_occurrences,
+          aggregation_window_s, aggregation_delay_s, runbook_url
+          FROM newrelic_nrql_conditions WHERE id = 1284850
+        description: The full definition of the condition that fired (id from the incident/issue).
+      - sql: "SELECT id, name, enabled, query FROM newrelic_nrql_conditions WHERE query LIKE '%checkout-service%'"
+        description: Which conditions watch a service.
+    fixtures:
+      - file: nrql_conditions_search.json
+        note: "Verbatim from the NRQL condition NerdGraph tutorial (docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-api-nrql-condition-alerts/, 'Request type-specific fields' response)."
+        expect_rows: 2
+        expect_columns: {id: 342, name: My baseline condition, type: BASELINE, baseline_direction: UPPER_ONLY}
+      - file: nrql_conditions_cursor.json
+        note: "Verbatim from the same tutorial's cursor pagination response (comment line removed)."
+        expect_rows: 2
+        expect_columns: {id: 4432, type: BASELINE}
+      - file: nrql_conditions_full.json
+        note: "Built from the documented static condition example (same tutorial: name, nrql.query, signal, terms, valueFunction, violationTimeLimitSeconds) in the response shape of the field list used by newrelic-client-go pkg/alerts/nrql_conditions.go (graphqlNrqlConditionStructFields)."
+        filters: {id: 1284850}
+        expect_rows: 1
+        expect_columns: {id: 1284850, policy_id: 707052, query: "SELECT uniqueCount(host) FROM Transaction WHERE appName='my-app-name'", operator: BELOW, critical_threshold: 2.0, critical_duration_s: 600, critical_occurrences: AT_LEAST_ONCE, aggregation_window_s: 60, aggregation_delay_s: 120, value_function: SINGLE_VALUE}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-api-nrql-condition-alerts/
+
+  - name: newrelic_muting_rules
+    title: Alert muting rules
+    description: >-
+      Muting rules of NEW_RELIC_ACCOUNT_ID from actor.account.alerts.mutingRules: name, enabled, the
+      condition that selects which alert events are muted (attribute / operator / values on alert event
+      attributes such as conditionName, policyName, entity.guid, targetName, tags.host), and the schedule
+      window (local time + time zone, optional DAILY/WEEKLY/MONTHLY repeat). Use it to explain an incident
+      that opened without notifying anyone (newrelic_alert_events.muted / muting_rule_id,
+      newrelic_issues.muting_state). The API takes no filter: one request returns every rule; filter id,
+      name, enabled in SQL.
+    kind: entities
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      body:
+        query: >-
+          query($accountId: Int!) { actor { account(id: $accountId) { alerts { mutingRules { id accountId name
+          description enabled actionOnMutingRuleWindowEnded createdAt updatedAt condition { operator conditions {
+          attribute operator values } } schedule { startTime endTime timeZone repeat endRepeat repeatCount
+          weeklyRepeatDays } } } } } }
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+    response:
+      rows_path: "$.data.actor.account.alerts.mutingRules[*]"
+    columns:
+      - {name: id, type: BIGINT, path: id, description: "Muting rule id (= NrAiIncident.mutingRuleId)"}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: account_id, type: BIGINT, path: accountId}
+      - {name: condition_operator, path: condition.operator, description: "AND | OR - how the sub-conditions combine"}
+      - {name: conditions, type: JSON, path: condition.conditions, description: "List of {attribute, operator, values}"}
+      - {name: muted_attributes, path: "condition.conditions[*].attribute", transform: join, transform_arg: ", ", description: "Alert event attributes the rule matches on"}
+      - {name: schedule_start, path: schedule.startTime, description: "Local ISO time WITHOUT offset, in time_zone (null = always on while enabled)"}
+      - {name: schedule_end, path: schedule.endTime, description: "Local ISO time WITHOUT offset, in time_zone"}
+      - {name: time_zone, path: schedule.timeZone, description: "IANA zone of schedule_start/schedule_end, e.g. America/Los_Angeles"}
+      - {name: repeat, path: schedule.repeat, description: "DAILY | WEEKLY | MONTHLY | null"}
+      - {name: end_repeat, path: schedule.endRepeat}
+      - {name: repeat_count, type: BIGINT, path: schedule.repeatCount}
+      - {name: weekly_repeat_days, type: JSON, path: schedule.weeklyRepeatDays}
+      - {name: action_on_window_ended, path: actionOnMutingRuleWindowEnded, description: "CLOSE_ISSUES_ON_INACTIVE | DO_NOTHING"}
+      - {name: created_at, type: TIMESTAMP, path: createdAt, transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: auto_time}
+    pitfalls:
+      - "schedule_start/schedule_end are local wall-clock times in time_zone, not UTC: convert before comparing with incident times (e.g. timezone(time_zone, CAST(schedule_start AS TIMESTAMP)))."
+      - "An enabled rule with no schedule mutes matching alert events at all times."
+      - "A muted incident still opens and appears in newrelic_incidents / newrelic_alert_events; only notifications are suppressed."
+      - "Rules are per account: a rule in another account never mutes NEW_RELIC_ACCOUNT_ID's incidents."
+    examples:
+      - sql: >-
+          SELECT id, name, condition_operator, conditions, schedule_start, schedule_end, time_zone, repeat
+          FROM newrelic_muting_rules WHERE enabled = true ORDER BY name
+        description: Enabled muting rules and their windows - could one have silenced the alert?
+      - sql: >-
+          SELECT a.ts, a.condition_name, a.service, m.name AS muting_rule, m.conditions
+          FROM newrelic_alert_events a JOIN newrelic_muting_rules m ON m.id = a.muting_rule_id
+          WHERE a.muted = true AND a.ts > TIMESTAMP '2026-09-30 12:00:00'
+        description: Which muting rule silenced which incident in the last day.
+    fixtures:
+      - file: muting_rules.json
+        note: "Built strictly from the documented muting-rule fields (docs.newrelic.com/docs/alerts/get-notified/muting-rules-suppress-notifications/#manage-with-nerdgraph field table) and the doc's example rules ('host-1 mute rule' with tags.host EQUALS host-1; targetName/product OR rule) and schedule example values; id is an ID string and createdAt a DateTime string as in newrelic-client-go pkg/alerts/muting_rules.go. The docs publish no response body."
+        expect_rows: 2
+        expect_columns: {id: 36578, name: host-1 mute rule, enabled: true, condition_operator: AND, muted_attributes: tags.host, schedule_start: "2020-07-08T14:30:00", time_zone: America/Los_Angeles, action_on_window_ended: CLOSE_ISSUES_ON_INACTIVE, created_at: "2020-07-08T21:20:02Z"}
+    docs_url: https://docs.newrelic.com/docs/alerts/get-notified/muting-rules-suppress-notifications/
+
+  # ------------------------------------------------------------------------------------------
+  # Change tracking
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_change_events
+    title: Change events (deployments, feature flags, config, business events)
+    description: >-
+      Change tracking events across the account from actor.changeTracking.changeTrackingSearch (events
+      created with changeTrackingCreateEvent): deployments (version, commit, changelog, deep link),
+      feature flags, configuration and custom changes, each tied to an entity. Filter service
+      (entity.name), entity_guid, author (user), query (change-tracking search condition, e.g.
+      "category = 'Deployment'") and ts (epoch-ms timeWindow; default 48h).
+    kind: changes
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      body:
+        query: >-
+          {%- set q = [
+            ('(' ~ filters.query ~ ')') if filters.query else none,
+            ('entity.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ')') if filters.service else none,
+            ('entity.guid IN (' ~ (filters.entity_guid | as_list | map('squote') | join(', ')) ~ ')') if filters.entity_guid else none,
+            ('user = ' ~ (filters.user | squote)) if filters.user else none
+          ] | select | join(' AND ') -%}
+          { actor { changeTracking { changeTrackingSearch(filter: { timeWindow: { startTime: {{ time.start | epoch_ms }},
+          endTime: {{ time.end | epoch_ms }} }, accountIds: [{{ env.NEW_RELIC_ACCOUNT_ID | int }}], limit: {{ [limit or 1000, 1000] | min }}
+          {%- if q %}, query: {{ q | json }}{% endif %} }) { changeEvents { changeTrackingId category type shortDescription
+          description groupId timestamp user customAttributes entity { guid name accountId entityType }
+          ... on ChangeTrackingDeploymentEvent { version commit changelog deepLink }
+          ... on ChangeTrackingFeatureFlagEvent { featureFlagId } } } } } }
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Entity name the change is attached to", examples: ["checkout-service"]}
+      - {column: entity_guid, ops: ["=", "in"], fan_out: false}
+      - {column: author, param: user, description: "user who made the change"}
+      - {column: query, description: "Change-tracking search condition (NRQL WHERE syntax without WHERE), e.g. category = 'Deployment'"}
+    time: {column: ts, default_lookback: 48h, max_window: 30d, retention: 395d}
+    response:
+      rows_path: "$.data.actor.changeTracking.changeTrackingSearch.changeEvents[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: id, path: changeTrackingId}
+      - {name: category, path: category, description: "Deployment | Feature Flag | Configuration | ..."}
+      - {name: type, path: type}
+      - name: title
+        expr: "_.shortDescription or ((_.category or 'change') ~ ((' ' ~ _.version) if _.version else '') ~ ((' on ' ~ _.entity.name) if _.entity.name else ''))"
+      - {name: short_description, path: shortDescription}
+      - {name: description, path: description}
+      - {name: version, path: version}
+      - {name: commit, path: commit}
+      - {name: changelog, path: changelog}
+      - {name: url, path: deepLink}
+      - {name: author, path: user}
+      - {name: group_id, path: groupId}
+      - {name: feature_flag_id, path: featureFlagId}
+      - {name: service, path: entity.name}
+      - {name: entity_guid, path: entity.guid}
+      - {name: entity_type, path: entity.entityType}
+      - {name: account_id, type: BIGINT, path: entity.accountId}
+      - {name: custom_attributes, type: JSON, path: customAttributes}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "changeTrackingSearch returns events created with the newer changeTrackingCreateEvent API. Deployments recorded with the legacy REST/changeTrackingCreateDeployment APIs live in the Deployment event type: see newrelic_deployments or newrelic_nrql with FROM Deployment."
+      - "Events are attached to entities: a deploy recorded on the wrong entity (e.g. the k8s workload, not the APM app) will not match service."
+    examples:
+      - sql: >-
+          SELECT ts, service, category, version, author, title, url FROM newrelic_change_events
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Every change in the account in the hours before the incident.
+      - sql: >-
+          SELECT ts, version, commit, changelog, author FROM newrelic_change_events
+          WHERE service = 'checkout-service' AND category = 'Deployment' AND ts > TIMESTAMP '2026-09-30 12:00:00'
+          ORDER BY ts DESC LIMIT 5
+        description: Recent deployments of one service (did a deploy precede the alert?).
+    fixtures:
+      - file: change_tracking_search.json
+        note: "Built strictly from the documented changeTrackingSearch selection set (docs.newrelic.com/docs/change-tracking/query-data/: changeTrackingId category type shortDescription description groupId timestamp user customAttributes entity { guid accountId }) plus the ChangeTrackingDeploymentEvent/FeatureFlagEvent fragments used by newrelic-client-go pkg/changetracking; the docs publish no response body."
+        expect_rows: 2
+        expect_columns: {ts: "2025-10-01T12:30:00Z", id: "8a3a594c-e726-4bc2-8078-26dffec9a3d8", category: Deployment, version: "1.2.3", service: checkout-service, author: ci-bot, title: "checkout-service 1.2.3", url: "https://github.com/example/checkout/actions/runs/1"}
+    docs_url: https://docs.newrelic.com/docs/change-tracking/query-data/
+
+  - name: newrelic_deployments
+    title: Deployments of one entity (change tracking deploymentSearch)
+    description: >-
+      Deployment markers of one entity from actor.entity(guid).deploymentSearch - includes deployments
+      recorded with the legacy REST v2 / changeTrackingCreateDeployment APIs. Filter guid or service
+      (resolved to the first APM/EXT entity with that exact name), author (user), query (search
+      condition, e.g. "version = '1.2.3'") and ts (epoch-ms timeWindow; default 48h).
+    kind: changes
+    steps:
+      - *resolve_entity
+      - name: deployments
+        when: "filters.guid or captures.guid"
+        method: POST
+        path: /graphql
+        body_format: graphql
+        body:
+          query: >-
+            {%- set q = [
+              ('(' ~ filters.query ~ ')') if filters.query else none,
+              ('user = ' ~ (filters.user | squote)) if filters.user else none
+            ] | select | join(' AND ') -%}
+            { actor { entity(guid: {{ (filters.guid or captures.guid) | json }}) { guid name
+            deploymentSearch(filter: { timeWindow: { startTime: {{ time.start | epoch_ms }}, endTime: {{ time.end | epoch_ms }} },
+            limit: {{ [limit or 2000, 2000] | min }}{% if q %}, query: {{ q | json }}{% endif %} }) { results { version entityGuid
+            timestamp changelog commit deepLink deploymentId description deploymentType groupId user } } } } }
+    filters:
+      - {column: guid, description: "Entity GUID", examples: ["MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA"]}
+      - {column: service, description: "Exact entity name; resolved to a GUID first"}
+      - {column: author, param: user}
+      - {column: query, description: "Deployment search condition, e.g. version = '1.2.3' or deploymentType IN ('CANARY')"}
+    require_one_of: [[guid, service]]
+    time: {column: ts, default_lookback: 48h, max_window: 30d, retention: 395d}
+    response:
+      rows_path: "$.data.actor.entity.deploymentSearch.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: version, path: version}
+      - {name: title, expr: "'Deployment ' ~ (_.version or '') ~ ((': ' ~ _.description) if _.description else '')"}
+      - {name: deployment_id, path: deploymentId}
+      - {name: deployment_type, path: deploymentType, description: "BASIC | BLUE_GREEN | CANARY | ROLLING | SHADOW | OTHER"}
+      - {name: description, path: description}
+      - {name: commit, path: commit}
+      - {name: changelog, path: changelog}
+      - {name: url, path: deepLink}
+      - {name: author, path: user}
+      - {name: group_id, path: groupId}
+      - {name: entity_guid, path: entityGuid}
+      - {name: service, path: "$.data.actor.entity.name"}
+      - {name: guid, filter_only: true}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Needs one entity: with service, the first APM/EXT entity with exactly that name is used (0 rows if none matches - check newrelic_entities)."
+      - "Returns at most 2,000 deployments (the API maximum), newest kept."
+    examples:
+      - sql: >-
+          SELECT ts, version, deployment_type, author, commit, url FROM newrelic_deployments
+          WHERE service = 'checkout-service' AND ts > TIMESTAMP '2026-09-29 12:00:00' ORDER BY ts DESC
+        description: Deploy history of a service for the last few days.
+    fixtures:
+      - file: deployment_search.json
+        note: "Built strictly from the documented deploymentSearch selection set (docs.newrelic.com/docs/change-tracking/query-data/: version entityGuid timestamp changelog commit deepLink deploymentId description deploymentType groupId user) and ChangeTrackingDeployment types in newrelic-client-go; the docs publish no response body."
+        filters: {guid: "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA"}
+        expect_rows: 1
+        expect_columns: {ts: "2025-10-01T12:30:00Z", version: "1.2.3", deployment_type: ROLLING, author: ci-bot, service: checkout-service, title: "Deployment 1.2.3: Roll out retry budget change"}
+    docs_url: https://docs.newrelic.com/docs/change-tracking/query-data/
+
+  - name: newrelic_change_markers
+    title: All change markers in the account (NRQL on ChangeTrackingEvent + Deployment)
+    description: >-
+      Every change marker of NEW_RELIC_ACCOUNT_ID from BOTH change-tracking stores in one NRQL query, as the
+      change-tracking docs recommend (FROM ChangeTrackingEvent, Deployment): ChangeTrackingEvent rows
+      (changeTrackingCreateEvent: deployments, feature flags, configuration, custom categories) and legacy
+      Deployment rows (changeTrackingCreateDeployment and the REST v2 deployment API). One row per change,
+      newest first, account-wide - no entity GUID needed. Filter service (entity.name), entity_guid,
+      category (category = 'Deployment' also matches every legacy Deployment row), version, author (user),
+      query (extra NRQL WHERE) and ts (epoch-ms SINCE/UNTIL).
+    kind: changes
+    request:
+      method: POST
+      path: /graphql
+      body_format: graphql
+      timeout_s: 90
+      body:
+        query: *nrql_doc
+        variables:
+          accountId: "{{ env.NEW_RELIC_ACCOUNT_ID | int }}"
+          timeout: 60
+          nrql: >-
+            {%- set cats = filters.category | as_list -%}
+            {%- set w = [
+              ('(' ~ filters.query ~ ')') if filters.query else none,
+              ('entity.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ')') if filters.service else none,
+              ('entity.guid IN (' ~ (filters.entity_guid | as_list | map('squote') | join(', ')) ~ ')') if filters.entity_guid else none,
+              ('version IN (' ~ (filters.version | as_list | map('string') | map('squote') | join(', ')) ~ ')') if filters.version else none,
+              ('user = ' ~ (filters.user | squote)) if filters.user else none,
+              ('(' ~ ((["eventType() = 'Deployment'"] if ('deployment' in (cats | map('lower') | list)) else []) + ['category IN (' ~ (cats | map('squote') | join(', ')) ~ ')']) | join(' OR ') ~ ')') if cats else none
+            ] | select | join(' AND ') -%}
+            SELECT * FROM ChangeTrackingEvent, Deployment{% if w %} WHERE {{ w }}{% endif %}
+            SINCE {{ time.start | epoch_ms }} UNTIL {{ time.end | epoch_ms }}
+            LIMIT {{ limit if (limit and limit < 5000) else 'MAX' }}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "entity.name the change is attached to (exact, case-sensitive)", examples: ["checkout-service"]}
+      - {column: entity_guid, ops: ["=", "in"], fan_out: false, description: "entity.guid"}
+      - {column: category, ops: ["=", "in"], fan_out: false, description: "Deployment | Feature Flag | Configuration | ... ('Deployment' includes legacy Deployment events)", examples: ["Deployment"]}
+      - {column: version, ops: ["=", "in"], fan_out: false, examples: ["1.2.3"]}
+      - {column: author, param: user, description: "user who made the change"}
+      - {column: query, description: "Extra NRQL WHERE condition, e.g. groupId = 'release-42' or deploymentType = 'CANARY'"}
+    time: {column: ts, default_lookback: 48h, max_window: 30d, retention: 395d}
+    response:
+      rows_path: "$.data.actor.account.nrql.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms, description: "Start time of the change (epoch ms in NRDB)"}
+      - {name: id, expr: "_.changeTrackingId or _.deploymentId or none", description: "changeTrackingId (ChangeTrackingEvent) or deploymentId (legacy Deployment)"}
+      - {name: event_type, expr: "'ChangeTrackingEvent' if _.changeTrackingId else ('Deployment' if _.deploymentId else none)", description: "Which store the row came from"}
+      - {name: category, expr: "_.category or ('Deployment' if _.deploymentId else none)", description: "Deployment | Feature Flag | ... (legacy rows are always Deployment)"}
+      - {name: type, expr: "_.type or _.deploymentType or none", description: "Change type (ChangeTrackingEvent) or deploymentType (BASIC, BLUE_GREEN, CANARY, ROLLING, SHADOW, OTHER)"}
+      - name: title
+        expr: >-
+          _.shortDescription or (((_.category or 'Deployment') ~ ((' ' ~ _.version) if _.version else '')
+          ~ ((' of ' ~ _['entity.name']) if _['entity.name'] else '')))
+      - {name: description, path: description}
+      - {name: version, path: version}
+      - {name: commit, path: commit}
+      - {name: changelog, path: changelog}
+      - {name: url, path: deepLink, description: "deepLink back to the CI/CD system"}
+      - {name: author, path: user}
+      - {name: group_id, path: groupId}
+      - {name: feature_flag_id, path: featureFlagId}
+      - {name: service, path: "['entity.name']"}
+      - {name: entity_guid, path: "['entity.guid']"}
+      - {name: entity_type, path: "['entity.type']"}
+      - {name: entity_domain, path: "['entity.domain']"}
+      - {name: provider, path: "['instrumentation.provider']", description: "Tool that sent the change (nerdgraph, newrelic-cli, axios ...)"}
+      - {name: attributes, type: JSON, path: ".", description: "All attributes (custom attributes of ChangeTrackingEvent included)"}
+      - {name: query, filter_only: true}
+    max_rows: 5000
+    sort_hint: "Newest first."
+    pitfalls:
+      - "This is the only change table that sees both stores account-wide. newrelic_change_events misses legacy REST/changeTrackingCreateDeployment deployments; newrelic_deployments needs one entity."
+      - "entity.name is exact and case-sensitive; a deploy recorded on another entity (k8s workload, browser app) will not match service: try service LIKE via query = \"entity.name LIKE '%checkout%'\"."
+      - "Legacy Deployment rows have no category/shortDescription; category and title are derived (category = 'Deployment')."
+      - "Change markers are kept 13 months (Original Data) - older ones are gone, not absent."
+    examples:
+      - sql: >-
+          SELECT ts, service, category, version, author, title, url FROM newrelic_change_markers
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Every change (new and legacy deployments, flags, config) in the hours before the incident.
+      - sql: >-
+          SELECT ts, version, commit, changelog, author, event_type FROM newrelic_change_markers
+          WHERE service = 'checkout-service' AND category = 'Deployment' AND ts > TIMESTAMP '2026-09-30 12:00:00'
+          ORDER BY ts DESC LIMIT 5
+        description: Last deployments of the alerting service, whichever API recorded them.
+    fixtures:
+      - file: nrql_change_markers.json
+        note: "Built from the documented NRQL raw-event result shape (flat objects with dotted keys and epoch-ms timestamp; newrelic-client-go pkg/nrdb fixtures) using only ChangeTrackingEvent and Deployment attributes from the New Relic data dictionary (docs.newrelic.com/attribute-dictionary/?dataSource=Change+tracking); values illustrative. No verbatim response is published."
+        filters: {category: "Deployment"}
+        expect_rows: 2
+        expect_columns: {ts: "2025-10-01T12:30:00Z", id: "8a3a594c-e726-4bc2-8078-26dffec9a3d8", event_type: ChangeTrackingEvent, category: Deployment, title: "checkout-service 1.2.3", version: "1.2.3", url: "https://github.com/example/checkout/actions/runs/1", author: ci-bot, service: checkout-service, provider: nerdgraph}
+    docs_url: https://docs.newrelic.com/docs/change-tracking/query-data/
+
+  # ------------------------------------------------------------------------------------------
+  # Service levels (SLIs / SLOs)
+  # ------------------------------------------------------------------------------------------
+  - name: newrelic_service_levels
+    title: Service level indicators and objectives of an entity
+    description: >-
+      SLIs defined on one entity from actor.entity(guid).serviceLevel.indicators, one row per (SLI,
+      objective): the SLI id (sli.id in NRQL), its valid/good/bad event definitions (FROM + WHERE), the SLO
+      target (%) and rolling window, and New Relic's ready-made attainment NRQL (attainment_query).
+      Filter guid or service (resolved to the first APM/EXT entity with that exact name). To see whether
+      the SLO is burning, run attainment_query (without SINCE) through newrelic_nrql, or
+      FROM Metric SELECT ... newrelic.sli.valid / newrelic.sli.bad WHERE sli.id = '<sli_id>'.
+    kind: entities
+    steps:
+      - *resolve_entity
+      - name: indicators
+        when: "filters.guid or captures.guid"
+        method: POST
+        path: /graphql
+        body_format: graphql
+        body:
+          query: >-
+            { actor { entity(guid: {{ (filters.guid or captures.guid) | json }}) { guid name serviceLevel {
+            indicators { id guid name description entityGuid createdAt updatedAt events { validEvents { from
+            where } goodEvents { from where } badEvents { from where } } objectives { name description target
+            timeWindow { rolling { count unit } } } resultQueries { indicator { nrql } } } } } } }
+    filters:
+      - {column: guid, description: "GUID of the entity the SLIs belong to", examples: ["MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA"]}
+      - {column: service, description: "Exact entity name; resolved to a GUID first"}
+    require_one_of: [[guid, service]]
+    response:
+      rows_path: "$.data.actor.entity.serviceLevel.indicators[*]"
+      expand:
+        - {explode: objectives, as: o, keep_empty: true}
+    columns:
+      - {name: sli_id, path: id, description: "SLI id: NRQL attribute sli.id"}
+      - {name: sli_guid, path: guid, description: "Entity GUID of the SLI itself"}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: entity_guid, path: entityGuid, description: "Entity the SLI measures"}
+      - {name: service, path: "$.data.actor.entity.name"}
+      - {name: valid_events, expr: "('FROM ' ~ _.events.validEvents.from ~ ((' WHERE ' ~ _.events.validEvents.where) if _.events.validEvents.where else '')) if (_.events and _.events.validEvents) else none"}
+      - {name: good_events, expr: "('FROM ' ~ _.events.goodEvents.from ~ ((' WHERE ' ~ _.events.goodEvents.where) if _.events.goodEvents.where else '')) if (_.events and _.events.goodEvents) else none"}
+      - {name: bad_events, expr: "('FROM ' ~ _.events.badEvents.from ~ ((' WHERE ' ~ _.events.badEvents.where) if _.events.badEvents.where else '')) if (_.events and _.events.badEvents) else none"}
+      - {name: target_pct, type: DOUBLE, path: "@o.target", description: "SLO target in percent (e.g. 99.5)"}
+      - {name: window_days, type: BIGINT, expr: "o.timeWindow.rolling.count if (o and o.timeWindow and o.timeWindow.rolling and o.timeWindow.rolling.unit == 'DAY') else none", description: "Rolling SLO window (1, 7, 14, 28 or 30 days)"}
+      - {name: objective_name, path: "@o.name"}
+      - {name: attainment_query, path: resultQueries.indicator.nrql, description: "NRQL that computes SLI attainment (%)"}
+      - {name: created_at, type: TIMESTAMP, path: createdAt, transform: epoch_ms}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt, transform: epoch_ms}
+      - {name: guid, filter_only: true}
+    pitfalls:
+      - "Needs one entity: with service, the first APM/EXT entity with exactly that name is used (0 rows if none matches or it has no SLIs - check newrelic_entities)."
+      - "An SLI with several objectives yields one row per objective; count SLIs with count(DISTINCT sli_id)."
+      - "Attainment is not in this table: run attainment_query (strip any SINCE/UNTIL) through newrelic_nrql for the incident window."
+    examples:
+      - sql: >-
+          SELECT sli_id, name, target_pct, window_days, valid_events, good_events, attainment_query
+          FROM newrelic_service_levels WHERE service = 'checkout-service'
+        description: The SLOs of the alerting service and how each SLI is defined.
+    fixtures:
+      - file: service_levels.json
+        note: "Built strictly from the documented indicators selection set (docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-slm/ 'Retrieve the configuration of an SLI' and consume-slm resultQueries.indicator.nrql) with the doc's example SLI values (Latency below 0.25 seconds, Transaction valid/good events, target 99.5, rolling 7 DAY) and the documented attainment NRQL; createdAt/updatedAt are EpochMilliseconds per newrelic-client-go pkg/servicelevel. No response body is published."
+        filters: {guid: "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA"}
+        expect_rows: 1
+        expect_columns: {sli_id: "a1b2c3d4-0000-4000-8000-000000000001", name: Latency below 0.25 seconds, service: checkout-service, target_pct: 99.5, window_days: 7, valid_events: "FROM Transaction WHERE entityGuid = 'MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA'", bad_events: null, created_at: "2025-10-01T10:00:00Z"}
+    docs_url: https://docs.newrelic.com/docs/apis/nerdgraph/examples/nerdgraph-slm/
+
+roles:
+  metrics:
+    table: newrelic_nrql
+    query_language: nrql
+    columns: {ts: ts, value: value, labels: result, metric: facet}
+    notes: "Write NRQL without SINCE/UNTIL; FROM Metric / Transaction / SystemSample / K8s*Sample."
+  logs:
+    table: newrelic_logs
+    filters:
+      service: "{{ service }}"
+      host: "{{ host }}"
+      query: "{{ \"lower(level) IN ('error', 'err', 'fatal', 'critical', 'severe', 'warn', 'warning')\" if error_only else '' }}"
+    columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id}
+    query_language: nrql
+    notes: "query is an NRQL WHERE condition on Log."
+  log_counts:
+    table: newrelic_log_counts
+    filters: {service: "{{ service }}"}
+    columns: {ts: ts, value: count, level: facet}
+  traces:
+    table: newrelic_spans
+    filters:
+      service: "{{ service }}"
+      is_error: "{{ true if error_only else '' }}"
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, duration_ms: duration_ms, resource: name, status_code: status_code}
+  trace_detail:
+    table: newrelic_trace
+    columns: {ts: ts, trace_id: trace_id, span_id: span_id, service: service, duration_ms: duration_ms, resource: name}
+  service_map:
+    table: newrelic_entity_relationships
+    filters: {service: "{{ service }}"}
+    columns: {service: entity_name, related: related_name, direction: direction, type: relationship}
+  services:
+    table: newrelic_entities
+    filters: {domain: "{{ ['APM', 'EXT'] }}", name: "{{ service }}"}
+    columns: {service: name, id: guid, url: url, state: alert_severity}
+  hosts:
+    table: newrelic_entities
+    filters: {domain: "INFRA", type: "HOST", name: "{{ host }}"}
+    columns: {host: host, id: guid, url: url, state: alert_severity}
+  change_events:
+    - table: newrelic_change_markers
+      filters: {service: "{{ service }}"}
+      columns: {ts: ts, service: service, title: title, version: version, author: author, url: url, type: category}
+      notes: "Account-wide NRQL over ChangeTrackingEvent + legacy Deployment; omit service to see every change."
+    - table: newrelic_change_events
+      filters: {service: "{{ service }}"}
+      columns: {ts: ts, service: service, title: title, version: version, author: author, url: url}
+    - table: newrelic_deployments
+      filters: {service: "{{ service }}"}
+      columns: {ts: ts, service: service, title: title, version: version, author: author, url: url}
+  active_alerts:
+    table: newrelic_issues
+    filters: {state: "ACTIVATED"}
+    columns: {ts: activated_at, name: title, state: state, severity: priority, service: service, labels: entity_guids, url: url}
+  alert_history:
+    table: newrelic_alert_events
+    filters: {service: "{{ service }}"}
+    columns: {ts: ts, name: condition_name, state: state, severity: priority, service: service, title: title}
+  alert_rules:
+    table: newrelic_nrql_conditions
+    filters: {id: "{{ alert_id }}"}
+    columns: {id: id, name: name, query: query, threshold: critical_threshold}
+  incidents:
+    table: newrelic_issues
+    columns: {id: issue_id, ts: created_at, title: title, state: state, severity: priority, service: service, url: url}
+  errors:
+    table: newrelic_errors
+    filters: {service: "{{ service }}"}
+    columns: {ts: last_seen, service: service, title: title, count: occurrences, message: message}
+  slo:
+    table: newrelic_service_levels
+    filters: {service: "{{ service }}"}
+    columns: {id: sli_id, service: service, name: name, target: target_pct, window_days: window_days, query: attainment_query}
+    notes: "Definitions only; run attainment_query through newrelic_nrql for the burn in the incident window."

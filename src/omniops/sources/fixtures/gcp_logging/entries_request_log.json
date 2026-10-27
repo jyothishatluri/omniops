@@ -1,0 +1,44 @@
+{
+  "entries": [
+    {
+      "insertId": "6512f3a9000b1c2d3e4f5a6b",
+      "httpRequest": {
+        "requestMethod": "GET",
+        "requestUrl": "https://checkout-abc123-uc.a.run.app/api/cart?id=42",
+        "status": 503,
+        "responseSize": "71",
+        "userAgent": "python-requests/2.19.1",
+        "remoteIp": "203.0.113.10",
+        "latency": "3.5s",
+        "protocol": "HTTP/1.1"
+      },
+      "resource": {
+        "type": "cloud_run_revision",
+        "labels": {"project_id": "my-project", "service_name": "checkout", "revision_name": "checkout-00042-xyz", "location": "us-central1", "configuration_name": "checkout"}
+      },
+      "timestamp": "2026-10-20T14:02:05.123456Z",
+      "severity": "ERROR",
+      "labels": {"instanceId": "00c61b117c1a2b3c"},
+      "logName": "projects/my-project/logs/run.googleapis.com%2Frequests",
+      "trace": "projects/my-project/traces/382d4f4c6b7bb2f4a972559d9085001d",
+      "spanId": "000000000000004a",
+      "traceSampled": true,
+      "receiveTimestamp": "2026-10-20T14:02:05.456789Z"
+    },
+    {
+      "insertId": "1x2y3z4w5v",
+      "jsonPayload": {"message": "upstream connect error: connection refused (payments:443)", "component": "cart"},
+      "resource": {
+        "type": "k8s_container",
+        "labels": {"project_id": "my-project", "location": "us-central1", "cluster_name": "prod-gke", "namespace_name": "checkout", "pod_name": "checkout-7d9f8c6b5-x2x9q", "container_name": "checkout"}
+      },
+      "timestamp": "2026-10-20T14:02:04.000000001Z",
+      "severity": "WARNING",
+      "labels": {"k8s-pod/app": "checkout", "compute.googleapis.com/resource_name": "gke-prod-pool-1-abcd"},
+      "logName": "projects/my-project/logs/stderr",
+      "sourceLocation": {"file": "cart/client.go", "line": "88", "function": "cart.(*Client).Reserve"},
+      "receiveTimestamp": "2026-10-20T14:02:04.900000Z"
+    }
+  ],
+  "nextPageToken": ""
+}

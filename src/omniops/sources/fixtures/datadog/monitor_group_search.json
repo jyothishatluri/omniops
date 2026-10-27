@@ -1,0 +1,46 @@
+{
+  "counts": {
+    "status": [
+      {
+        "count": 2,
+        "name": "OK"
+      }
+    ],
+    "type": [
+      {
+        "count": 2,
+        "name": "metric"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "group": "*",
+      "group_tags": [
+        "*"
+      ],
+      "last_nodata_ts": 0,
+      "last_triggered_ts": 1525702966,
+      "monitor_id": 2738266,
+      "monitor_name": "[demo] Cassandra disk usage is high on {{host.name}}",
+      "status": "OK"
+    },
+    {
+      "group": "*",
+      "group_tags": [
+        "*"
+      ],
+      "last_nodata_ts": 0,
+      "last_triggered_ts": 1525703008,
+      "monitor_id": 1576648,
+      "monitor_name": "[demo] Disk usage is high on {{host.name}}",
+      "status": "OK"
+    }
+  ],
+  "metadata": {
+    "page": 0,
+    "page_count": 2,
+    "per_page": 30,
+    "total_count": 2
+  }
+}

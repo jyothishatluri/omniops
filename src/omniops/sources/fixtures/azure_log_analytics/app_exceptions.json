@@ -1,0 +1,135 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "AppRoleName",
+          "type": "string"
+        },
+        {
+          "name": "AppRoleInstance",
+          "type": "string"
+        },
+        {
+          "name": "ExceptionType",
+          "type": "string"
+        },
+        {
+          "name": "Message",
+          "type": "string"
+        },
+        {
+          "name": "OuterMessage",
+          "type": "string"
+        },
+        {
+          "name": "OuterType",
+          "type": "string"
+        },
+        {
+          "name": "OuterMethod",
+          "type": "string"
+        },
+        {
+          "name": "InnermostType",
+          "type": "string"
+        },
+        {
+          "name": "InnermostMessage",
+          "type": "string"
+        },
+        {
+          "name": "InnermostMethod",
+          "type": "string"
+        },
+        {
+          "name": "ProblemId",
+          "type": "string"
+        },
+        {
+          "name": "SeverityLevel",
+          "type": "int"
+        },
+        {
+          "name": "HandledAt",
+          "type": "string"
+        },
+        {
+          "name": "OperationName",
+          "type": "string"
+        },
+        {
+          "name": "OperationId",
+          "type": "string"
+        },
+        {
+          "name": "ParentId",
+          "type": "string"
+        },
+        {
+          "name": "ItemCount",
+          "type": "int"
+        },
+        {
+          "name": "AppVersion",
+          "type": "string"
+        },
+        {
+          "name": "_ResourceId",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:42:07.1100000Z",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "System.Net.Http.HttpRequestException",
+          "",
+          "Response status code does not indicate success: 503 (Service Unavailable).",
+          "System.Net.Http.HttpRequestException",
+          "Contoso.Checkout.PaymentClient+<ChargeAsync>d__4.MoveNext",
+          "System.Net.Sockets.SocketException",
+          "Connection refused",
+          "System.Net.Sockets.Socket.ConnectAsync",
+          "System.Net.Http.HttpRequestException at Contoso.Checkout.PaymentClient+<ChargeAsync>d__4.MoveNext",
+          3,
+          "UserCode",
+          "POST /api/orders",
+          "0af7651916cd43dd8448eb211c80319c",
+          "a4c2b3d1e5f60718",
+          1,
+          "2.14.0",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"
+        ],
+        [
+          "2026-10-01T11:40:55.0020000Z",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-m9q2z",
+          "System.Threading.Tasks.TaskCanceledException",
+          "The operation was canceled.",
+          "The operation was canceled.",
+          "System.Threading.Tasks.TaskCanceledException",
+          "Contoso.Checkout.OrdersController+<Create>d__7.MoveNext",
+          "System.TimeoutException",
+          "The operation was canceled.",
+          "System.Threading.CancellationToken.ThrowOperationCanceledException",
+          "System.Threading.Tasks.TaskCanceledException at Contoso.Checkout.OrdersController+<Create>d__7.MoveNext",
+          3,
+          "UserCode",
+          "POST /api/orders",
+          "7c3a1b2d4e5f60718293a4b5c6d7e8f9",
+          "1a2b3c4d5e6f7081",
+          1,
+          "2.14.0",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"
+        ]
+      ]
+    }
+  ]
+}

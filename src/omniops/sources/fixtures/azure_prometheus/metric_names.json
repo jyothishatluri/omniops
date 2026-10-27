@@ -1,0 +1,9 @@
+{
+ "status": "success",
+ "data": [
+  "container_memory_working_set_bytes",
+  "container_network_receive_bytes_total",
+  "kube_pod_info",
+  "up"
+ ]
+}

@@ -1,0 +1,26 @@
+{
+ "data": [
+  {
+   "teamId": "2e3c4c13-51e7-4cf6-a353-34c6f75494c7",
+   "name": "Service API Test Service - Updated",
+   "description": "Service API Test Service Description [Updated]",
+   "id": "6aa85159-9e2e-4e54-8088-546f9c15d513",
+   "tags": [],
+   "isExternal": false
+  },
+  {
+   "teamId": "2e3c4c13-51e7-4cf6-a353-34c6f75494c7",
+   "name": "Service API Test Service 2 - Updated",
+   "description": "Service API Test Service 2 Description [Updated]",
+   "id": "6aa85159-9e2e-4e54-8088-546f9c15d513",
+   "tags": [],
+   "isExternal": false
+  }
+ ],
+ "paging": {
+  "next": "api.opsgenie.com/v1/services?offset=20?limit=20",
+  "first": "api.opsgenie.com/v1/services?offset=0?limit=20",
+  "last": "api.opsgenie.com/v1/services?offset=41?limit=20"
+ },
+ "requestId": "656cfb15-e19f-11e7-ac88-af7c98633ff2"
+}

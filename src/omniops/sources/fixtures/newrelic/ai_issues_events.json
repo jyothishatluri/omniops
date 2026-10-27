@@ -1,0 +1,50 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "aiIssues": {
+          "issuesEvents": {
+            "issues": [
+              {
+                "entityGuids": [
+                  "MXxTWU5USHxNT05JVE9SfGUyMzA0MjczLTQzNjUtNDRlZS1iODcxLTM5MGRhNDc1ODUxNA"
+                ],
+                "eventType": "ATTRIBUTES_UPDATED",
+                "issueId": "fe0d512f-36c7-4b7a-8a80-4c47c040807a",
+                "priority": "CRITICAL",
+                "state": "ACTIVATED",
+                "title": [
+                  "Test for alert emails query result is > 1.0 for 1 minutes on 'Matan email condition'"
+                ]
+              },
+              {
+                "entityGuids": [
+                  "MXxTWU5USHxNT05JVE9SfGUyMzA0MjczLTQzNjUtNDRlZS1iODcxLTM5MGRhNDc1ODUxNA"
+                ],
+                "eventType": "STATE_CHANGE",
+                "issueId": "fe0d512f-36c7-4b7a-8a80-4c47c040807a",
+                "priority": "CRITICAL",
+                "state": "ACTIVATED",
+                "title": [
+                  "Test for alert emails query result is > 1.0 for 1 minutes on 'Matan email condition'"
+                ]
+              },
+              {
+                "entityGuids": [
+                  "MXxTWU5USHxNT05JVE9SfGUyMzA0MjczLTQzNjUtNDRlZS1iODcxLTM5MGRhNDc1ODUxNA"
+                ],
+                "eventType": "ATTRIBUTES_UPDATED",
+                "issueId": "fe0d512f-36c7-4b7a-8a80-4c47c040807a",
+                "priority": "CRITICAL",
+                "state": "CREATED",
+                "title": [
+                  "Test for alert emails query result is > 1.0 for 1 minutes on 'Matan email condition'"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

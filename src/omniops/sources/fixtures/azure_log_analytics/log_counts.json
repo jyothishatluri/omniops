@@ -1,0 +1,45 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "AppRoleName",
+          "type": "string"
+        },
+        {
+          "name": "SeverityLevel",
+          "type": "int"
+        },
+        {
+          "name": "Count",
+          "type": "long"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:40:00Z",
+          "checkout-api",
+          1,
+          412
+        ],
+        [
+          "2026-10-01T11:41:00Z",
+          "checkout-api",
+          3,
+          96
+        ],
+        [
+          "2026-10-01T11:42:00Z",
+          "checkout-api",
+          3,
+          181
+        ]
+      ]
+    }
+  ]
+}

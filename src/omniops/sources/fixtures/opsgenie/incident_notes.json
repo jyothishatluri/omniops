@@ -1,0 +1,22 @@
+{
+ "data": [
+  {
+   "note": "Rolled back the payment gateway deploy; error rate recovering.",
+   "owner": "morpheus@opsgenie.com",
+   "createdAt": "2017-04-12T13:36:21.874Z",
+   "offset": "1492004181874000155"
+  },
+  {
+   "note": "Root cause suspected in the connection pool settings.",
+   "owner": "merovingian@opsgenie.com",
+   "createdAt": "2017-04-12T13:36:18.098Z",
+   "offset": "1492004178098000065"
+  }
+ ],
+ "requestId": "fbbd807d-6024-4572-8d51-bd4a047617d0",
+ "took": 0.278,
+ "paging": {
+  "next": "https://api.opsgenie.com/v1/incidents/ee624ed0-3ee0-45be-9c9d-e7667eaf21e5/notes?identifierType=id&offset=1492004181874000155&direction=next&limit=2&order=desc",
+  "first": "https://api.opsgenie.com/v1/incidents/ee624ed0-3ee0-45be-9c9d-e7667eaf21e5/notes?identifierType=id&limit=2&order=desc"
+ }
+}

@@ -1,0 +1,811 @@
+# Kibana REST API (8.x / 9.x, Elastic Cloud Hosted, Serverless, self-managed).
+# Alerting rules, maintenance windows, cases, SLOs, Synthetics monitors, APM deployment
+# annotations, data views and Security detection alerts over direct REST.
+# Research notes, endpoint table and doc links: docs/sources/kibana.md
+source: kibana
+display_name: Kibana
+vendor: Elastic N.V.
+description: >-
+  Kibana public APIs: alerting rules and their last run, maintenance windows, cases (incident
+  records), SLOs with error budgets, Synthetics monitors, APM deployment annotations, data views
+  and Security detection alerts.
+docs_url: https://www.elastic.co/docs/api/doc/kibana/
+categories: [alerts, incidents, slo, changes, synthetics, inventory]
+base_url: >-
+  {{ env.KIBANA_URL }}{{ ('/s/' ~ env.KIBANA_SPACE) if env.KIBANA_SPACE and env.KIBANA_SPACE != 'default' else '' }}
+env:
+  - {name: KIBANA_URL, description: "Kibana base URL, e.g. https://my-deployment.kb.us-central1.gcp.cloud.es.io (no trailing slash, no /s/<space>)"}
+  - {name: KIBANA_SPACE, description: "Kibana space id; requests are prefixed with /s/<space> unless it is 'default'", default: default}
+  - {name: KIBANA_API_KEY, description: "Encoded Elasticsearch API key used as 'Authorization: ApiKey <key>' (falls back to ELASTICSEARCH_API_KEY)", secret: true}
+  - {name: KIBANA_USERNAME, description: "Basic-auth user (used only when no API key is set; falls back to ELASTICSEARCH_USERNAME)"}
+  - {name: KIBANA_PASSWORD, description: "Basic-auth password (falls back to ELASTICSEARCH_PASSWORD)", secret: true}
+required_env: [KIBANA_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('ApiKey ' ~ (env.KIBANA_API_KEY or env.ELASTICSEARCH_API_KEY)) if (env.KIBANA_API_KEY or env.ELASTICSEARCH_API_KEY)
+      else (('Basic ' ~ (((env.KIBANA_USERNAME or env.ELASTICSEARCH_USERNAME) ~ ':' ~ (env.KIBANA_PASSWORD or env.ELASTICSEARCH_PASSWORD or '')) | b64))
+      if (env.KIBANA_USERNAME or env.ELASTICSEARCH_USERNAME) else None) }}
+headers:
+  kbn-xsrf: "true"
+  Elastic-Api-Version: "2023-10-31"
+rate_limit:
+  concurrency: 3
+  notes: "No published request quota; Kibana proxies to Elasticsearch, so heavy _find calls compete with the UI. Keep per_page <= 100."
+errors:
+  - {path: "$._shards.failures", non_empty: true, message: "$._shards.failures[0].reason.reason", hint: "partial results from the alerts index; narrow the query"}
+ui_base_url: >-
+  {{ env.KIBANA_URL }}{{ ('/s/' ~ env.KIBANA_SPACE) if env.KIBANA_SPACE and env.KIBANA_SPACE != 'default' else '' }}
+query_languages:
+  kql: >-
+    Kibana Query Language for saved-object filters: field:value, field:"exact phrase", and / or / not
+    (lowercase), wildcards value*, ranges field > 10. Alerting rule filters address saved-object
+    attributes: alert.attributes.tags:"prod", alert.attributes.enabled:true,
+    alert.attributes.alertTypeId:".es-query".
+pitfalls:
+  - "Everything is space-scoped: rules, cases, SLOs and monitors in another Kibana space are invisible unless KIBANA_SPACE points at it (an empty result is not proof of absence)."
+  - "The API key needs Kibana feature privileges (Alerting, Cases, SLO, Synthetics, APM) in the space, not only Elasticsearch index privileges; missing privileges return 403 for some APIs and empty lists for others."
+  - "Rule definitions live here; the alert documents they produce are in Elasticsearch (.alerts-* indices, table elasticsearch_alerts)."
+
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_alerting_rules
+    title: Alerting rules (GET /api/alerting/rules/_find)
+    description: >-
+      Alerting rule definitions with their parameters (thresholds, queries, windows), schedule and
+      the outcome of the last run (succeeded/warning/failed, active/new/recovered alert counts).
+      One row per rule. Filter by name, tags, enabled, rule_type_id, consumer, or a raw KQL filter.
+    kind: entities
+    request:
+      method: GET
+      path: /api/alerting/rules/_find
+      query:
+        search: "{{ ('\"' ~ filters.name ~ '\"') if filters.name else filters.search }}"
+        search_fields: "{{ 'name' if filters.name else None }}"
+        default_search_operator: AND
+        filter: >-
+          {{ ([('alert.attributes.tags:"' ~ filters.tag ~ '"') if filters.tag else '',
+               ('alert.attributes.enabled:' ~ (filters.enabled | string | lower)) if (filters.enabled is defined and filters.enabled is not none) else '',
+               ('alert.attributes.alertTypeId:"' ~ filters.rule_type_id ~ '"') if filters.rule_type_id else '',
+               filters.kql or ''] | compact | join(' and ')) or None }}
+        filter_consumers: "{{ filters.consumer }}"
+        sort_field: name
+        sort_order: asc
+    filters:
+      - {column: name, description: "Rule name (phrase match on name, then exact in SQL)", examples: ["my alert"]}
+      - {column: tag, description: "One rule tag", examples: ["cpu"]}
+      - {column: enabled, type: BOOLEAN, description: "Only enabled / disabled rules", examples: ["true"]}
+      - {column: rule_type_id, description: "e.g. .es-query, .index-threshold, apm.transaction_error_rate, apm.transaction_duration, observability.rules.custom_threshold, logs.alert.document.count, metrics.alert.threshold, metrics.alert.inventory.threshold, slo.rules.burnRate, xpack.uptime.alerts.monitorStatus, xpack.synthetics.alerts.monitorStatus", examples: [".index-threshold"]}
+      - {column: consumer, description: "Owning app: alerts, apm, infrastructure, logs, slo, uptime, siem, observability, stackAlerts", examples: ["alerts"]}
+      - {column: kql, description: "Raw KQL saved-object filter, e.g. alert.attributes.executionStatus.status:\"error\"", examples: ['alert.attributes.executionStatus.status:"error"']}
+      - {column: search, description: "Raw simple_query_string over rule fields"}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, total_path: "$.total", max_pages: 10}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: id, path: "id", description: "Rule id (= kibana.alert.rule.uuid on alerts)"}
+      - {name: name, path: "name"}
+      - {name: rule_type_id, path: "rule_type_id"}
+      - {name: consumer, path: "consumer"}
+      - {name: enabled, type: BOOLEAN, path: "enabled"}
+      - {name: tags, type: JSON, path: "tags"}
+      - {name: tag, filter_only: true}
+      - {name: schedule_interval, path: "schedule.interval", description: "Check interval, e.g. 1m"}
+      - {name: params, type: JSON, path: "params", description: "Rule-type parameters (query, threshold, timeWindowSize/Unit, index ...)"}
+      - {name: execution_status, path: "execution_status.status", description: "ok | active | error | warning | pending | unknown"}
+      - {name: last_execution_at, type: TIMESTAMP, path: "execution_status.last_execution_date"}
+      - {name: last_duration_ms, type: DOUBLE, path: "execution_status.last_duration"}
+      - {name: last_error, path: "execution_status.error.message"}
+      - {name: last_run_outcome, path: "last_run.outcome", description: "succeeded | warning | failed"}
+      - {name: last_run_message, type: JSON, path: "last_run.outcome_msg"}
+      - {name: last_run_warning, path: "last_run.warning"}
+      - {name: active_alerts, type: BIGINT, path: "last_run.alerts_count.active"}
+      - {name: new_alerts, type: BIGINT, path: "last_run.alerts_count.new"}
+      - {name: recovered_alerts, type: BIGINT, path: "last_run.alerts_count.recovered"}
+      - {name: mute_all, type: BOOLEAN, path: "mute_all"}
+      - {name: muted_alert_ids, type: JSON, path: "muted_alert_ids"}
+      - {name: snooze_schedule, type: JSON, path: "snooze_schedule"}
+      - {name: notify_when, path: "notify_when"}
+      - {name: actions, type: JSON, path: "actions"}
+      - {name: next_run, type: TIMESTAMP, path: "next_run"}
+      - {name: created_at, type: TIMESTAMP, path: "created_at"}
+      - {name: updated_at, type: TIMESTAMP, path: "updated_at"}
+      - {name: created_by, path: "created_by"}
+      - {name: updated_by, path: "updated_by", description: "Who last edited the rule (a recent edit can explain new noise)"}
+      - {name: revision, type: BIGINT, path: "revision"}
+      - {name: kql, filter_only: true}
+      - {name: search, filter_only: true}
+    pitfalls:
+      - "Thresholds are inside params and differ per rule type (threshold + thresholdComparator for index threshold, criteria[] for custom threshold, threshold for APM rules)."
+      - "execution_status 'error' / last_run_outcome 'failed' means the rule could not evaluate: missing alerts are then a monitoring gap, not a healthy system."
+      - "mute_all / snooze_schedule silence notifications while alerts still get written."
+    examples:
+      - sql: "SELECT id, name, rule_type_id, params, schedule_interval, last_run_outcome FROM kibana_alerting_rules WHERE name = 'checkout-api error rate'"
+        description: Look up the rule behind an alert with its full parameters.
+      - sql: "SELECT name, execution_status, last_error, last_execution_at FROM kibana_alerting_rules WHERE enabled = true AND execution_status IN ('error', 'warning')"
+        description: Rules that are failing to evaluate (blind spots).
+      - sql: "SELECT name, updated_by, updated_at FROM kibana_alerting_rules WHERE updated_at >= TIMESTAMP '2026-10-01 00:00:00' ORDER BY updated_at DESC"
+        description: Recently edited rules.
+    fixtures:
+      - file: alerting_rules_find.json
+        note: "Verbatim example response #1 of the 'Get information about rules' API reference (get-alerting-rules-find)."
+        expect_rows: 1
+        expect_columns: {id: 3583a470-74f6-11ed-9801-35303b735aef, name: my alert, rule_type_id: .index-threshold, execution_status: ok, last_run_outcome: succeeded, active_alerts: 0, schedule_interval: 1m, last_duration_ms: 48.0}
+      - file: alerting_rules_find_2.json
+        note: "Verbatim example response #2 of the same API reference (security rule with alerts_filter actions)."
+        expect_rows: 1
+        expect_columns: {name: security_rule, rule_type_id: siem.thresholdRule}
+    ui_link: "{{ source.base_url }}/app/management/insightsAndAlerting/triggersActions/rules"
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-get-alerting-rules-find
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_alerting_rule
+    title: One alerting rule by id (GET /api/alerting/rule/{id})
+    description: >-
+      Full definition of a single rule. Use with the rule id from an alert (kibana.alert.rule.uuid
+      / elasticsearch_alerts.rule_id) or a Slack notification link.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/alerting/rule/{{ filters.id }}"
+    filters:
+      - {column: id, required: true, description: "Rule id", examples: ["3583a470-74f6-11ed-9801-35303b735aef"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: "id"}
+      - {name: name, path: "name"}
+      - {name: rule_type_id, path: "rule_type_id"}
+      - {name: consumer, path: "consumer"}
+      - {name: enabled, type: BOOLEAN, path: "enabled"}
+      - {name: tags, type: JSON, path: "tags"}
+      - {name: schedule_interval, path: "schedule.interval"}
+      - {name: params, type: JSON, path: "params"}
+      - {name: execution_status, path: "execution_status.status"}
+      - {name: last_execution_at, type: TIMESTAMP, path: "execution_status.last_execution_date"}
+      - {name: last_error, path: "execution_status.error.message"}
+      - {name: last_run_outcome, path: "last_run.outcome"}
+      - {name: mute_all, type: BOOLEAN, path: "mute_all"}
+      - {name: notify_when, path: "notify_when"}
+      - {name: actions, type: JSON, path: "actions"}
+      - {name: created_at, type: TIMESTAMP, path: "created_at"}
+      - {name: updated_at, type: TIMESTAMP, path: "updated_at"}
+      - {name: updated_by, path: "updated_by"}
+    examples:
+      - sql: "SELECT name, rule_type_id, params, schedule_interval FROM kibana_alerting_rule WHERE id = '3583a470-74f6-11ed-9801-35303b735aef'"
+        description: Rule definition for an alert's rule id.
+    fixtures:
+      - file: alerting_rule_get.json
+        note: "Verbatim example response of the 'Get rule details' API reference (get-alerting-rule-id)."
+        expect_rows: 1
+        expect_columns: {id: 3583a470-74f6-11ed-9801-35303b735aef, name: my alert, rule_type_id: .index-threshold, schedule_interval: 1m}
+    ui_link: "{{ source.base_url }}/app/management/insightsAndAlerting/triggersActions/rule/{{ filters.id }}"
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-get-alerting-rule-id
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_maintenance_windows
+    title: Maintenance windows (GET /api/maintenance_window/_find)
+    description: >-
+      Maintenance windows that suppress alert notifications (running, upcoming, finished,
+      archived, disabled) with schedule and KQL scope. Check when an expected alert never fired
+      or paged: a running window may have muted it.
+    kind: changes
+    request:
+      method: GET
+      path: /api/maintenance_window/_find
+      query:
+        status: "{{ filters.status | as_list }}"
+        title: "{{ filters.title }}"
+        created_by: "{{ filters.created_by }}"
+    filters:
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "running | upcoming | finished | archived | disabled", examples: ["running"]}
+      - {column: title, description: "Title (exact)", examples: ["Weekly Maintenance Window"]}
+      - {column: created_by, examples: ["elastic"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, total_path: "$.total", max_pages: 5}
+    response:
+      rows_path: "$.maintenanceWindows[*]"
+    columns:
+      - {name: id, path: "id"}
+      - {name: title, path: "title"}
+      - {name: status, path: "status"}
+      - {name: enabled, type: BOOLEAN, path: "enabled"}
+      - {name: start_ts, type: TIMESTAMP, path: "schedule.custom.start", description: "First occurrence start"}
+      - {name: duration, path: "schedule.custom.duration", description: "e.g. 2h"}
+      - {name: timezone, path: "schedule.custom.timezone"}
+      - {name: recurring, type: JSON, path: "schedule.custom.recurring"}
+      - {name: scope_kql, path: "scope.alerting.query.kql", description: "Only alerts matching this KQL are suppressed"}
+      - {name: schedule, type: JSON, path: "schedule"}
+      - {name: created_at, type: TIMESTAMP, path: "created_at"}
+      - {name: updated_at, type: TIMESTAMP, path: "updated_at"}
+      - {name: created_by, path: "created_by"}
+      - {name: updated_by, path: "updated_by"}
+    pitfalls:
+      - "Maintenance windows suppress notifications, not alert documents: alerts still appear in elasticsearch_alerts with the window id in kibana.alert.maintenance_window_ids."
+    examples:
+      - sql: "SELECT title, status, start_ts, duration, recurring, scope_kql FROM kibana_maintenance_windows WHERE status IN ('running', 'upcoming')"
+        description: Is any maintenance window active or about to start?
+    fixtures:
+      - file: maintenance_windows_find.json
+        note: "Verbatim example response of the 'Search for a maintenance window' API reference (get-maintenance-window-find)."
+        expect_rows: 2
+        expect_columns: {title: Weekly Maintenance Window, status: upcoming, start_ts: "2025-03-01T08:00:00Z", duration: 2h, scope_kql: "kibana.alert.tags: \"infra\""}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-get-maintenance-window-find
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_cases
+    title: Cases (GET /api/cases/_find)
+    description: >-
+      Kibana Cases (Stack, Observability, Security) - the incident records: title, status,
+      severity, tags, assignees, comment/alert counts and the pushed external ticket. One row per
+      case, most recently updated first. Filter by status, severity, tag, owner, free-text search
+      or created_at lower bound.
+    kind: incidents
+    request:
+      method: GET
+      path: /api/cases/_find
+      query:
+        status: "{{ filters.status }}"
+        severity: "{{ filters.severity }}"
+        tags: "{{ filters.tag | as_list }}"
+        owner: "{{ filters.owner | as_list }}"
+        search: "{{ filters.search }}"
+        searchFields: "{{ ['title', 'description'] if filters.search else None }}"
+        from: "{{ (filters.created_from | rfc3339) if filters.created_from else None }}"
+        sortField: updatedAt
+        sortOrder: desc
+    filters:
+      - {column: status, description: "open | in-progress | closed", examples: ["open"]}
+      - {column: severity, description: "low | medium | high | critical", examples: ["critical"]}
+      - {column: tag, ops: ["=", "in"], fan_out: false, description: "Case tag", examples: ["tag-1"]}
+      - {column: owner, ops: ["=", "in"], fan_out: false, description: "cases | observability | securitySolution", examples: ["observability"]}
+      - {column: search, description: "simple_query_string over title and description", examples: ["checkout"]}
+      - {column: created_at, param: created_from, type: TIMESTAMP, ops: [">", ">="], description: "Created at or after (pushed as from=)", examples: ["2026-10-01T00:00:00Z"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.perPage, page_size: 100, start: 1, total_path: "$.total", max_pages: 5}
+    response:
+      rows_path: "$.cases[*]"
+    columns:
+      - {name: id, path: "id"}
+      - {name: number, type: BIGINT, path: "incremental_id", description: "Human case number per space"}
+      - {name: title, path: "title"}
+      - {name: description, path: "description"}
+      - {name: status, path: "status"}
+      - {name: severity, path: "severity"}
+      - {name: tags, type: JSON, path: "tags"}
+      - {name: tag, filter_only: true}
+      - {name: owner, path: "owner"}
+      - {name: category, path: "category"}
+      - {name: assignees, type: JSON, path: "assignees"}
+      - {name: created_at, type: TIMESTAMP, path: "created_at"}
+      - {name: updated_at, type: TIMESTAMP, path: "updated_at"}
+      - {name: closed_at, type: TIMESTAMP, path: "closed_at"}
+      - {name: author, path: "created_by.username"}
+      - {name: duration_s, type: BIGINT, path: "duration", description: "Seconds from creation to closure (null while open)"}
+      - {name: total_comments, type: BIGINT, path: "totalComment"}
+      - {name: total_alerts, type: BIGINT, path: "totalAlerts"}
+      - {name: connector_type, path: "connector.type", description: "External connector (.jira, .servicenow, .none ...)"}
+      - {name: external_id, path: "external_service.external_title"}
+      - {name: external_url, path: "external_service.external_url", description: "Pushed ticket URL"}
+      - {name: custom_fields, type: JSON, path: "customFields"}
+      - {name: search, filter_only: true}
+    sort_hint: "most recently updated first"
+    pitfalls:
+      - "perPage is capped at 100; the table pages up to 500 cases."
+      - "owner separates Stack / Observability / Security cases; without owner all readable cases are returned."
+    examples:
+      - sql: "SELECT number, title, status, severity, created_at, total_alerts, external_url FROM kibana_cases WHERE status <> 'closed' ORDER BY created_at DESC"
+        description: Open incident records (is there already a case for this incident?).
+      - sql: "SELECT title, author, created_at FROM kibana_cases WHERE search = 'checkout' AND created_at >= TIMESTAMP '2026-09-01 00:00:00'"
+        description: Recent cases mentioning a service (past incidents of the same kind).
+    fixtures:
+      - file: cases_find.json
+        note: "Verbatim example response of the 'Search cases' API reference (findcasesdefaultspace)."
+        expect_rows: 1
+        expect_columns: {id: abed3a70-71bd-11ea-a0b2-c51ea50a58e2, number: 1, title: Case title, status: open, severity: low, author: elastic, total_comments: 1, connector_type: .none}
+    ui_link: "{{ source.base_url }}/app/management/insightsAndAlerting/cases"
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-findcasesdefaultspace
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_case_comments
+    title: Case comments (GET /api/cases/{caseId}/comments/_find)
+    description: User comments (investigation notes, timeline) of one case. Requires case_id.
+    kind: events
+    request:
+      method: GET
+      path: "/api/cases/{{ filters.case_id }}/comments/_find"
+      query:
+        sortOrder: asc
+    filters:
+      - {column: case_id, required: true, description: "Case id (kibana_cases.id)", examples: ["abed3a70-71bd-11ea-a0b2-c51ea50a58e2"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.perPage, page_size: 100, start: 1, total_path: "$.total", max_pages: 5}
+    response:
+      rows_path: "$.comments[*]"
+    columns:
+      - {name: id, path: "id"}
+      - {name: ts, type: TIMESTAMP, path: "created_at"}
+      - {name: author, path: "created_by.username"}
+      - {name: message, path: "comment"}
+      - {name: type, path: "type"}
+      - {name: owner, path: "owner"}
+      - {name: updated_at, type: TIMESTAMP, path: "updated_at"}
+      - {name: case_id, filter_only: true}
+    examples:
+      - sql: "SELECT ts, author, message FROM kibana_case_comments WHERE case_id = 'abed3a70-71bd-11ea-a0b2-c51ea50a58e2' ORDER BY ts"
+        description: Investigation notes of a case in order.
+    fixtures:
+      - file: case_comments_find.json
+        note: "Verbatim example response of the 'Find case comments' API reference (findcasecommentsdefaultspace)."
+        expect_rows: 1
+        expect_columns: {id: 8048b460-fe2b-11ec-b15d-779a7c8bbcc3, message: A new comment, author: elastic, ts: "2023-10-07T19:32:13Z"}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-findcasecommentsdefaultspace
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_case_alerts
+    title: Alerts attached to a case (GET /api/cases/{caseId}/alerts)
+    description: Alert ids and indices attached to one case; join to elasticsearch_alerts.id for details.
+    kind: alerts
+    request:
+      method: GET
+      path: "/api/cases/{{ filters.case_id }}/alerts"
+    filters:
+      - {column: case_id, required: true, description: "Case id", examples: ["abed3a70-71bd-11ea-a0b2-c51ea50a58e2"]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: "id", description: "Alert id (kibana.alert.uuid / _id)"}
+      - {name: index, path: "index", description: "Alerts index the alert lives in"}
+      - {name: attached_at, type: TIMESTAMP, path: "attached_at"}
+      - {name: case_id, filter_only: true}
+    examples:
+      - sql: "SELECT id, index, attached_at FROM kibana_case_alerts WHERE case_id = 'abed3a70-71bd-11ea-a0b2-c51ea50a58e2'"
+        description: Which alerts were attached to the case.
+    fixtures:
+      - file: case_alerts.json
+        note: "Verbatim example response of the 'Get all alerts for a case' API reference (getcasealertsdefaultspace)."
+        expect_rows: 1
+        expect_columns: {id: f6a7d0c3-d52d-432c-b2e6-447cd7fce04d, index: .alerts-observability.logs.alerts-default}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-getcasealertsdefaultspace
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_case_activity
+    title: Case activity / timeline (GET /api/cases/{caseId}/user_actions/_find)
+    description: >-
+      The audit trail of one case in order: creation, status and severity changes, assignees,
+      comments, attached alerts, pushes to external tickets. One row per user action. Requires
+      case_id; optional types filter (status, severity, comment, alert, assignees, pushed ...).
+    kind: events
+    request:
+      method: GET
+      path: "/api/cases/{{ filters.case_id }}/user_actions/_find"
+      query:
+        sortOrder: asc
+        types: "{{ filters.type | as_list }}"
+    filters:
+      - {column: case_id, required: true, description: "Case id (kibana_cases.id)", examples: ["9c235210-6834-11ea-a78c-6ffb38a34414"]}
+      - {column: type, ops: ["=", "in"], fan_out: false, description: "action | alert | assignees | attachment | comment | connector | create_case | description | pushed | settings | severity | status | tags | title | user | workflow", examples: ["status"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.perPage, page_size: 100, start: 1, total_path: "$.total", max_pages: 5}
+    response:
+      rows_path: "$.userActions[*]"
+    columns:
+      - {name: id, path: "id"}
+      - {name: ts, type: TIMESTAMP, path: "created_at"}
+      - {name: author, path: "created_by.username"}
+      - {name: action, path: "action", description: "create | add | update | delete | push_to_service"}
+      - {name: type, path: "type"}
+      - {name: status, path: "payload.status", description: "New status for create_case / status actions"}
+      - {name: severity, path: "payload.severity", description: "New severity for create_case / severity actions"}
+      - {name: message, path: "payload.comment.comment", description: "Comment text for comment actions"}
+      - {name: comment_id, path: "comment_id"}
+      - {name: payload, type: JSON, path: "payload", description: "Full change payload"}
+      - {name: owner, path: "owner"}
+      - {name: case_id, filter_only: true}
+    sort_hint: "oldest first"
+    pitfalls:
+      - "Comments are also in kibana_case_comments; this table adds who changed status/severity and when (time-to-acknowledge, time-to-close)."
+    examples:
+      - sql: "SELECT ts, author, action, type, status, severity, message FROM kibana_case_activity WHERE case_id = '9c235210-6834-11ea-a78c-6ffb38a34414' ORDER BY ts"
+        description: Full timeline of a case.
+      - sql: "SELECT ts, author, status FROM kibana_case_activity WHERE case_id = '9c235210-6834-11ea-a78c-6ffb38a34414' AND type = 'status' ORDER BY ts"
+        description: When the case moved between open / in-progress / closed.
+    fixtures:
+      - file: case_activity_find.json
+        note: "Verbatim example response findCaseActivityResponse of the 'Find case activity' API reference (findcaseactivitydefaultspace)."
+        expect_rows: 3
+        expect_columns: {id: b4cd0770-07c9-11ed-a5fd-47154cb8767e, ts: "2023-10-20T01:17:22Z", author: elastic, action: create, type: create_case, status: open, severity: low, message: null}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-findcaseactivitydefaultspace
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_slos
+    title: SLOs with current status and error budget (GET /api/observability/slos)
+    description: >-
+      Service level objectives with their latest summary: status (HEALTHY / DEGRADING / VIOLATED /
+      NO_DATA), SLI value, objective target and error budget consumed/remaining. One row per SLO
+      instance (grouped SLOs return one row per instance). Filter with a KQL query on the SLO
+      summary documents (e.g. slo.name, slo.tags, status).
+    kind: entities
+    request:
+      method: GET
+      path: /api/observability/slos
+      query:
+        kqlQuery: "{{ filters.kql }}"
+        sortBy: "{{ filters.sort_by or 'error_budget_remaining' }}"
+        sortDirection: asc
+        hideStale: "true"
+    filters:
+      - {column: kql, description: "KQL over SLO summary fields, e.g. slo.name:checkout* or slo.tags:production or status:VIOLATED", examples: ["slo.tags:production"]}
+      - {column: sort_by, description: "sli_value | status | error_budget_consumed | error_budget_remaining (default)", examples: ["error_budget_remaining"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.perPage, page_size: 500, start: 1, total_path: "$.total", max_pages: 4}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: id, path: "id"}
+      - {name: instance_id, path: "instanceId", description: "'*' for ungrouped SLOs, else the groupBy value"}
+      - {name: title, path: "name"}
+      - {name: description, path: "description"}
+      - {name: status, path: "summary.status", description: "HEALTHY | DEGRADING | VIOLATED | NO_DATA"}
+      - {name: sli_value, type: DOUBLE, path: "summary.sliValue", description: "Current SLI over the time window (0-1; -1 when no data)"}
+      - {name: target, type: DOUBLE, path: "objective.target"}
+      - {name: error_budget_remaining, type: DOUBLE, path: "summary.errorBudget.remaining", description: "Fraction of budget left (negative = exhausted)"}
+      - {name: error_budget_consumed, type: DOUBLE, path: "summary.errorBudget.consumed"}
+      - {name: error_budget_initial, type: DOUBLE, path: "summary.errorBudget.initial"}
+      - {name: indicator_type, path: "indicator.type", description: "sli.apm.transactionErrorRate | sli.apm.transactionDuration | sli.kql.custom | sli.metric.custom | sli.metric.timeslice | sli.histogram.custom"}
+      - {name: indicator, type: JSON, path: "indicator.params", description: "Index, filters, good/total queries, service/environment for APM SLOs"}
+      - {name: time_window, path: "timeWindow.duration"}
+      - {name: time_window_type, path: "timeWindow.type", description: "rolling | calendarAligned"}
+      - {name: budgeting_method, path: "budgetingMethod", description: "occurrences | timeslices"}
+      - {name: group_by, type: JSON, path: "groupBy"}
+      - {name: tags, type: JSON, path: "tags"}
+      - {name: enabled, type: BOOLEAN, path: "enabled"}
+      - {name: updated_at, type: TIMESTAMP, path: "updatedAt"}
+      - {name: kql, filter_only: true}
+      - {name: sort_by, filter_only: true}
+    sort_hint: "lowest remaining error budget first"
+    pitfalls:
+      - "Summaries are refreshed by a transform every ~1 minute plus the SLO's syncDelay; the newest minutes of an incident may not be reflected yet."
+      - "NO_DATA usually means the SLO's source index/query matches nothing (wrong index or stale data), not that the service is fine."
+      - "The SLO API is space-scoped through the /s/<space> prefix (KIBANA_SPACE)."
+    examples:
+      - sql: "SELECT title, instance_id, status, sli_value, target, error_budget_remaining FROM kibana_slos WHERE status IN ('VIOLATED', 'DEGRADING') ORDER BY error_budget_remaining"
+        description: SLOs currently burning or out of budget.
+      - sql: "SELECT title, status, indicator->>'$.service' AS service, error_budget_consumed FROM kibana_slos WHERE indicator_type = 'sli.apm.transactionErrorRate'"
+        description: APM availability SLOs and the service each covers.
+    fixtures:
+      - file: slos_find.json
+        note: "Verbatim example response of the 'Get a paginated list of SLOs' API reference (findslosop)."
+        expect_rows: 1
+        expect_columns: {id: 8853df00-ae2e-11ed-90af-09bb6422b258, title: My Service Availability, status: HEALTHY, sli_value: 0.9983, target: 0.99, error_budget_remaining: 0.83, indicator_type: sli.kql.custom, time_window: 30d}
+    ui_link: "{{ source.base_url }}/app/slos"
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-findslosop
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_synthetics_monitors
+    title: Synthetics monitors (GET /api/synthetics/monitors)
+    description: >-
+      Synthetic monitor configurations (http, tcp, icmp, browser): target, schedule, locations,
+      enabled flag. Filter by status (up/down) to list currently failing monitors; check results
+      themselves live in the synthetics-* data streams (query them with elasticsearch_search).
+    kind: entities
+    request:
+      method: GET
+      path: /api/synthetics/monitors
+      query:
+        query: "{{ filters.search }}"
+        tags: "{{ filters.tag | as_list }}"
+        monitorTypes: "{{ filters.type | as_list }}"
+        locations: "{{ filters.location | as_list }}"
+        status: "{{ filters.status | as_list }}"
+        sortField: name
+        sortOrder: asc
+    filters:
+      - {column: search, description: "Free-text query over monitor names / urls", examples: ["checkout"]}
+      - {column: tag, ops: ["=", "in"], fan_out: false, examples: ["prod"]}
+      - {column: type, ops: ["=", "in"], fan_out: false, description: "http | tcp | icmp | browser", examples: ["http"]}
+      - {column: location, ops: ["=", "in"], fan_out: false, description: "Location id, e.g. us_central", examples: ["us_central"]}
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "Current monitor status filter: up | down | disabled", examples: ["down"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, total_path: "$.total", max_pages: 5}
+    response:
+      rows_path: "$.monitors[*]"
+    columns:
+      - {name: id, path: "id"}
+      - {name: config_id, path: "config_id"}
+      - {name: title, path: "name"}
+      - {name: type, path: "type"}
+      - {name: enabled, type: BOOLEAN, path: "enabled"}
+      - {name: url, description: "url (http) / host (tcp, icmp)", expr: "_['url'] or (_['urls'] if _['urls'] is string else none) or _['host']"}
+      - {name: schedule, expr: "(_['schedule']['number'] ~ _['schedule']['unit']) if _['schedule'] is mapping else _['schedule']", description: "e.g. 3m"}
+      - {name: locations, type: JSON, path: "locations[*].label"}
+      - {name: tags, type: JSON, path: "tags"}
+      - {name: namespace, path: "namespace"}
+      - {name: origin, path: "origin", description: "ui | project"}
+      - {name: max_attempts, type: BIGINT, path: "max_attempts"}
+      - {name: created_at, type: TIMESTAMP, path: "created_at"}
+      - {name: updated_at, type: TIMESTAMP, path: "updated_at"}
+      - {name: status, filter_only: true}
+      - {name: search, filter_only: true}
+      - {name: tag, filter_only: true}
+      - {name: location, filter_only: true}
+    pitfalls:
+      - "This API returns configuration, not results: the status filter selects monitors by their latest state, but up/down history is in synthetics-* (monitor.status, monitor.id, observer.geo.name, error.message)."
+      - "updated_at shows recent monitor edits, a common cause of 'monitor suddenly down'."
+    examples:
+      - sql: "SELECT title, type, url, locations FROM kibana_synthetics_monitors WHERE status = 'down'"
+        description: Monitors that are currently down.
+      - sql: "SELECT title, enabled, schedule, updated_at FROM kibana_synthetics_monitors WHERE tag = 'prod' ORDER BY updated_at DESC"
+        description: Production monitors, most recently edited first.
+    fixtures:
+      - file: synthetics_monitors.json
+        note: "Verbatim example response getSyntheticMonitorsResponseExample1 of the 'Get monitors' API reference (get-synthetic-monitors); a trailing comma in the documented JSON was removed."
+        expect_rows: 1
+        expect_columns: {id: e59142e5-1fe3-4aae-b0b0-19d6345e65a1, title: "8.8.8.8:80", type: icmp, enabled: false, url: "8.8.8.8:80", schedule: 3m}
+    ui_link: "{{ source.base_url }}/app/synthetics/monitors"
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-get-synthetic-monitors
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_apm_annotations
+    title: APM deployment annotations (GET /api/apm/services/{serviceName}/annotation/search)
+    description: >-
+      Deployment / version markers of an APM service in a time range: stored annotations created
+      via the annotation API plus version changes derived from service.version. One row per
+      annotation. Requires service.
+    kind: changes
+    request:
+      method: GET
+      path: "/api/apm/services/{{ filters.service | urlencode }}/annotation/search"
+      query:
+        environment: "{{ filters.env }}"
+        start: "{{ time.start | rfc3339_ms }}"
+        end: "{{ time.end | rfc3339_ms }}"
+    filters:
+      - {column: service, required: true, description: "APM service.name", examples: ["opbeans-node"]}
+      - {column: env, description: "service.environment (ENVIRONMENT_ALL for all)", examples: ["production"]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d}
+    response:
+      rows_path: "$.annotations[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "['@timestamp']", transform: epoch_ms, description: "Annotation time (epoch ms in the API)"}
+      - {name: id, path: "id"}
+      - {name: title, path: "text"}
+      - {name: version, path: "text", description: "Version string for type=version annotations"}
+      - {name: type, path: "type", description: "version"}
+      - {name: service, filter_only: true}
+      - {name: env, filter_only: true}
+    pitfalls:
+      - "Widen ts to well before the alert start (e.g. 24h): the deploy that caused an incident precedes the first alert."
+      - "Derived version annotations only exist when agents report service.version."
+    examples:
+      - sql: >-
+          SELECT ts, version FROM kibana_apm_annotations
+          WHERE service = 'checkout-api' AND ts BETWEEN TIMESTAMP '2026-09-30 12:00:00' AND TIMESTAMP '2026-10-01 12:00:00' ORDER BY ts
+        description: Deployments of a service in the 24h before the incident.
+    fixtures:
+      - file: apm_annotations.json
+        note: "Verbatim example response of the 'Search for annotations' API reference (getannotation)."
+        expect_rows: 2
+        expect_columns: {ts: "2025-01-01T00:00:00Z", version: opbeans-node@2.0.0, type: version}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-getannotation
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_data_views
+    title: Data views (GET /api/data_views)
+    description: Data views (index patterns) defined in Kibana; a quick map of which index patterns teams actually use.
+    kind: entities
+    request:
+      method: GET
+      path: /api/data_views
+    response:
+      rows_path: "$.data_view[*]"
+    columns:
+      - {name: id, path: "id"}
+      - {name: name, path: "name"}
+      - {name: index_pattern, path: "title", description: "Index pattern string (use as elasticsearch_* index_pattern)"}
+      - {name: namespaces, type: JSON, path: "namespaces"}
+    examples:
+      - sql: "SELECT name, index_pattern FROM kibana_data_views ORDER BY name"
+        description: Which index patterns exist for logs/metrics.
+    fixtures:
+      - file: data_views.json
+        note: "Verbatim example response of the 'Get all data views' API reference (getalldataviewsdefault)."
+        expect_min_rows: 2
+        expect_columns: {id: ff959d40-b880-11e8-a6d9-e546fe2bba5f, name: Kibana Sample Data eCommerce, index_pattern: kibana_sample_data_ecommerce}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-getalldataviewsdefault
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_security_alerts
+    title: Security detection alerts (POST /api/detection_engine/signals/search)
+    description: >-
+      Elastic Security detection alerts in the current space via the detection-engine search
+      API (Query DSL body). One row per alert, newest first. Pushdown: workflow_status, severity,
+      rule name, host, query.
+    kind: alerts
+    request:
+      method: POST
+      path: /api/detection_engine/signals/search
+      body:
+        size: "{{ [limit or 200, 1000] | min }}"
+        sort:
+          - "@timestamp": {order: desc}
+        fields: ["@timestamp", "kibana.*", "host.name", "user.name", "source.ip", "destination.ip", "process.name"]
+        _source: false
+        query:
+          bool:
+            filter:
+              - range:
+                  "@timestamp":
+                    gte: "{{ time.start | rfc3339_ms }}"
+                    lte: "{{ time.end | rfc3339_ms }}"
+              - "{{ {'terms': {'kibana.alert.workflow_status': filters.workflow_status | as_list} } if filters.workflow_status else None }}"
+              - "{{ {'terms': {'kibana.alert.severity': filters.severity | as_list} } if filters.severity else None }}"
+              - "{{ {'terms': {'kibana.alert.rule.name': filters.rule_name | as_list} } if filters.rule_name else None }}"
+              - "{{ {'terms': {'host.name': filters.host | as_list} } if filters.host else None }}"
+              - "{{ {'query_string': {'query': filters.query, 'default_operator': 'AND'} } if filters.query else None }}"
+            must_not:
+              - exists: {field: kibana.alert.building_block_type}
+    filters:
+      - {column: workflow_status, ops: ["=", "in"], fan_out: false, description: "open | acknowledged | closed", examples: ["open"]}
+      - {column: severity, ops: ["=", "in"], fan_out: false, description: "low | medium | high | critical", examples: ["high"]}
+      - {column: title, param: rule_name, ops: ["=", "in"], fan_out: false, description: "Detection rule name", examples: ["Unusual Process Execution"]}
+      - {column: host, ops: ["=", "in"], fan_out: false, examples: ["Host-f43kkddfyc"]}
+      - {column: query, description: "Lucene query_string over alert fields", examples: ['user.name:root']}
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    response:
+      rows_path: "$.hits.hits[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, transform: auto_time, expr: "((_['fields'] or {})['@timestamp'] or [none])[0]"}
+      - {name: original_time, type: TIMESTAMP, transform: auto_time, expr: "((_['fields'] or {})['kibana.alert.original_time'] or [none])[0]"}
+      - {name: id, expr: "((_['fields'] or {})['kibana.alert.uuid'] or [none])[0] or _['_id']"}
+      - {name: title, expr: "((_['fields'] or {})['kibana.alert.rule.name'] or [none])[0]"}
+      - {name: rule_id, expr: "((_['fields'] or {})['kibana.alert.rule.uuid'] or [none])[0]"}
+      - {name: severity, expr: "((_['fields'] or {})['kibana.alert.severity'] or [none])[0]"}
+      - {name: risk_score, type: DOUBLE, expr: "((_['fields'] or {})['kibana.alert.risk_score'] or [none])[0]"}
+      - {name: status, expr: "((_['fields'] or {})['kibana.alert.status'] or [none])[0]"}
+      - {name: workflow_status, expr: "((_['fields'] or {})['kibana.alert.workflow_status'] or [none])[0]"}
+      - {name: message, expr: "((_['fields'] or {})['kibana.alert.reason'] or [none])[0]"}
+      - {name: host, expr: "((_['fields'] or {})['host.name'] or [none])[0]"}
+      - {name: user, expr: "((_['fields'] or {})['user.name'] or [none])[0]"}
+      - {name: doc, type: JSON, path: "fields"}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Building-block alerts are excluded (as in the Alerts UI)."
+      - "Needs the Security 'Alerts' read privilege in the space; the same documents are also readable from .alerts-security.alerts-<space> via elasticsearch_alerts."
+    examples:
+      - sql: "SELECT ts, title, severity, host, user, message FROM kibana_security_alerts WHERE workflow_status = 'open' AND severity IN ('high', 'critical') ORDER BY ts DESC"
+        description: Open high/critical security alerts in the window.
+    fixtures:
+      - file: security_alerts_search.json
+        note: "Envelope from the documented signals/search example response with one alert hit built from the documented Security alert schema fields (fields-API format)."
+        expect_rows: 1
+        expect_columns: {ts: "2025-01-17T09:12:44Z", title: Unusual Process Execution, severity: high, risk_score: 73.0, host: Host-f43kkddfyc, workflow_status: open}
+      - file: security_alerts_search_aggs.json
+        note: "Verbatim example response of the signals/search API reference (aggregation-only, no hits): must produce 0 rows without error."
+        expect_rows: 0
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-searchalerts
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_connectors
+    title: Connectors (GET /api/actions/connectors)
+    description: >-
+      Action connectors that rules notify through (Slack, PagerDuty, email, webhook, index,
+      Jira, ServiceNow ...): type, whether preconfigured, deprecated, missing secrets, and how
+      many rules reference them. Join kibana_alerting_rules.actions[].id to id to see where a
+      rule's notifications go.
+    kind: entities
+    request:
+      method: GET
+      path: /api/actions/connectors
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: "id"}
+      - {name: name, path: "name"}
+      - {name: type, path: "connector_type_id", description: ".slack, .slack_api, .pagerduty, .email, .webhook, .index, .jira, .servicenow, .opsgenie, .teams ..."}
+      - {name: is_preconfigured, type: BOOLEAN, path: "is_preconfigured"}
+      - {name: is_deprecated, type: BOOLEAN, path: "is_deprecated"}
+      - {name: is_missing_secrets, type: BOOLEAN, path: "is_missing_secrets", description: "true: secrets lost (e.g. encryption key changed) - notifications through it fail"}
+      - {name: is_system_action, type: BOOLEAN, path: "is_system_action"}
+      - {name: referenced_by_count, type: BIGINT, path: "referenced_by_count", description: "Rules using this connector"}
+      - {name: config, type: JSON, path: "config", description: "Non-secret configuration (index name, URL, channel ...)"}
+    pitfalls:
+      - "Connector execution failures are not listed here; a rule whose last_run_outcome is warning often means its action failed (see kibana_alerting_rules.last_run_warning)."
+    examples:
+      - sql: "SELECT name, type, referenced_by_count, is_missing_secrets FROM kibana_connectors ORDER BY referenced_by_count DESC"
+        description: Notification channels and how many rules use each.
+      - sql: "SELECT name, type FROM kibana_connectors WHERE is_missing_secrets OR is_deprecated"
+        description: Broken or deprecated connectors (why nobody got paged).
+    fixtures:
+      - file: connectors.json
+        note: "Verbatim example response getConnectorsResponse of the 'Get all connectors' API reference (get-actions-connectors)."
+        expect_rows: 2
+        expect_columns: {id: preconfigured-email-connector, name: my-preconfigured-email-notification, type: .email, is_preconfigured: true, referenced_by_count: 0, is_missing_secrets: null}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-get-actions-connectors
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_status
+    title: Kibana status (GET /api/status)
+    description: >-
+      Overall Kibana health (available / degraded / unavailable / critical), Elasticsearch and
+      saved-objects service levels, degraded plugins and the Kibana version. One row. Check when
+      Kibana APIs fail or alerting rules stop running.
+    kind: entities
+    request:
+      method: GET
+      path: /api/status
+    response:
+      rows_path: "$"
+    columns:
+      - {name: name, path: "name"}
+      - {name: version, path: "version.number"}
+      - {name: status, path: "status.overall.level", description: "available | degraded | unavailable | critical"}
+      - {name: summary, path: "status.overall.summary"}
+      - {name: elasticsearch_status, path: "status.core.elasticsearch.level"}
+      - {name: elasticsearch_summary, path: "status.core.elasticsearch.summary"}
+      - {name: saved_objects_status, path: "status.core.savedObjects.level"}
+      - name: degraded_plugins
+        type: JSON
+        description: "Names of plugins whose level is not 'available'"
+        expr: "(_['status']['plugins'] or {}).items() | selectattr('1.level', 'ne', 'available') | map(attribute='0') | list"
+      - {name: plugins, type: JSON, path: "status.plugins"}
+      - {name: es_queued_requests, type: BIGINT, path: "metrics.elasticsearch_client.totalQueuedRequests"}
+      - {name: updated_at, type: TIMESTAMP, path: "metrics.last_updated"}
+    pitfalls:
+      - "Without authentication (or without sufficient privileges) Kibana returns a redacted status with only the overall level; the other columns are then null."
+    examples:
+      - sql: "SELECT status, summary, elasticsearch_status, degraded_plugins, version FROM kibana_status"
+        description: Is Kibana (and its Elasticsearch connection) healthy?
+    fixtures:
+      - file: status.json
+        note: "Verbatim example response statusAvailableResponse of the 'Get Kibana's current status' API reference (get-status)."
+        expect_rows: 1
+        expect_columns: {name: kibana, version: 9.3.0, status: available, elasticsearch_status: available, saved_objects_status: available, degraded_plugins: "[]", es_queued_requests: 0}
+      - file: status_redacted.json
+        note: "Verbatim example response statusRedactedResponse of the same reference (unauthenticated / redacted)."
+        expect_rows: 1
+        expect_columns: {status: available, version: null, elasticsearch_status: null}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-get-status
+
+  # ------------------------------------------------------------------------------------------
+  - name: kibana_alerting_health
+    title: Alerting framework health (GET /api/alerting/_health)
+    description: >-
+      Health of the alerting framework itself: rule execution, decryption and read health with
+      the time each was last checked, plus whether a permanent encryption key is set. One row.
+      Check when alerts that should have fired did not.
+    kind: entities
+    request:
+      method: GET
+      path: /api/alerting/_health
+    response:
+      rows_path: "$"
+    columns:
+      - {name: execution_status, path: "alerting_framework_health.execution_health.status", description: "ok | warn | error"}
+      - {name: execution_checked_at, type: TIMESTAMP, path: "alerting_framework_health.execution_health.timestamp"}
+      - {name: decryption_status, path: "alerting_framework_health.decryption_health.status"}
+      - {name: read_status, path: "alerting_framework_health.read_health.status"}
+      - {name: has_permanent_encryption_key, type: BOOLEAN, path: "has_permanent_encryption_key", description: "false: rules and connectors cannot be decrypted after a restart"}
+      - {name: is_sufficiently_secure, type: BOOLEAN, path: "is_sufficiently_secure"}
+      - {name: health, type: JSON, path: "alerting_framework_health"}
+    pitfalls:
+      - "execution_status warn / error means rules are failing or falling behind cluster-wide (task manager overload): treat missing alerts as a monitoring outage, not as 'all healthy'."
+    examples:
+      - sql: "SELECT execution_status, decryption_status, read_status, execution_checked_at, has_permanent_encryption_key FROM kibana_alerting_health"
+        description: Is the alerting framework running rules normally?
+    fixtures:
+      - file: alerting_health.json
+        note: "Verbatim example response getAlertingHealthResponse of the 'Get the alerting framework health' API reference (getalertinghealth)."
+        expect_rows: 1
+        expect_columns: {execution_status: ok, decryption_status: ok, read_status: ok, execution_checked_at: "2023-01-13T01:28:00Z", has_permanent_encryption_key: true}
+    docs_url: https://www.elastic.co/docs/api/doc/kibana/operation/operation-getalertinghealth
+
+roles:
+  alert_rules:
+    table: kibana_alerting_rules
+    columns: {id: id, name: name, query: params, interval: schedule_interval, state: execution_status}
+  incidents:
+    table: kibana_cases
+    columns: {id: id, title: title, state: status, severity: severity, ts: created_at, author: author, url: external_url}
+  slo:
+    table: kibana_slos
+    columns: {id: id, title: title, state: status, value: sli_value, target: target, budget_remaining: error_budget_remaining}
+  change_events:
+    table: kibana_apm_annotations
+    filters: {service: "{{ service }}", env: "{{ env or '' }}"}
+    columns: {ts: ts, service: service, title: title, version: version}

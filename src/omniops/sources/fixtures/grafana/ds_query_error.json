@@ -1,0 +1,9 @@
+{
+  "results": {
+    "A": {
+      "status": 400,
+      "error": "bad_data: invalid parameter \"query\": 1:44: parse error: unexpected right brace '}'",
+      "errorSource": "downstream"
+    }
+  }
+}

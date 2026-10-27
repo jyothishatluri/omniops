@@ -1,0 +1,36 @@
+{
+  "platform": "edgedelta",
+  "description": "Edge Delta group-by log monitor in the ALERT state, posted through the Slack legacy integration (incoming webhook) with a markdown notification template built from the documented monitor variables.",
+  "provenance": "Edge Delta docs, Monitor Notifications: states ALERT / WARNING / OK / NO DATA / RECOVERED; the default notification carries the monitor name and a scope summary naming the affected group; templates use {{monitor.name}}, the monitor link https://app.edgedelta.com/monitors/{{monitor.id}}, {{value}}, {{comparator}}, {{alert_threshold}}, group-by attributes such as {{service.name}} and {{k8s.namespace.name}}, {{evaluated_from}} / {{evaluated_to}} and {{last_triggered_at}}, with {{#is_alert}} / {{#is_recovery}} blocks and bold state labels like '**ALERT**: ...'. Slack setup: an incoming-webhook app added as a Slack legacy integration and picked with @ in the Notifications section. The docs do not state how the time variables render; RFC 3339 is used here, and the parser accepts any format parse_time_text reads. Line layout is the template author's.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B17EDGEDLT",
+    "username": "Edge Delta",
+    "text": "**ALERT**: An alert notification has been triggered for your system.\nMonitor: <https://app.edgedelta.com/monitors/1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60789|Checkout error log spike>\nGroup: service.name=checkout, k8s.namespace.name=shop\nValue: 512\nAlert threshold: 200\nEvaluated: 2026-10-20T13:57:00Z to 2026-10-20T14:02:00Z\nLast triggered at: 2026-10-20T14:02:00Z",
+    "ts": "1792504957.001100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.001100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "edgedelta",
+    "rule_id": "1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60789",
+    "rule_name": "Checkout error log spike",
+    "title": "[ALERT] Checkout error log spike",
+    "status": "firing",
+    "raw_status": "ALERT",
+    "is_recovery": false,
+    "service": "checkout",
+    "namespace": "shop",
+    "group": "service.name=checkout, k8s.namespace.name=shop",
+    "value": "512",
+    "threshold": "200",
+    "triggered_at": "2026-10-20T14:02:00Z",
+    "window_start": "2026-10-20T13:57:00Z",
+    "window_end": "2026-10-20T14:02:00Z",
+    "url": "https://app.edgedelta.com/monitors/1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60789",
+    "tags": {"service.name": "checkout", "k8s.namespace.name": "shop"},
+    "anchor": {"source": "link_window", "window_start": "2026-10-20T13:47:00Z", "window_end": "2026-10-20T14:07:00Z"}
+  }
+}

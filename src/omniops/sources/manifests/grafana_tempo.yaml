@@ -1,0 +1,62 @@
+# Grafana Tempo reached through Grafana's datasource proxy:
+#   GET {GRAFANA_URL}/api/datasources/proxy/uid/{GRAFANA_TEMPO_UID}/api/...
+# (https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/data_source/ -
+#  "Data source proxy calls": GET /api/datasources/proxy/uid/:uid/*)
+# Grafana forwards the request to the Tempo URL configured on the datasource and injects the
+# datasource's own credentials / tenant headers, so only a Grafana token is needed here. Bodies
+# come back unchanged, so every table, fixture and role comes from templates/tempo.yaml (tables
+# are renamed grafana_tempo_*). This is how the o11y-bench stack exposes Tempo (datasource uid
+# "tempo", Grafana on :3000 with anonymous Admin).
+source: grafana_tempo
+display_name: Grafana Tempo (via Grafana datasource proxy)
+vendor: Grafana Labs
+description: Tempo TraceQL search, trace by id, TraceQL metrics and attribute discovery queried through a Grafana Tempo datasource (no direct Tempo access or Tempo credentials needed).
+extends: tempo
+base_url: "{{ env.GRAFANA_URL }}/api/datasources/proxy/uid/{{ env.GRAFANA_TEMPO_UID }}"
+ui_base_url: "{{ env.GRAFANA_URL }}"
+env:
+  - {name: GRAFANA_URL, description: "Grafana base URL, e.g. http://localhost:3000 or https://<stack>.grafana.net (no trailing slash)"}
+  - {name: GRAFANA_TOKEN, description: "Grafana service account token (Viewer is enough: datasources:query). Optional when anonymous access is enabled (o11y-bench).", secret: true}
+  - {name: GRAFANA_USERNAME, description: "Optional Grafana basic-auth user (only if basic auth is enabled; GRAFANA_TOKEN wins)"}
+  - {name: GRAFANA_PASSWORD, description: "Optional Grafana basic-auth password", secret: true}
+  - {name: GRAFANA_TEMPO_UID, description: "UID of the Tempo datasource in Grafana (Connections > Data sources, or GET /api/datasources)", default: tempo}
+  - {name: GRAFANA_ORG_ID, description: "Optional Grafana org id (sent as X-Grafana-Org-Id); tokens are already org-scoped"}
+required_env: [GRAFANA_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Bearer ' ~ env.GRAFANA_TOKEN) if env.GRAFANA_TOKEN
+         else (('Basic ' ~ ((env.GRAFANA_USERNAME ~ ':' ~ (env.GRAFANA_PASSWORD or '')) | b64)) if env.GRAFANA_USERNAME else None) }}
+headers:
+  X-Grafana-Org-Id: "{{ env.GRAFANA_ORG_ID }}"
+rate_limit:
+  concurrency: 4
+  notes: >-
+    Grafana's data proxy times out after [dataproxy] timeout (default 30s) and answers 502/504;
+    Tempo's per-query limits still apply behind it (search max_duration 168h, metrics
+    max_duration 24h, max_spans_per_span_set 100).
+pitfalls:
+  - "Search returns the FIRST N matching traces Tempo finds (limit, default 100 here), not the newest and not all of them: aggregates over grafana_tempo_search / grafana_tempo_search_spans are samples. Use grafana_tempo_metrics_instant / grafana_tempo_metrics_range (TraceQL metrics) for exact counts, rates and percentiles, and set most_recent = true for newest-first examples."
+  - "Unknown attributes or values match nothing and return 0 rows, not an error. Check names with grafana_tempo_tag_names and values with grafana_tempo_tag_values before concluding that traces are absent. Attribute scope matters: resource.service.name, not span.service.name."
+  - "OpenTelemetry semantic conventions changed: older SDKs emit span.http.method / span.http.status_code / span.http.url, newer ones span.http.request.method / span.http.response.status_code / span.url.full. The http_* columns accept both; inside TraceQL you must use the attribute your services actually emit."
+  - "TraceQL metrics duration values (quantile_over_time(duration, .99), avg_over_time(duration) ...) are in SECONDS; span/trace search durations in these tables are milliseconds (duration_ms)."
+  - "Trace IDs in search results have leading zeros trimmed; grafana_tempo_trace accepts both forms. Compare with ltrim(trace_id, '0') when joining across tables."
+  - "Edge spans (webapp, api-gateway) wrap the backend call and repeat its error/latency: attribute blame to the deepest failing span or the span with the most own (self) time, not to the root."
+  - "Grafana's data proxy gives up after 30s by default (HTTP 502/504): narrow the window or the query - that is not a schema problem."
+  - "HTTP 401/403 is a Grafana permission problem (token lacks datasources:query on this datasource); 404 'data source not found' means GRAFANA_TEMPO_UID is wrong (list datasources to find the uid). A 404 from grafana_tempo_trace with Tempo's own 'trace not found' body is a missing trace and returns 0 rows."
+  - "Do not send X-Scope-OrgID yourself: the tenant comes from the datasource configuration in Grafana."
+  - "Retention is deployment-specific (Tempo default 14 days via compactor block_retention; Grafana Cloud Traces 30 days). An empty old window may simply be past retention."
+tables:
+  - name: grafana_tempo_search
+    ui_link: >-
+      {{ env.GRAFANA_URL }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'a': {'datasource': env.GRAFANA_TEMPO_UID, 'queries': [{'refId': 'A', 'queryType': 'traceql', 'tableType': 'traces', 'limit': 20, 'query': (filters.query or '{ }'), 'datasource': {'type': 'tempo', 'uid': env.GRAFANA_TEMPO_UID} }], 'range': {'from': (time.start | epoch_ms | string), 'to': (time.end | epoch_ms | string)} } } | tojson | urlencode }}
+  - name: grafana_tempo_search_spans
+    ui_link: >-
+      {{ env.GRAFANA_URL }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'a': {'datasource': env.GRAFANA_TEMPO_UID, 'queries': [{'refId': 'A', 'queryType': 'traceql', 'tableType': 'spans', 'limit': 20, 'query': (filters.query or '{ }'), 'datasource': {'type': 'tempo', 'uid': env.GRAFANA_TEMPO_UID} }], 'range': {'from': (time.start | epoch_ms | string), 'to': (time.end | epoch_ms | string)} } } | tojson | urlencode }}
+  - name: grafana_tempo_trace
+    ui_link: >-
+      {{ env.GRAFANA_URL }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'a': {'datasource': env.GRAFANA_TEMPO_UID, 'queries': [{'refId': 'A', 'queryType': 'traceql', 'query': (filters.trace_id | string), 'datasource': {'type': 'tempo', 'uid': env.GRAFANA_TEMPO_UID} }], 'range': {'from': 'now-24h', 'to': 'now'} } } | tojson | urlencode }}
+  - name: grafana_tempo_metrics_range
+    ui_link: >-
+      {{ env.GRAFANA_URL }}/explore?schemaVersion=1&orgId={{ env.GRAFANA_ORG_ID or 1 }}&panes={{ {'a': {'datasource': env.GRAFANA_TEMPO_UID, 'queries': [{'refId': 'A', 'queryType': 'traceql', 'metricsQueryType': 'range', 'query': filters.query, 'datasource': {'type': 'tempo', 'uid': env.GRAFANA_TEMPO_UID} }], 'range': {'from': (time.start | epoch_ms | string), 'to': (time.end | epoch_ms | string)} } } | tojson | urlencode }}

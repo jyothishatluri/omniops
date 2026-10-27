@@ -1,0 +1,11 @@
+{ "init_offset" : 0,
+  "messages" : [ { "text" : "base lispy: [ AND index::web ]",
+        "type" : "DEBUG"
+      },
+      { "text" : "Error in 'lookup' command: Could not construct lookup 'missing_lookup, host'. See search.log for more details.",
+        "type" : "ERROR"
+      }
+    ],
+  "preview" : false,
+  "results" : [ ]
+}

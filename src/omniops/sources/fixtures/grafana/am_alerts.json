@@ -1,0 +1,59 @@
+[
+  {
+    "annotations": {
+      "summary": "payment-service 5xx ratio above 5%",
+      "runbook_url": "https://runbooks.example.com/payments/5xx"
+    },
+    "endsAt": "2026-10-01T12:04:00.000Z",
+    "fingerprint": "6d1f4a2b9c3e8f07",
+    "generatorURL": "http://localhost:3000/alerting/grafana/pay-err-rate/view?orgId=1",
+    "labels": {
+      "__alert_rule_uid__": "pay-err-rate",
+      "alertname": "PaymentServiceHighErrorRate",
+      "grafana_folder": "Payments",
+      "severity": "critical",
+      "service": "payment-service"
+    },
+    "receivers": [
+      {
+        "name": "oncall-slack"
+      }
+    ],
+    "startsAt": "2026-10-01T11:42:00.000Z",
+    "status": {
+      "inhibitedBy": [],
+      "silencedBy": [],
+      "state": "active"
+    },
+    "updatedAt": "2026-10-01T12:00:00.000Z"
+  },
+  {
+    "annotations": {
+      "summary": "order-service p95 latency above 1s"
+    },
+    "endsAt": "2026-10-01T12:04:00.000Z",
+    "fingerprint": "0a9b8c7d6e5f4321",
+    "generatorURL": "http://localhost:3000/alerting/grafana/ord-latency/view?orgId=1",
+    "labels": {
+      "__alert_rule_uid__": "ord-latency",
+      "alertname": "OrderServiceLatencyHigh",
+      "grafana_folder": "Orders",
+      "severity": "warning",
+      "service": "order-service"
+    },
+    "receivers": [
+      {
+        "name": "oncall-slack"
+      }
+    ],
+    "startsAt": "2026-10-01T11:50:00.000Z",
+    "status": {
+      "inhibitedBy": [],
+      "silencedBy": [
+        "5c0e1d7a-2f3b-4c4d-9e8f-0a1b2c3d4e5f"
+      ],
+      "state": "suppressed"
+    },
+    "updatedAt": "2026-10-01T12:00:00.000Z"
+  }
+]

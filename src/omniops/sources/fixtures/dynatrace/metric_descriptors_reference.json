@@ -1,0 +1,96 @@
+{
+ "metrics": [
+  {
+   "aggregationTypes": [
+    "auto",
+    "value"
+   ],
+   "created": 1597400123451,
+   "dduBillable": false,
+   "defaultAggregation": {
+    "type": "value"
+   },
+   "description": "Percentage of user-space CPU time currently utilized, per host.",
+   "dimensionDefinitions": [
+    {
+     "displayName": "Host",
+     "index": 0,
+     "key": "dt.entity.host",
+     "name": "Host",
+     "type": "ENTITY"
+    }
+   ],
+   "displayName": "CPU user",
+   "entityType": [
+    "HOST"
+   ],
+   "lastWritten": 1597400717783,
+   "metricId": "builtin:host.cpu.user:splitBy(\"dt.entity.host\"):max:fold",
+   "metricValueType": {
+    "type": "unknown"
+   },
+   "tags": [],
+   "transformations": [
+    "filter",
+    "fold",
+    "limit",
+    "merge",
+    "names",
+    "parents",
+    "timeshift",
+    "rate",
+    "sort",
+    "last",
+    "splitBy"
+   ],
+   "unit": "Percent"
+  },
+  {
+   "aggregationTypes": [
+    "auto",
+    "value"
+   ],
+   "created": 1597400123451,
+   "dduBillable": false,
+   "defaultAggregation": {
+    "type": "value"
+   },
+   "description": "Percentage of user-space CPU time currently utilized, per host.",
+   "dimensionDefinitions": [
+    {
+     "displayName": "Host",
+     "index": 0,
+     "key": "dt.entity.host",
+     "name": "Host",
+     "type": "ENTITY"
+    }
+   ],
+   "displayName": "CPU user",
+   "entityType": [
+    "HOST"
+   ],
+   "lastWritten": 1597400717783,
+   "metricId": "builtin:host.cpu.user:splitBy()",
+   "metricValueType": {
+    "type": "unknown"
+   },
+   "tags": [],
+   "transformations": [
+    "filter",
+    "fold",
+    "limit",
+    "merge",
+    "names",
+    "parents",
+    "timeshift",
+    "rate",
+    "sort",
+    "last",
+    "splitBy"
+   ],
+   "unit": "Percent"
+  }
+ ],
+ "nextPageKey": "ABCDEFABCDEFABCDEF_",
+ "totalCount": 3
+}

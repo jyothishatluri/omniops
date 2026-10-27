@@ -1,0 +1,39 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "aiIssues": {
+          "issues": {
+            "issues": [
+              {
+                "issueId": "bda33b52-c70b-47b9-abe3-9e859a394037",
+                "priority": "CRITICAL",
+                "state": "ACTIVATED",
+                "title": [
+                  "Signal lost for 5 minutes on 'Percent All Facet'"
+                ]
+              },
+              {
+                "issueId": "242c713c-7654-491c-808e-3aa7fc44812b",
+                "priority": "MEDIUM",
+                "state": "CREATED",
+                "title": [
+                  "Anomaly: Non-web throughput"
+                ]
+              },
+              {
+                "issueId": "f19c9803-fb24-4d5d-9c35-16f659bceb3a",
+                "priority": "MEDIUM",
+                "state": "CLOSED",
+                "title": [
+                  "Anomaly: Error rate"
+                ]
+              }
+            ],
+            "nextCursor": "=ATN"
+          }
+        }
+      }
+    }
+  }
+}

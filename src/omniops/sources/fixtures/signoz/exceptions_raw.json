@@ -1,0 +1,19 @@
+{
+  "status": "success",
+  "data": {
+    "type": "raw",
+    "data": {
+      "results": [
+        {
+          "queryName": "exceptions",
+          "nextCursor": "",
+          "rows": [
+            {"data": {"serviceName": "checkout", "exceptionType": "java.net.SocketTimeoutException", "exceptionMessage": "Read timed out", "groupID": "9b0c2ed2a4f74d3c8e1f6a7b5c4d3e2f", "count": 412, "first_seen": "2026-10-01T11:02:13.004Z", "last_seen": "2026-10-01T11:58:40.217Z", "sample_trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"}},
+            {"data": {"serviceName": "frontend", "exceptionType": "TimeoutError", "exceptionMessage": "upstream timeout", "groupID": "1f2e3d4c5b6a79881726354433221100", "count": 37, "first_seen": "2026-10-01T11:05:00.120Z", "last_seen": "2026-10-01T11:57:59.900Z", "sample_trace_id": "a3ce929d0e0e47364bf92f3577b34da6"}}
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 5021, "bytesScanned": 310000, "durationMs": 41}
+  }
+}

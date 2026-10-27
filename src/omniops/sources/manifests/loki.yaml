@@ -1,0 +1,30 @@
+# Grafana Loki reached directly (self-hosted single/multi-tenant, Grafana Enterprise Logs,
+# Grafana Cloud Logs). All tables come from templates/loki.yaml.
+# Auth (https://grafana.com/docs/loki/latest/reference/loki-http-api/#authentication):
+#   - self-hosted single tenant (auth_enabled: false): nothing
+#   - self-hosted multi-tenant: X-Scope-OrgID: <tenant> (several tenants: "t1|t2")
+#   - GEL: basic auth, username = tenant, password = access policy token
+#   - Grafana Cloud: basic auth, username = Loki instance ID ("User"), password = Cloud Access
+#     Policy token with logs:read
+source: loki
+display_name: Grafana Loki
+extends: loki
+base_url: "{{ env.LOKI_URL }}"
+env:
+  - {name: LOKI_URL, description: "Loki base URL without /loki/api/v1, e.g. http://loki:3100 or the Grafana Cloud Logs URL from the Cloud Portal (https://logs-prod-XXX.grafana.net)"}
+  - {name: LOKI_TENANT_ID, description: "Optional X-Scope-OrgID for multi-tenant Loki (several tenants separated by |). Not needed for Grafana Cloud."}
+  - {name: LOKI_USERNAME, description: "Optional basic-auth user: Grafana Cloud Loki instance ID / GEL tenant"}
+  - {name: LOKI_PASSWORD, description: "Optional basic-auth password: Grafana Cloud access policy token (logs:read) / GEL token", secret: true}
+  - {name: LOKI_TOKEN, description: "Optional bearer token for a reverse proxy in front of Loki (ignored when LOKI_USERNAME is set)", secret: true}
+required_env: [LOKI_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Basic ' ~ ((env.LOKI_USERNAME ~ ':' ~ (env.LOKI_PASSWORD or '')) | b64)) if env.LOKI_USERNAME
+         else (('Bearer ' ~ env.LOKI_TOKEN) if env.LOKI_TOKEN else None) }}
+headers:
+  X-Scope-OrgID: "{{ env.LOKI_TENANT_ID }}"
+append:
+  pitfalls:
+    - "HTTP 401/403 or 'no org id' is an auth/tenant problem, not a query problem: multi-tenant Loki needs the right X-Scope-OrgID (LOKI_TENANT_ID); GEL / Grafana Cloud need basic auth with an access policy token that has logs:read. A wrong tenant silently returns 0 rows."

@@ -1,0 +1,49 @@
+{
+  "platform": "azure",
+  "description": "Azure Monitor metric alert (common alert schema) relayed to Slack by an action group -> Logic App 'Post message' step, showing the essentials fields and a portal link.",
+  "provenance": "Azure Monitor has no native Slack receiver; action groups call a webhook/Logic App with the common alert schema (essentials: alertId, alertRule, severity Sev0-Sev4, signalType, monitorCondition Fired/Resolved, monitoringService, alertTargetIDs (lower-cased resource ids), firedDateTime with 7 fractional digits). The Slack text is the relay's own layout of those fields (reconstructed, typical Logic App template).",
+  "event": {
+    "type": "message",
+    "user": "U10LOGICAP",
+    "bot_id": "B10AZLOGIC",
+    "app_id": "A10AZLOGIC",
+    "bot_profile": {"id": "B10AZLOGIC", "app_id": "A10AZLOGIC", "name": "Azure Logic Apps", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "danger",
+        "fallback": "Fired: checkout-api-5xx (Sev1)",
+        "title": "Fired: checkout-api-5xx (Sev1)",
+        "title_link": "https://portal.azure.com/#view/Microsoft_Azure_Monitoring_Alerts/AlertDetails.ReactView/alertId~/%2Fsubscriptions%2F11111111-2222-3333-4444-555555555555%2Fproviders%2FMicrosoft.AlertsManagement%2Falerts%2F0a1b2c3d-1111-2222-3333-444455556666",
+        "text": "HTTP 5xx count above 50 in 5 minutes on checkout-api",
+        "fields": [
+          {"title": "Alert rule", "value": "checkout-api-5xx", "short": true},
+          {"title": "Severity", "value": "Sev1", "short": true},
+          {"title": "Monitor condition", "value": "Fired", "short": true},
+          {"title": "Signal type", "value": "Metric", "short": true},
+          {"title": "Monitoring service", "value": "Platform", "short": true},
+          {"title": "Fired at", "value": "2026-10-20T14:01:52.1234567Z", "short": true},
+          {"title": "Affected resource", "value": "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.web/sites/checkout-api", "short": false},
+          {"title": "Alert ID", "value": "/subscriptions/11111111-2222-3333-4444-555555555555/providers/Microsoft.AlertsManagement/alerts/0a1b2c3d-1111-2222-3333-444455556666", "short": false}
+        ]
+      }
+    ],
+    "ts": "1792504960.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504960.000100",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "azure",
+    "rule_name": "checkout-api-5xx",
+    "status": "firing",
+    "raw_status": "Fired",
+    "severity": "Sev1",
+    "triggered_at": "2026-10-20T14:01:52Z",
+    "group": "checkout-api",
+    "incident_id": "/subscriptions/11111111-2222-3333-4444-555555555555/providers/Microsoft.AlertsManagement/alerts/0a1b2c3d-1111-2222-3333-444455556666",
+    "url": "https://portal.azure.com/#view/Microsoft_Azure_Monitoring_Alerts/AlertDetails.ReactView/alertId~/%2Fsubscriptions%2F11111111-2222-3333-4444-555555555555%2Fproviders%2FMicrosoft.AlertsManagement%2Falerts%2F0a1b2c3d-1111-2222-3333-444455556666",
+    "tags": {"resource_group": "rg-shop-prod", "resource_type": "microsoft.web/sites", "resource": "checkout-api", "signal_type": "Metric", "monitoring_service": "Platform"}
+  }
+}

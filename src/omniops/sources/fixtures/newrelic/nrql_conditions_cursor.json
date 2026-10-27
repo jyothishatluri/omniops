@@ -1,0 +1,26 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "alerts": {
+          "nrqlConditionsSearch": {
+            "nextCursor": "WOwfJ4+TWm9QTFeKMGyg+w==:QqkI8S4+Wwnpno6z+uk8kQ==",
+            "nrqlConditions": [
+              {
+                "id": "4432",
+                "name": "Baseline Condition",
+                "type": "BASELINE"
+              },
+              {
+                "id": "443",
+                "name": "A static condition",
+                "type": "STATIC"
+              }
+            ],
+            "totalCount": 435
+          }
+        }
+      }
+    }
+  }
+}

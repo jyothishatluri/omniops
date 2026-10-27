@@ -1,0 +1,10 @@
+[
+  {"id": 0, "archived": false, "requestGUID": "07532d68-42b8-4a79-877a-dedf2912a2cf", "businessTransactionId": 128, "applicationId": 2, "applicationComponentId": 5, "applicationComponentNodeId": 4, "async": false, "threadID": 60, "threadName": "http-8000-Processor24", "localStartTime": 1389164292752, "serverStartTime": 1389164292752, "firstInChain": true, "callChain": "Component:5", "localID": 0, "errorOccured": true, "hasDeepDiveData": true, "userExperience": "ERROR", "timeTakenInMilliSecs": 105, "cpuTimeTakenInMilliSecs": 3839000,
+   "summary": "[Manual Diagnostic Session] - org.hibernate.util.JDBCExceptionReporter : Cannot create PoolableConnectionFactory (Unknown database 'appdy') ", "errorSummary": "", "diagnosticSessionGUID": "d70a41d9-a96f-46e8-9fbc-31061c6e452f", "deepDivePolicy": "ON_DEMAND", "delayedDeepDive": false, "delayedDeepDiveOffSet": 0, "exitCallsDataTruncated": false, "URL": "/appdynamicspilot/1.bookslist", "httpSessionID": "088B2A2DD0EF77424DD0EB3346A441F9",
+   "errorIDs": [29],
+   "errorDetails": [{"id": 0, "name": "1. org.hibernate.util.JDBCExceptionReporter", "value": "org.hibernate.util.JDBCExceptionReporter : Cannot create PoolableConnectionFactory (Unknown database 'appdy')"}],
+   "httpParameters": [{"id": 0, "name": "param1", "value": "[100]"}],
+   "businessData": [], "cookies": [], "httpHeaders": [], "sessionKeys": [], "responseHeaders": [], "logMessages": [],
+   "transactionProperties": [{"id": 0, "name": "Servlet URI", "value": "/appdynamicspilot/WEB-INF/presentation/bookslist.jsp"}, {"id": 0, "name": "ProcessID", "value": "65331"}],
+   "transactionEvents": [], "unresolvedCallInCallChain": false, "dotnetProperty": []}
+]

@@ -1,0 +1,10 @@
+[
+  {
+    "id": "l1wgr3DsQkGLf8u18JiGsg",
+    "name": "frontend/release-2000",
+    "start": 1742349976000,
+    "lastUpdated": 1742369990000,
+    "applications": [{"id": "Av62RoIKQv-A3n6DbMQh9g", "name": "app1"}],
+    "services": [{"id": "3feb3dcd206c166ef2b41c707e0cd38d7cd325aa", "name": "payment", "scopedTo": {"applications": [{"id": "Av62RoIKQv-A3n6DbMQh9g", "name": "app1"}]}}]
+  }
+]

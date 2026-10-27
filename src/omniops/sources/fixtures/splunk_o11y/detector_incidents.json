@@ -1,0 +1,29 @@
+[
+ {
+  "active": true,
+  "anomalyState": "ANOMALOUS",
+  "detectLabel": "loadWarning",
+  "detectorId": "string",
+  "events": [
+   {
+    "anomalyState": "ANOMALOUS",
+    "detectLabel": "loadWarning",
+    "detectorId": "string",
+    "detectorName": "JVM CPU Load detector",
+    "duration": 0,
+    "id": "string",
+    "incidentId": "string",
+    "inputs": [
+     {
+      "fragment": "string",
+      "value": 0
+     }
+    ],
+    "severity": "Info",
+    "timestamp": 1557484230000
+   }
+  ],
+  "incidentId": "string",
+  "severity": "Info"
+ }
+]

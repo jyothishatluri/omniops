@@ -1,0 +1,19 @@
+{
+  "data_streams": [
+    {
+      "name": "logs-app",
+      "timestamp_field": {
+        "name": "@timestamp"
+      },
+      "indices": [
+        {
+          "index_name": ".ds-logs-app-000001",
+          "index_uuid": "23dD0HE5Sg2kSLLAP_YtNA"
+        }
+      ],
+      "generation": 1,
+      "status": "YELLOW",
+      "template": "template-logs-app"
+    }
+  ]
+}

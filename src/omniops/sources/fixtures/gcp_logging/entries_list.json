@@ -1,0 +1,20 @@
+{
+  "entries": [
+    {
+      "insertId": "jpj9zjf73t1mn",
+      "jsonPayload": {"message": "My second entry", "weather": "partly cloudy"},
+      "logName": "projects/myloggingproject/logs/my-test-log",
+      "receiveTimestamp": "2018-11-01T18:39:31.114507977Z",
+      "resource": {"labels": {"project_id": "myloggingproject"}, "type": "global"},
+      "timestamp": "2018-11-01T18:39:31.114507977Z"
+    },
+    {
+      "insertId": "vd4m1if7h7u1a",
+      "logName": "projects/myloggingproject/logs/my-test-log",
+      "receiveTimestamp": "2018-11-01T18:39:19.718100792Z",
+      "resource": {"labels": {"project_id": "myloggingproject"}, "type": "global"},
+      "textPayload": "A simple entry",
+      "timestamp": "2018-11-01T18:39:19.718100792Z"
+    }
+  ]
+}

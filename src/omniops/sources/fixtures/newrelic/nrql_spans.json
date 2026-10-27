@@ -1,0 +1,41 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {
+              "timestamp": 1759322400140,
+              "id": "a2fb4a1d1a96d312",
+              "trace.id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "parent.id": "00f067aa0ba902b7",
+              "name": "External/payments-api/POST",
+              "duration.ms": 1801.2,
+              "entity.name": "checkout-service",
+              "entity.guid": "MXxBUE18QVBQTElDQVRJT058MzIxNjY2NA",
+              "service.name": "checkout-service",
+              "span.kind": "client",
+              "category": "http",
+              "http.url": "https://payments-api/charge",
+              "http.statusCode": 504,
+              "error": true,
+              "error.message": "Read timed out",
+              "host": "ip-10-0-3-17.ec2.internal"
+            },
+            {
+              "timestamp": 1759322400200,
+              "guid": "b7ad6b7169203331",
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "parentId": "c1a2b3c4d5e6f708",
+              "name": "SELECT orders",
+              "duration": 0.0123,
+              "appName": "orders-api",
+              "category": "datastore",
+              "db.statement": "SELECT * FROM orders WHERE id = ?"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

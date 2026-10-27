@@ -1,0 +1,26 @@
+[
+  {
+    "id": "5c0e1d7a-2f3b-4c4d-9e8f-0a1b2c3d4e5f",
+    "status": {
+      "state": "active"
+    },
+    "updatedAt": "2026-10-01T11:30:00.000Z",
+    "comment": "order-service DB maintenance",
+    "createdBy": "alice",
+    "startsAt": "2026-10-01T11:30:00.000Z",
+    "endsAt": "2026-10-01T13:30:00.000Z",
+    "matchers": [
+      {
+        "isEqual": true,
+        "isRegex": false,
+        "name": "service",
+        "value": "order-service"
+      }
+    ],
+    "metadata": {
+      "rule_uid": "ord-latency",
+      "rule_title": "OrderServiceLatencyHigh",
+      "folder_uid": "c3d4e5f6"
+    }
+  }
+]

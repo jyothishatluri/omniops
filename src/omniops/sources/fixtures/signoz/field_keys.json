@@ -1,0 +1,17 @@
+{
+  "status": "success",
+  "data": {
+    "complete": true,
+    "keys": {
+      "service.name": [
+        {"name": "service.name", "signal": "logs", "fieldContext": "resource", "fieldDataType": "string", "description": "", "unit": ""}
+      ],
+      "code.line": [
+        {"name": "code.line", "signal": "logs", "fieldContext": "attribute", "fieldDataType": "number", "description": "", "unit": ""}
+      ],
+      "severity_text": [
+        {"name": "severity_text", "signal": "logs", "fieldContext": "log", "fieldDataType": "string", "description": "", "unit": ""}
+      ]
+    }
+  }
+}

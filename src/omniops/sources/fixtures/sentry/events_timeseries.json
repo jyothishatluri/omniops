@@ -1,0 +1,96 @@
+{
+ "timeSeries": [
+  {
+   "values": [
+    {
+     "timestamp": 1741366800000,
+     "value": 5,
+     "incomplete": false
+    },
+    {
+     "timestamp": 1741370400000,
+     "value": 3,
+     "incomplete": true,
+     "incompleteReason": "INGESTION_PENDING"
+    },
+    {
+     "timestamp": 1741374000000,
+     "value": 4,
+     "incomplete": true,
+     "incompleteReason": "NOT_ELAPSED"
+    }
+   ],
+   "yAxis": "count()",
+   "groupBy": [
+    {
+     "key": "transaction",
+     "value": "foo"
+    },
+    {
+     "key": "project",
+     "value": "bar"
+    },
+    {
+     "key": "tag[foo]",
+     "value": "baz"
+    }
+   ],
+   "meta": {
+    "valueUnit": null,
+    "valueType": "integer",
+    "interval": 3600
+   }
+  },
+  {
+   "values": [
+    {
+     "timestamp": 1741366800000,
+     "value": 5,
+     "incomplete": false
+    },
+    {
+     "timestamp": 1741370400000,
+     "value": 2,
+     "incomplete": true,
+     "incompleteReason": "INGESTION_PENDING"
+    },
+    {
+     "timestamp": 1741374000000,
+     "value": 1,
+     "incomplete": true,
+     "incompleteReason": "NOT_ELAPSED"
+    }
+   ],
+   "yAxis": "count()",
+   "groupBy": [
+    {
+     "key": "transaction",
+     "value": "foo"
+    },
+    {
+     "key": "project",
+     "value": "ball"
+    },
+    {
+     "key": "tag[foo]",
+     "value": "baz"
+    }
+   ],
+   "meta": {
+    "valueUnit": null,
+    "valueType": "integer",
+    "interval": 3600
+   }
+  }
+ ],
+ "meta": {
+  "dataset": "spans",
+  "start": 1741366800000,
+  "end": 1741374060000,
+  "ingestion": {
+   "status": "healthy",
+   "delaySeconds": 130.5,
+   "completeThrough": 1741373929500
+  }
+ }
+}

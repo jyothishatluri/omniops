@@ -1,0 +1,73 @@
+{
+ "kind": "PersistentVolumeClaimList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "archive-writer",
+    "namespace": "batch",
+    "uid": "5b1b8c9d-0000-4000-8000-000000000021",
+    "creationTimestamp": "2026-10-01T11:40:25Z",
+    "annotations": {
+     "volume.kubernetes.io/storage-provisioner": "ebs.csi.aws.com"
+    },
+    "finalizers": [
+     "kubernetes.io/pvc-protection"
+    ]
+   },
+   "spec": {
+    "accessModes": [
+     "ReadWriteOnce"
+    ],
+    "resources": {
+     "requests": {
+      "storage": "1Gi"
+     }
+    },
+    "storageClassName": "gp3-archive",
+    "volumeMode": "Filesystem"
+   },
+   "status": {
+    "phase": "Pending"
+   }
+  },
+  {
+   "metadata": {
+    "name": "index-store",
+    "namespace": "batch",
+    "uid": "6c2c9d0e-0000-4000-8000-000000000022",
+    "creationTimestamp": "2026-10-01T11:40:30Z",
+    "annotations": {
+     "pv.kubernetes.io/bind-completed": "yes",
+     "pv.kubernetes.io/bound-by-controller": "yes"
+    }
+   },
+   "spec": {
+    "accessModes": [
+     "ReadWriteOnce"
+    ],
+    "resources": {
+     "requests": {
+      "storage": "1Gi"
+     }
+    },
+    "storageClassName": "local-archive",
+    "volumeMode": "Filesystem",
+    "volumeName": "index-store"
+   },
+   "status": {
+    "phase": "Bound",
+    "accessModes": [
+     "ReadWriteOnce"
+    ],
+    "capacity": {
+     "storage": "1Gi"
+    }
+   }
+  }
+ ]
+}

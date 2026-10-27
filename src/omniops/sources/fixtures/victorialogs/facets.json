@@ -1,0 +1,30 @@
+{
+ "facets": [
+  {
+   "field_name": "kubernetes_container_name",
+   "values": [
+    {
+     "field_value": "victoria-logs",
+     "hits": 442378
+    },
+    {
+     "field_value": "victoria-metrics",
+     "hits": 34783
+    }
+   ]
+  },
+  {
+   "field_name": "kubernetes_pod_name",
+   "values": [
+    {
+     "field_value": "victoria-logs-0",
+     "hits": 232385
+    },
+    {
+     "field_value": "victoria-logs-1",
+     "hits": 123898
+    }
+   ]
+  }
+ ]
+}

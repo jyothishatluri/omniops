@@ -1,0 +1,41 @@
+{
+  "data": [
+    {
+      "id": "test.metric.latency",
+      "relationships": {
+        "metric_volumes": {
+          "data": {
+            "id": "test.metric.latency",
+            "type": "metric_volumes"
+          }
+        }
+      },
+      "type": "metrics"
+    }
+  ],
+  "included": [
+    {
+      "attributes": {
+        "indexed_volume": 10,
+        "ingested_volume": 20
+      },
+      "id": "test.metric.latency",
+      "type": "metric_volumes"
+    }
+  ],
+  "links": {
+    "first": "string",
+    "last": "string",
+    "next": "string",
+    "prev": "string",
+    "self": "string"
+  },
+  "meta": {
+    "pagination": {
+      "cursor": "string",
+      "limit": "integer",
+      "next_cursor": "string",
+      "type": "cursor_limit"
+    }
+  }
+}

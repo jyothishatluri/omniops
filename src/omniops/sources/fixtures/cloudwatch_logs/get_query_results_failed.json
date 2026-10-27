@@ -1,0 +1,10 @@
+{
+ "queryLanguage": "CWLI",
+ "results": [],
+ "statistics": {
+  "recordsMatched": 0.0,
+  "recordsScanned": 0.0,
+  "bytesScanned": 0.0
+ },
+ "status": "Failed"
+}

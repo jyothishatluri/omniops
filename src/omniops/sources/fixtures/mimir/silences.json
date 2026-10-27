@@ -1,0 +1,21 @@
+[
+ {
+  "id": "d29d9df3-9125-4441-912c-70b05f86f973",
+  "status": {
+   "state": "active"
+  },
+  "updatedAt": "2026-10-01T11:00:00.000Z",
+  "comment": "planned DB failover",
+  "createdBy": "oncall",
+  "endsAt": "2026-10-01T13:00:00.000Z",
+  "startsAt": "2026-10-01T11:00:00.000Z",
+  "matchers": [
+   {
+    "isEqual": true,
+    "isRegex": false,
+    "name": "service",
+    "value": "payments-db"
+   }
+  ]
+ }
+]

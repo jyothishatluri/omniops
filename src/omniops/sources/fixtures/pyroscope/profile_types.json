@@ -1,0 +1,44 @@
+{
+  "profileTypes": [
+    {
+      "ID": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+      "name": "process_cpu",
+      "sampleType": "cpu",
+      "sampleUnit": "nanoseconds",
+      "periodType": "cpu",
+      "periodUnit": "nanoseconds"
+    },
+    {
+      "ID": "memory:alloc_space:bytes:space:bytes",
+      "name": "memory",
+      "sampleType": "alloc_space",
+      "sampleUnit": "bytes",
+      "periodType": "space",
+      "periodUnit": "bytes"
+    },
+    {
+      "ID": "memory:inuse_space:bytes:space:bytes",
+      "name": "memory",
+      "sampleType": "inuse_space",
+      "sampleUnit": "bytes",
+      "periodType": "space",
+      "periodUnit": "bytes"
+    },
+    {
+      "ID": "goroutines:goroutine:count:goroutine:count",
+      "name": "goroutines",
+      "sampleType": "goroutine",
+      "sampleUnit": "count",
+      "periodType": "goroutine",
+      "periodUnit": "count"
+    },
+    {
+      "ID": "mutex:delay:nanoseconds:contentions:count",
+      "name": "mutex",
+      "sampleType": "delay",
+      "sampleUnit": "nanoseconds",
+      "periodType": "contentions",
+      "periodUnit": "count"
+    }
+  ]
+}

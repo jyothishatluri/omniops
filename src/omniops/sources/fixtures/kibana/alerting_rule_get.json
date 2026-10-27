@@ -1,0 +1,41 @@
+{
+  "actions": [],
+  "api_key_owner": "elastic",
+  "consumer": "alerts",
+  "created_at": "2022-12-05T23:40:33.132Z",
+  "created_by": "elastic",
+  "enabled": true,
+  "id": "3583a470-74f6-11ed-9801-35303b735aef",
+  "mute_all": false,
+  "muted_alert_ids": [],
+  "name": "my alert",
+  "notify_when": "onActionGroupChange",
+  "params": {
+    "aggField": "sheet.version",
+    "aggType": "avg",
+    "groupBy": "top",
+    "index": [
+      "test-index"
+    ],
+    "termField": "name.keyword",
+    "termSize": 6,
+    "threshold": [
+      1000
+    ],
+    "thresholdComparator": ">",
+    "timeField": "@timestamp",
+    "timeWindowSize": 5,
+    "timeWindowUnit": "m"
+  },
+  "revision": 0,
+  "rule_type_id": ".index-threshold",
+  "schedule": {
+    "interval": "1m"
+  },
+  "tags": [
+    "cpu"
+  ],
+  "throttle": null,
+  "updated_at": "2022-12-05T23:40:33.132Z",
+  "updated_by": "elastic"
+}

@@ -1,0 +1,63 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "AppRoleName",
+          "type": "string"
+        },
+        {
+          "name": "Requests",
+          "type": "long"
+        },
+        {
+          "name": "Failures",
+          "type": "long"
+        },
+        {
+          "name": "P95",
+          "type": "real"
+        },
+        {
+          "name": "Instances",
+          "type": "long"
+        },
+        {
+          "name": "Versions",
+          "type": "dynamic"
+        },
+        {
+          "name": "Apps",
+          "type": "dynamic"
+        },
+        {
+          "name": "LastSeen",
+          "type": "datetime"
+        }
+      ],
+      "rows": [
+        [
+          "checkout-api",
+          70800,
+          2212,
+          1801.3,
+          3,
+          "[\"2.13.4\",\"2.14.0\"]",
+          "[\"/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi\"]",
+          "2026-10-01T11:59:59.912Z"
+        ],
+        [
+          "catalog-api",
+          152440,
+          31,
+          88.0,
+          4,
+          "[\"5.2.1\"]",
+          "[\"/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi\"]",
+          "2026-10-01T11:59:59.987Z"
+        ]
+      ]
+    }
+  ]
+}

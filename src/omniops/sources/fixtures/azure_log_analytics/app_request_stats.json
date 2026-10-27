@@ -1,0 +1,73 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "AppRoleName",
+          "type": "string"
+        },
+        {
+          "name": "Requests",
+          "type": "long"
+        },
+        {
+          "name": "Failures",
+          "type": "long"
+        },
+        {
+          "name": "AvgDurationMs",
+          "type": "real"
+        },
+        {
+          "name": "P50",
+          "type": "real"
+        },
+        {
+          "name": "P95",
+          "type": "real"
+        },
+        {
+          "name": "P99",
+          "type": "real"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:40:00Z",
+          "checkout-api",
+          1180,
+          3,
+          61.2,
+          38.0,
+          211.4,
+          402.9
+        ],
+        [
+          "2026-10-01T11:41:00Z",
+          "checkout-api",
+          1164,
+          97,
+          240.8,
+          51.3,
+          1790.2,
+          2950.0
+        ],
+        [
+          "2026-10-01T11:42:00Z",
+          "checkout-api",
+          1171,
+          188,
+          512.4,
+          77.9,
+          2841.6,
+          4106.3
+        ]
+      ]
+    }
+  ]
+}

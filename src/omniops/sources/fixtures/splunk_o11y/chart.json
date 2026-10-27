@@ -1,0 +1,125 @@
+{
+ "autoDetectRelatedDetectorIds": [
+  "string"
+ ],
+ "created": 1557534630000,
+ "creator": "string",
+ "description": "string",
+ "id": "string",
+ "lastUpdated": 1557707430000,
+ "lastUpdatedBy": "string",
+ "name": "string",
+ "options": {
+  "areaChartOptions": {
+   "showDataMarkers": true
+  },
+  "axes": [
+   {
+    "highWatermark": 0,
+    "highWatermarkLabel": "string",
+    "label": "string",
+    "lowWatermark": 0,
+    "lowWatermarkLabel": "string",
+    "max": 0,
+    "min": 0
+   }
+  ],
+  "axisPrecision": 0,
+  "colorBy": "Range",
+  "colorRange": {
+   "color": "string",
+   "max": "string",
+   "min": "string"
+  },
+  "colorScale": {
+   "inverted": true,
+   "thresholds": [
+    0
+   ]
+  },
+  "colorScale2": [
+   {
+    "gt": 0,
+    "gte": 0,
+    "lt": 0,
+    "lte": 0,
+    "paletteIndex": 0
+   }
+  ],
+  "defaultPlotType": "LineChart",
+  "groupBy": [
+   "string"
+  ],
+  "groupBySort": "Ascending",
+  "hideMissingValues": true,
+  "histogramChartOptions": {
+   "colorThemeIndex": 0
+  },
+  "includeZero": true,
+  "legendOptions": {
+   "fields": [
+    {
+     "enabled": true,
+     "property": "string"
+    }
+   ]
+  },
+  "lineChartOptions": {
+   "showDataMarkers": true
+  },
+  "markdown": "string",
+  "maximumPrecision": 0,
+  "noDataOptions": {
+   "linkText": "Set up Splunk OpenTelemetry",
+   "linkUrl": "https://docs.splunk.com/Observability/gdi/opentelemetry/opentelemetry.html",
+   "noDataMessage": "No active hosts found"
+  },
+  "onChartLegendOptions": {
+   "dimensionInLegend": "string",
+   "showLegend": true
+  },
+  "programOptions": {
+   "disableSampling": true,
+   "maxDelay": 0,
+   "minimumResolution": 0,
+   "timezone": "string"
+  },
+  "publishLabelOptions": [
+   {
+    "displayName": "string",
+    "label": "string",
+    "paletteIndex": 0,
+    "plotType": "LineChart",
+    "valuePrefix": "string",
+    "valueSuffix": "string",
+    "valueUnit": "Bit",
+    "yAxis": 0
+   }
+  ],
+  "refreshInterval": 0,
+  "secondaryVisualization": "None",
+  "showEventLines": true,
+  "showSparkLine": true,
+  "sortBy": "string",
+  "sortDirection": "Ascending",
+  "sortProperty": "string",
+  "stacked": true,
+  "time": {
+   "end": 205430400000,
+   "range": 0,
+   "start": 205344000000,
+   "type": "relative"
+  },
+  "timeStampHidden": true,
+  "type": "Heatmap",
+  "unitPrefix": "Metric"
+ },
+ "packageSpecifications": "string",
+ "programText": "string",
+ "relatedDetectorIds": [
+  "string"
+ ],
+ "tags": [
+  "string"
+ ]
+}

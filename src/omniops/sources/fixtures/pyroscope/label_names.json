@@ -1,0 +1,14 @@
+{
+  "names": [
+    "__name__",
+    "__period_type__",
+    "__period_unit__",
+    "__profile_type__",
+    "__type__",
+    "__unit__",
+    "namespace",
+    "pod",
+    "service_name",
+    "service_version"
+  ]
+}

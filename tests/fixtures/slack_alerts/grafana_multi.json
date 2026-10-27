@@ -1,0 +1,44 @@
+{
+  "platform": "grafana",
+  "description": "Grafana Alerting default Slack message grouping two firing alerts of one rule (two crash-looping pods). The group key must use only the labels both alerts share.",
+  "provenance": "Same default templates as grafana_firing: __subject shows the group label values (alertname, grafana_folder) and the common labels in parentheses; the common GeneratorURL becomes title_link; no dashboard annotation, so no Dashboard/Panel lines.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B02GRAFANA",
+    "username": "Grafana",
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "D63232",
+        "fallback": "[FIRING:2] KubePodCrashLooping Kubernetes (checkout shop warning)",
+        "title": "[FIRING:2] KubePodCrashLooping Kubernetes (checkout shop warning)",
+        "title_link": "https://grafana.acme.example/alerting/grafana/ae5kp0crash01/view?orgId=1",
+        "text": "**Firing**\n\nValue: A=7, C=1\nLabels:\n - alertname = KubePodCrashLooping\n - container = checkout\n - grafana_folder = Kubernetes\n - namespace = shop\n - pod = checkout-7d9f8c6b5-x2x4q\n - severity = warning\nAnnotations:\n - summary = Pod shop/checkout-7d9f8c6b5-x2x4q is crash looping\nSource: https://grafana.acme.example/alerting/grafana/ae5kp0crash01/view?orgId=1\nSilence: https://grafana.acme.example/alerting/silence/new?alertmanager=grafana&amp;matcher=__alert_rule_uid__%3Dae5kp0crash01&amp;matcher=container%3Dcheckout&amp;matcher=namespace%3Dshop&amp;matcher=pod%3Dcheckout-7d9f8c6b5-x2x4q&amp;matcher=severity%3Dwarning&amp;orgId=1\n\nValue: A=4, C=1\nLabels:\n - alertname = KubePodCrashLooping\n - container = checkout\n - grafana_folder = Kubernetes\n - namespace = shop\n - pod = checkout-7d9f8c6b5-k9m2p\n - severity = warning\nAnnotations:\n - summary = Pod shop/checkout-7d9f8c6b5-k9m2p is crash looping\nSource: https://grafana.acme.example/alerting/grafana/ae5kp0crash01/view?orgId=1\nSilence: https://grafana.acme.example/alerting/silence/new?alertmanager=grafana&amp;matcher=__alert_rule_uid__%3Dae5kp0crash01&amp;matcher=container%3Dcheckout&amp;matcher=namespace%3Dshop&amp;matcher=pod%3Dcheckout-7d9f8c6b5-k9m2p&amp;matcher=severity%3Dwarning&amp;orgId=1\n",
+        "footer": "Grafana v12.2.1",
+        "footer_icon": "https://grafana.com/static/assets/img/fav32.png",
+        "ts": 1792504950
+      }
+    ],
+    "ts": "1792504951.223459",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504951.223459",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "grafana",
+    "rule_id": "ae5kp0crash01",
+    "rule_name": "KubePodCrashLooping",
+    "status": "firing",
+    "alert_count": 2,
+    "severity": "warning",
+    "service": "checkout",
+    "namespace": "shop",
+    "pod": null,
+    "group": "container=checkout,namespace=shop",
+    "triggered_at": null,
+    "window_start": null,
+    "anchor": {"source": "message_ts", "window_start": "2026-10-20T13:47:31Z", "window_end": "2026-10-20T14:07:31Z"}
+  }
+}

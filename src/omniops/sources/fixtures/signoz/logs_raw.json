@@ -1,0 +1,84 @@
+{
+  "status": "success",
+  "data": {
+    "type": "raw",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "nextCursor": "",
+          "rows": [
+            {
+              "timestamp": "2026-10-01T11:42:07.512Z",
+              "data": {
+                "attributes_bool": {},
+                "attributes_number": {"code.line": 120},
+                "attributes_string": {
+                  "code.file": "/opt/integration.go",
+                  "code.function": "com.example.Integration.process",
+                  "log.iostream": "stdout",
+                  "logtag": "F",
+                  "metric.domain_id": "d-001",
+                  "telemetry.sdk.language": "go"
+                },
+                "body": "This is a log message, coming from a go application",
+                "id": "2nNvRmXlq6c0bbtJXWfVPEt6yQ0",
+                "resources_string": {
+                  "cloud.account.id": "001",
+                  "cloud.provider": "integration",
+                  "deployment.environment": "production",
+                  "host.name": "linux-001",
+                  "os.type": "linux",
+                  "service.name": "go"
+                },
+                "scope_name": "",
+                "scope_string": {},
+                "scope_version": "",
+                "severity_number": 9,
+                "severity_text": "INFO",
+                "span_id": "",
+                "timestamp": 1790854927512000000,
+                "trace_flags": 0,
+                "trace_id": ""
+              }
+            },
+            {
+              "timestamp": "2026-10-01T11:42:06.512Z",
+              "data": {
+                "attributes_bool": {},
+                "attributes_number": {"code.line": 120},
+                "attributes_string": {
+                  "code.file": "/opt/Integration.java",
+                  "code.function": "com.example.Integration.process",
+                  "log.iostream": "stdout",
+                  "logtag": "F",
+                  "telemetry.sdk.language": "java"
+                },
+                "body": "This is a log message, coming from a java application",
+                "id": "2nNvRk2hAZ0VxM5r1pTz9cXs8Qe",
+                "resources_string": {
+                  "cloud.account.id": "001",
+                  "cloud.provider": "integration",
+                  "deployment.environment": "production",
+                  "host.name": "linux-001",
+                  "os.type": "linux",
+                  "service.name": "java"
+                },
+                "scope_name": "",
+                "scope_string": {},
+                "scope_version": "",
+                "severity_number": 5,
+                "severity_text": "DEBUG",
+                "span_id": "",
+                "timestamp": 1790854926512000000,
+                "trace_flags": 0,
+                "trace_id": ""
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 2, "bytesScanned": 1874, "durationMs": 12}
+  }
+}

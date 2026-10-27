@@ -1,0 +1,87 @@
+{
+ "kind": "EndpointSliceList",
+ "apiVersion": "discovery.k8s.io/v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "cart-8xk2p",
+    "namespace": "shop",
+    "uid": "d3930415-0000-4000-8000-000000000013",
+    "creationTimestamp": "2026-10-01T08:00:02Z",
+    "labels": {
+     "kubernetes.io/service-name": "cart",
+     "endpointslice.kubernetes.io/managed-by": "endpointslice-controller.k8s.io"
+    }
+   },
+   "addressType": "IPv4",
+   "endpoints": [
+    {
+     "addresses": [
+      "10.244.1.17"
+     ],
+     "conditions": {
+      "ready": true,
+      "serving": true,
+      "terminating": false
+     },
+     "nodeName": "incident-bench-worker",
+     "targetRef": {
+      "kind": "Pod",
+      "namespace": "shop",
+      "name": "cart-7d9c6b5f4-x2x9q",
+      "uid": "1a2b3c4d-0000-4000-8000-000000000001"
+     }
+    },
+    {
+     "addresses": [
+      "10.244.2.9"
+     ],
+     "conditions": {
+      "ready": false,
+      "serving": false,
+      "terminating": true
+     },
+     "nodeName": "incident-bench-worker2",
+     "targetRef": {
+      "kind": "Pod",
+      "namespace": "shop",
+      "name": "cart-7d9c6b5f4-old11",
+      "uid": "1a2b3c4d-0000-4000-8000-000000000002"
+     }
+    }
+   ],
+   "ports": [
+    {
+     "name": "tcp-service",
+     "protocol": "TCP",
+     "port": 8080
+    }
+   ]
+  },
+  {
+   "metadata": {
+    "name": "recommendation-p9z7m",
+    "namespace": "shop",
+    "uid": "e4a41526-0000-4000-8000-000000000014",
+    "creationTimestamp": "2026-10-01T08:00:02Z",
+    "labels": {
+     "kubernetes.io/service-name": "recommendation",
+     "endpointslice.kubernetes.io/managed-by": "endpointslice-controller.k8s.io"
+    }
+   },
+   "addressType": "IPv4",
+   "endpoints": null,
+   "ports": [
+    {
+     "name": "tcp-service",
+     "protocol": "TCP",
+     "port": 8080
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,1271 @@
+# GitLab REST API v4 (GitLab.com, GitLab Self-Managed and GitLab Dedicated) as SQL tables.
+# Direct REST, no MCP.
+#
+# Every path, parameter name, time format and response path below was checked against the official
+# API reference (docs.gitlab.com/api/..., whose source is gitlab-org/gitlab doc/api/*.md on the
+# default branch). Fixtures are the documented example responses (with doc-only artefacts - '//'
+# comments, trailing commas, invalid '\ ' escapes - removed so they parse as JSON).
+# Research notes, rate limits and pitfalls: docs/sources/gitlab.md.
+#
+# Conventions used by every table:
+#   project = numeric project ID or full path 'group/subgroup/project' (a bare name is prefixed with
+#             GITLAB_GROUP). It is URL-encoded into the path (slashes become %2F, as GitLab requires).
+#             It is a filter_only column: pushed into the URL and echoed back on every row.
+#   ref     = commit SHA, branch or tag (filter_only, pushed into the URL / ref parameter).
+#   ts      = the table's main event time.
+# Time formats: every GitLab datetime parameter is ISO 8601 'YYYY-MM-DDTHH:MM:SSZ' (rfc3339 here).
+source: gitlab
+display_name: GitLab
+vendor: GitLab Inc.
+description: >-
+  GitLab REST API v4: projects, commits (with stats and per-file diffs), compare (release diffs),
+  merge requests and their diffs, merged-MR change feed for a group, deployments, environments,
+  pipelines, jobs and job logs, releases, tags, repository files (raw lines, metadata, blame) and
+  code (blob) search. Works with GitLab.com and self-managed instances.
+docs_url: https://docs.gitlab.com/api/rest/
+categories: [code, changes, deployments, ci, releases, search]
+base_url: "{{ (env.GITLAB_URL or 'https://gitlab.com') | trim('/') }}/api/v4"
+ui_base_url: "{{ (env.GITLAB_URL or 'https://gitlab.com') | trim('/') }}"
+env:
+  - {name: GITLAB_TOKEN, description: "Personal, project or group access token with the read_api scope (read_repository is not enough for most endpoints)", secret: true}
+  - {name: GITLAB_URL, description: "Instance root URL without /api/v4 (default https://gitlab.com; self-managed: https://gitlab.example.com)", default: "https://gitlab.com"}
+  - {name: GITLAB_GROUP, description: "Default group full path (e.g. acme or acme/platform): bare project names become GITLAB_GROUP/<name>, and group-wide tables (merged MRs, projects, blob search) use it. Strongly recommended."}
+required_env: [GITLAB_TOKEN]
+auth:
+  type: headers
+  headers:
+    PRIVATE-TOKEN: "{{ env.GITLAB_TOKEN }}"
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 90
+  notes: >-
+    GitLab.com (tier-aware): authenticated API traffic per user is 100 requests/minute burst on
+    Free (1,250 Premium, 2,000 Ultimate) and 5,000/hour sustained on Free (15,000 Premium, 25,000
+    Ultimate); unauthenticated 60/hour per IP. Throttled requests get HTTP 429 with Retry-After
+    (seconds) and RateLimit-* headers. Self-managed limits are set by the administrator
+    (Admin > Settings > Network > User and IP rate limits). File blame: 400/minute per user and
+    project; files > 10 MB: 5 requests/minute. 90 requests/minute here keeps Free-tier users safe.
+pitfalls:
+  - "project is the numeric ID or the full path 'group/subgroup/project' (the path in the project URL, which can differ from its display name). A bare name is prefixed with GITLAB_GROUP; with GITLAB_GROUP unset it is sent as-is and usually 404s. The code_changes / change_events roles pass the service name as project: verify with gitlab_projects when a 404 says '404 Project Not Found'."
+  - "404 also means 'no access' for private/internal projects: check the token's membership and read_api scope before concluding something does not exist."
+  - "The sha columns are full 40-char SHAs; ref filters accept short SHAs, branches and tags. Compare SHAs with sha LIKE 'abc1234%'."
+  - "Lists are paginated (page/per_page, 100 per page here, up to 5 pages by default): tables without server-side time filters (releases, tags, environments, jobs) only see the newest ~500 rows."
+  - "GitLab returns errors as non-2xx JSON ({\"message\": ...} or {\"error\": ...}); the only 2xx partial result is compare_timeout on compares (raised loudly by gitlab_compare_diffs)."
+  - "Always give an explicit ts range when correlating changes with an incident: without one, time-bound tables use the alert's analysis window (often ~20 minutes), which usually misses the deploy that caused it."
+  - "Git dates (committed_date, authored_date, tag/compare created_at) come with the committer's UTC offset (e.g. +02:00) while API object times are UTC (Z); every TIMESTAMP column is the correct UTC instant in SQL, so compare them directly."
+query_languages:
+  gitlab_search: >-
+    GitLab basic search terms for scope=blobs: plain words or "exact phrase", plus filters
+    filename:*.yml, path:config/, extension:rb (wildcards * allowed). Advanced search (Premium,
+    Elasticsearch) adds boolean operators (| for OR, - for NOT, + for AND) and is needed for
+    group-level blob search on most instances.
+
+tables:
+  # ----------------------------------------------------------------------------------------------
+  # Projects
+  # ----------------------------------------------------------------------------------------------
+  - name: gitlab_projects
+    title: Projects of a group (or the token's projects)
+    description: >-
+      One row per project. With group (default GITLAB_GROUP) lists GET /groups/:id/projects
+      including subgroups; otherwise GET /projects?membership=true (projects the token is a member
+      of). Ordered by last activity, newest first. Use it to map a service name to its project
+      path / ID and default branch.
+    kind: entities
+    request:
+      method: GET
+      path: "{% if filters.group or env.GITLAB_GROUP %}/groups/{{ (filters.group or env.GITLAB_GROUP) | string | urlencode | replace('/', '%2F') }}/projects{% else %}/projects{% endif %}"
+      query:
+        include_subgroups: "{{ true if (filters.group or env.GITLAB_GROUP) else none }}"
+        membership: "{{ none if (filters.group or env.GITLAB_GROUP) else true }}"
+        search: "{{ filters.search }}"
+        archived: "{{ filters.archived }}"
+        order_by: last_activity_at
+        sort: desc
+        per_page: 100
+    filters:
+      - {column: group, description: "Group full path or ID (default GITLAB_GROUP)", examples: [acme/platform]}
+      - {column: search, description: "Substring of the project path, name or description", examples: [checkout]}
+      - {column: archived, type: BOOLEAN, description: "true / false to filter by archived status"}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: project, path: path_with_namespace, description: "Full path - use as the project filter elsewhere"}
+      - {name: id, type: BIGINT, path: id, description: "Numeric project ID"}
+      - {name: name, path: name}
+      - {name: path, path: path, description: "Project slug (last path segment)"}
+      - {name: description, path: description}
+      - {name: default_branch, path: default_branch}
+      - {name: ts, type: TIMESTAMP, path: last_activity_at, description: "Last activity (push, MR, issue...)"}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: visibility, path: visibility}
+      - {name: archived, type: BOOLEAN, path: archived}
+      - {name: topics, type: JSON, path: topics}
+      - {name: namespace, path: namespace.full_path, description: "Owning group/user path (differs from the requested group for shared projects)"}
+      - {name: url, path: web_url}
+      - {name: group, filter_only: true}
+      - {name: search, filter_only: true}
+    pitfalls:
+      - "Projects shared INTO the group are included (with_shared defaults to true): check namespace."
+    examples:
+      - sql: "SELECT project, id, default_branch, ts FROM gitlab_projects WHERE group = 'acme' AND search = 'checkout'"
+        description: Find the project behind a service.
+      - sql: "SELECT project, ts FROM gitlab_projects WHERE group = 'acme' ORDER BY ts DESC LIMIT 20"
+        description: Projects with the most recent activity.
+    fixtures:
+      - file: group_projects.json
+        filters: {group: h5bp}
+        expect_rows: 1
+        expect_columns: {project: h5bp/html5-boilerplate, id: 9, name: "Html5 Boilerplate", default_branch: main, ts: "2016-04-06T16:52:08Z", visibility: internal, archived: false, url: "http://gitlab.example.com/h5bp/html5-boilerplate", group: h5bp}
+        note: "Official example response of GET /groups/:id/projects (docs.gitlab.com/api/groups/#list-projects); a '//deprecated' doc comment was removed."
+    ui_link: "{{ ui_base_url }}/{{ filters.group or env.GITLAB_GROUP }}"
+    docs_url: https://docs.gitlab.com/api/groups/#list-projects
+
+  # ----------------------------------------------------------------------------------------------
+  # Commits
+  # ----------------------------------------------------------------------------------------------
+  - name: gitlab_commits
+    title: Commits of a project (branch history)
+    description: >-
+      One row per commit on ref (default: the default branch), newest first, inside the ts window
+      (pushed down as since/until). Filter on project (required), optionally ref (branch, tag or
+      revision range), path (only commits touching it), author (name/email substring), first_parent
+      (true = only merges/direct commits on the branch). Includes additions/deletions per commit.
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/commits"
+      query:
+        ref_name: "{{ filters.ref }}"
+        path: "{{ filters.path }}"
+        author: "{{ (filters.author | replace('%', '')) if filters.author else none }}"
+        first_parent: "{{ filters.first_parent }}"
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+        with_stats: true
+        per_page: 100
+    filters:
+      - {column: project, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Project ID or full path (or bare name with GITLAB_GROUP)", examples: [acme/checkout]}
+      - {column: ref, description: "Branch, tag or revision range (default: default branch)", examples: [main]}
+      - {column: path, description: "Only commits touching this file or directory", examples: [deploy/values-prod.yaml]}
+      - {column: author, ops: ["=", "like"], description: "Author name: exact (=) or author LIKE '%part%' (sent to GitLab without the %, which matches substrings of name/email). Filter emails with author_email in SQL.", examples: [Example User]}
+      - {column: first_parent, type: BOOLEAN, description: "true = follow only the first parent (merge commits on the branch)"}
+    time: {column: ts, default_lookback: 48h, max_window: 90d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.committed_date or _.created_at", description: "Committed date (created_at is identical to it)"}
+      - {name: authored_at, type: TIMESTAMP, path: authored_date}
+      - {name: sha, path: id, description: "Full commit SHA"}
+      - {name: short_sha, path: short_id}
+      - {name: title, path: title, description: "First line of the message"}
+      - {name: message, path: message}
+      - {name: author, path: author_name}
+      - {name: author_email, path: author_email}
+      - {name: committer, path: committer_name}
+      - {name: parent_ids, type: JSON, path: parent_ids}
+      - {name: is_merge, type: BOOLEAN, expr: "(_.parent_ids or []) | length > 1"}
+      - {name: additions, type: BIGINT, path: stats.additions}
+      - {name: deletions, type: BIGINT, path: stats.deletions}
+      - {name: trailers, type: JSON, path: trailers, description: "Parsed git trailers (Co-authored-by, Cc...) when present"}
+      - {name: url, path: web_url}
+      - {name: project, filter_only: true}
+      - {name: ref, filter_only: true}
+      - {name: path, filter_only: true}
+      - {name: first_parent, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "Only history reachable from ref is listed: a hotfix on a release branch is invisible on the default branch."
+      - "GitLab.com does not return x-total headers for commits; the table stops after 5 pages of 100."
+    examples:
+      - sql: >-
+          SELECT ts, short_sha, author, title, additions + deletions AS churn, url FROM gitlab_commits
+          WHERE project = 'acme/checkout' AND ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 12:00:00'
+          ORDER BY ts DESC
+        description: Everything that landed on the default branch before the incident, with churn.
+      - sql: "SELECT ts, short_sha, author, title FROM gitlab_commits WHERE project = 'acme/checkout' AND path = 'deploy/values-prod.yaml' AND ts >= now() - INTERVAL 14 DAY"
+        description: Who changed the production values file recently.
+    fixtures:
+      - file: commits.json
+        filters: {project: janedoe/gitlab-foss}
+        expect_rows: 2
+        expect_columns: {sha: ed899a2f4b50b4370feeea94676502b42383c746, short_sha: ed899a2f4b5, title: "Replace sanitize with escape once", author: Example User, committer: Administrator, ts: "2021-09-20T11:50:22Z", is_merge: false, project: janedoe/gitlab-foss}
+        note: "Official example response of GET /projects/:id/repository/commits (docs.gitlab.com/api/commits/#list-repository-commits)."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/commits/{{ filters.ref or 'HEAD' }}"
+    docs_url: https://docs.gitlab.com/api/commits/#list-repository-commits
+
+  - name: gitlab_commit
+    title: One commit with stats and its last pipeline
+    description: >-
+      One row per requested commit (ref = SHA, branch or tag; IN-lists fan out): message, author,
+      dates, additions/deletions and the status of the last pipeline that ran on it. Filter on
+      project and ref (both required). Use gitlab_commit_diff for the per-file diff.
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/commits/{{ filters.ref | urlencode | replace('/', '%2F') }}"
+      query:
+        stats: true
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: ref, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Commit SHA (short or full), branch or tag", examples: [6104942438c14ec7bd21c6cd5bd995272b3faff6]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: sha, path: id}
+      - {name: short_sha, path: short_id}
+      - {name: title, path: title}
+      - {name: message, path: message}
+      - {name: author, path: author_name}
+      - {name: author_email, path: author_email}
+      - {name: ts, type: TIMESTAMP, path: committed_date}
+      - {name: authored_at, type: TIMESTAMP, path: authored_date}
+      - {name: parent_ids, type: JSON, path: parent_ids}
+      - {name: additions, type: BIGINT, path: stats.additions}
+      - {name: deletions, type: BIGINT, path: stats.deletions}
+      - {name: total, type: BIGINT, path: stats.total}
+      - {name: status, path: status, description: "Pipeline status of the commit"}
+      - {name: last_pipeline_id, type: BIGINT, path: last_pipeline.id}
+      - {name: last_pipeline_status, path: last_pipeline.status}
+      - {name: last_pipeline_ref, path: last_pipeline.ref}
+      - {name: url, path: web_url}
+      - {name: project, filter_only: true}
+      - {name: ref, filter_only: true}
+    examples:
+      - sql: "SELECT ref, sha, title, author, ts, additions, deletions, last_pipeline_status FROM gitlab_commit WHERE project = 'acme/checkout' AND ref IN ('a91957a8', '99d03678')"
+        description: Two deployed commits side by side, with their pipeline results.
+    fixtures:
+      - file: commit.json
+        filters: {project: janedoe/gitlab-foss, ref: main}
+        expect_rows: 1
+        expect_columns: {sha: 6104942438c14ec7bd21c6cd5bd995272b3faff6, title: "Sanitize for network graph", author: randx, additions: 15, deletions: 10, total: 25, status: running, last_pipeline_id: 8, last_pipeline_status: created, ts: "2021-09-20T09:06:12.300000+03:00", ref: main}
+        note: "Official example response of GET /projects/:id/repository/commits/:sha (docs.gitlab.com/api/commits/#retrieve-a-commit)."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/commit/{{ filters.ref }}"
+    docs_url: https://docs.gitlab.com/api/commits/#retrieve-a-commit
+
+  - name: gitlab_commit_diff
+    title: Files changed by a commit (with diffs)
+    description: >-
+      One row per file changed by a commit: old/new path, added/renamed/deleted flags and the
+      diff text. Filter on project and ref (both required).
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/commits/{{ filters.ref | urlencode | replace('/', '%2F') }}/diff"
+      query:
+        per_page: 100
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: ref, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Commit SHA, branch or tag", examples: [6104942438c14ec7bd21c6cd5bd995272b3faff6]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 10}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: new_path, path: new_path}
+      - {name: old_path, path: old_path}
+      - {name: status, expr: "'added' if _.new_file else ('removed' if _.deleted_file else ('renamed' if _.renamed_file else 'modified'))"}
+      - {name: diff, path: diff, description: "Diff hunks (empty when too_large/collapsed)"}
+      - {name: new_file, type: BOOLEAN, path: new_file}
+      - {name: renamed_file, type: BOOLEAN, path: renamed_file}
+      - {name: deleted_file, type: BOOLEAN, path: deleted_file}
+      - {name: too_large, type: BOOLEAN, path: too_large}
+      - {name: collapsed, type: BOOLEAN, path: collapsed}
+      - {name: project, filter_only: true}
+      - {name: ref, filter_only: true}
+    pitfalls:
+      - "Subject to the instance diff limits: past the max file count pagination stops; too_large/collapsed files have no diff text."
+    examples:
+      - sql: "SELECT new_path, status, diff FROM gitlab_commit_diff WHERE project = 'acme/checkout' AND ref = '6104942438c1'"
+        description: What a suspect commit changed.
+    fixtures:
+      - file: commit_diff.json
+        filters: {project: janedoe/gitlab-foss, ref: main}
+        expect_rows: 1
+        expect_columns: {new_path: doc/update/5.4-to-6.0.md, old_path: doc/update/5.4-to-6.0.md, status: modified, new_file: false, too_large: false}
+        note: "Official example response of GET /projects/:id/repository/commits/:sha/diff (docs.gitlab.com/api/commits/#retrieve-commit-diff)."
+    docs_url: https://docs.gitlab.com/api/commits/#retrieve-commit-diff
+
+  - name: gitlab_commit_merge_requests
+    title: Merge request that introduced a commit
+    description: >-
+      The merge request(s) that originally introduced a commit: one row per MR. Filter on project
+      and ref (a commit SHA; both required), optionally state. Use it to go from a deployed SHA to
+      the MR, its author and description.
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/commits/{{ filters.ref }}/merge_requests"
+      query:
+        state: "{{ filters.state }}"
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: ref, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Commit SHA", examples: [99d03678b90d914dbb1b109132516d71a4a03ea8]}
+      - {column: state, description: "opened | closed | locked | merged", examples: [merged]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: iid, type: BIGINT, path: iid, description: "MR number within the project (!iid)"}
+      - {name: title, path: title}
+      - {name: state, path: state}
+      - {name: author, path: author.username}
+      - {name: source_branch, path: source_branch}
+      - {name: target_branch, path: target_branch}
+      - {name: merge_commit_sha, path: merge_commit_sha}
+      - {name: squash_commit_sha, path: squash_commit_sha}
+      - {name: sha, path: sha, description: "MR head SHA"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: ts, type: TIMESTAMP, path: updated_at}
+      - {name: description, path: description}
+      - {name: url, path: web_url}
+      - {name: project, filter_only: true}
+      - {name: ref, filter_only: true}
+    examples:
+      - sql: "SELECT iid, title, author, state, url FROM gitlab_commit_merge_requests WHERE project = 'acme/checkout' AND ref = '99d03678b90d914dbb1b109132516d71a4a03ea8'"
+        description: Which MR shipped the deployed commit.
+    fixtures:
+      - file: commit_merge_requests.json
+        filters: {project: root/test-project, ref: af5b13261899fb2c0db30abdd0af8b07cb44fdc5}
+        expect_rows: 1
+        expect_columns: {iid: 1, title: "Add new file", state: opened, author: janedoe, source_branch: test-branch, target_branch: main, url: "https://gitlab.example.com/root/test-project/merge_requests/1"}
+        note: "Official example response of GET /projects/:id/repository/commits/:sha/merge_requests (docs.gitlab.com/api/commits/#list-merge-requests-associated-with-a-commit)."
+    docs_url: https://docs.gitlab.com/api/commits/#list-merge-requests-associated-with-a-commit
+
+  # ----------------------------------------------------------------------------------------------
+  # Compare (release diffs)
+  # ----------------------------------------------------------------------------------------------
+  - name: gitlab_compare_commits
+    title: Commits between two refs (release diff)
+    description: >-
+      Compare base (from) and head (to) - branches, tags or SHAs, e.g. the previous and current
+      release tags: one row per commit in the range. Filter on project, base and head (all
+      required); straight = true compares from..to directly instead of from the merge base. The
+      commit list is always complete, even when the diff part timed out.
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/compare"
+      query:
+        from: "{{ filters.base }}"
+        to: "{{ filters.head }}"
+        straight: "{{ filters.straight }}"
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: base, required: true, description: "from: older ref (tag, branch or SHA)", examples: [v1.4.2]}
+      - {column: head, required: true, description: "to: newer ref (tag, branch or SHA)", examples: [v1.5.0]}
+      - {column: straight, type: BOOLEAN, description: "true = from..to (direct), default false = from...to (merge base)"}
+    response:
+      rows_path: "$.commits[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: sha, path: id}
+      - {name: short_sha, path: short_id}
+      - {name: title, path: title}
+      - {name: author, path: author_name}
+      - {name: author_email, path: author_email}
+      - {name: compare_timeout, type: BOOLEAN, path: "$.compare_timeout", description: "Diffs were cut off (commits are still complete)"}
+      - {name: compare_url, path: "$.web_url"}
+      - {name: project, filter_only: true}
+      - {name: base, filter_only: true}
+      - {name: head, filter_only: true}
+      - {name: straight, type: BOOLEAN, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT ts, short_sha, author, title FROM gitlab_compare_commits
+          WHERE project = 'acme/checkout' AND base = 'v1.4.2' AND head = 'v1.5.0' ORDER BY ts
+        description: The changelog of the release that went out before the incident.
+    fixtures:
+      - file: compare.json
+        filters: {project: janedoe/gitlab-foss, base: main, head: feature}
+        expect_rows: 1
+        expect_columns: {sha: 12d65c8dd2b2676fa3ac47d955accc085a37a9c1, title: "JS fix", author: Example User, ts: "2014-02-27T10:27:00+02:00", compare_timeout: false, base: main}
+        note: "Official example response of GET /projects/:id/repository/compare (docs.gitlab.com/api/repositories/#compare-branches-tags-or-commits)."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/compare/{{ filters.base }}...{{ filters.head }}"
+    docs_url: https://docs.gitlab.com/api/repositories/#compare-branches-tags-or-commits
+
+  - name: gitlab_compare_diffs
+    title: Files changed between two refs (release diff with diffs)
+    description: >-
+      Compare base (from) and head (to): one row per changed file with its diff. Filter on
+      project, base and head (all required). If GitLab reports compare_timeout (diff exceeded size
+      limits or timed out) the query FAILS loudly instead of returning a partial file list: compare
+      smaller ranges or use gitlab_commit_diff per commit.
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/compare"
+      query:
+        from: "{{ filters.base }}"
+        to: "{{ filters.head }}"
+        straight: "{{ filters.straight }}"
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: base, required: true, description: "from: older ref", examples: [v1.4.2]}
+      - {column: head, required: true, description: "to: newer ref", examples: [v1.5.0]}
+      - {column: straight, type: BOOLEAN, description: "true = direct from..to comparison"}
+    response:
+      rows_path: "$.diffs[*]"
+      errors:
+        - {path: "$.compare_timeout", equals: true, message: "$.web_url", hint: "compare_timeout: the diff exceeded size limits or timed out, so the file list is incomplete; compare a smaller range or use gitlab_commit_diff per commit (gitlab_compare_commits is still complete)"}
+    columns:
+      - {name: new_path, path: new_path}
+      - {name: old_path, path: old_path}
+      - {name: status, expr: "'added' if _.new_file else ('removed' if _.deleted_file else ('renamed' if _.renamed_file else 'modified'))"}
+      - {name: diff, path: diff}
+      - {name: new_file, type: BOOLEAN, path: new_file}
+      - {name: renamed_file, type: BOOLEAN, path: renamed_file}
+      - {name: deleted_file, type: BOOLEAN, path: deleted_file}
+      - {name: too_large, type: BOOLEAN, path: too_large}
+      - {name: collapsed, type: BOOLEAN, path: collapsed}
+      - {name: url, path: "$.web_url", description: "Comparison web URL"}
+      - {name: project, filter_only: true}
+      - {name: base, filter_only: true}
+      - {name: head, filter_only: true}
+      - {name: straight, type: BOOLEAN, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT new_path, status, diff FROM gitlab_compare_diffs
+          WHERE project = 'acme/checkout' AND base = 'v1.4.2' AND head = 'v1.5.0'
+            AND (new_path LIKE '%.yml' OR new_path LIKE '%.yaml' OR new_path LIKE 'db/migrate/%')
+        description: Config and migration changes shipped by a release.
+    fixtures:
+      - file: compare.json
+        filters: {project: janedoe/gitlab-foss, base: main, head: feature}
+        expect_rows: 1
+        expect_columns: {new_path: files/js/application.js, status: modified, new_file: false, too_large: false, url: "https://gitlab.example.com/janedoe/gitlab-foss/-/compare/ae73cb07c9eeaf35924a10f713b364d32b2dd34f...0b4bc9a49b562e85de7cc9e834518ea6828729b9"}
+        note: "Official example response of GET /projects/:id/repository/compare."
+      - file: compare_timeout.json
+        filters: {project: janedoe/gitlab-foss, base: main, head: feature}
+        expect_error: "compare_timeout"
+        note: "The official compare example with compare_timeout set to true (a documented response attribute: 'the comparison exceeded size limits or timed out'); proves the 2xx partial-result rule fires."
+    docs_url: https://docs.gitlab.com/api/repositories/#compare-branches-tags-or-commits
+
+  # ----------------------------------------------------------------------------------------------
+  # Merge requests
+  # ----------------------------------------------------------------------------------------------
+  - name: gitlab_merge_requests
+    title: Merge requests of a project
+    description: >-
+      One row per merge request UPDATED inside the ts window (pushed down as updated_after /
+      updated_before), most recently updated first. Filter on project (required), state (opened |
+      closed | locked | merged; default all), target_branch, source_branch, author (username),
+      label, search (title/description text).
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/merge_requests"
+      query:
+        state: "{{ filters.state or 'all' }}"
+        target_branch: "{{ filters.target_branch }}"
+        source_branch: "{{ filters.source_branch }}"
+        author_username: "{{ filters.author }}"
+        labels: "{{ filters.label }}"
+        search: "{{ filters.search }}"
+        updated_after: "{{ time.start | rfc3339 }}"
+        updated_before: "{{ time.end | rfc3339 }}"
+        order_by: updated_at
+        sort: desc
+        per_page: 100
+    filters:
+      - {column: project, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: state, description: "opened | closed | locked | merged (default: all)", examples: [merged]}
+      - {column: target_branch, description: "Target branch", examples: [main]}
+      - {column: source_branch, description: "Source branch"}
+      - {column: author, description: "Author username", examples: [admin]}
+      - {column: label, description: "Label name (comma-separated = all of them)", examples: [hotfix]}
+      - {column: search, description: "Text in title or description", examples: [timeout]}
+    time: {column: ts, default_lookback: 7d, max_window: 180d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: updated_at}
+      - {name: iid, type: BIGINT, path: iid, description: "MR number (!iid)"}
+      - {name: id, type: BIGINT, path: id}
+      - {name: title, path: title}
+      - {name: state, path: state, description: "opened | closed | merged | locked"}
+      - {name: draft, type: BOOLEAN, path: draft}
+      - {name: author, path: author.username}
+      - {name: merge_user, path: merge_user.username, description: "Who merged (or set auto-merge)"}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: merged_at, type: TIMESTAMP, path: merged_at}
+      - {name: closed_at, type: TIMESTAMP, path: closed_at}
+      - {name: target_branch, path: target_branch}
+      - {name: source_branch, path: source_branch}
+      - {name: sha, path: sha, description: "Head SHA"}
+      - {name: merge_commit_sha, path: merge_commit_sha}
+      - {name: squash_commit_sha, path: squash_commit_sha}
+      - {name: labels, type: JSON, path: labels}
+      - {name: detailed_merge_status, path: detailed_merge_status}
+      - {name: has_conflicts, type: BOOLEAN, path: has_conflicts}
+      - {name: reference, path: references.full, description: "group/project!iid"}
+      - {name: description, path: description}
+      - {name: url, path: web_url}
+      - {name: project, filter_only: true}
+      - {name: label, filter_only: true}
+      - {name: search, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT merged_at, iid, author, title, merge_commit_sha, url FROM gitlab_merge_requests
+          WHERE project = 'acme/checkout' AND state = 'merged' AND ts >= now() - INTERVAL 2 DAY ORDER BY merged_at DESC
+        description: MRs merged (and touched) in the last two days.
+    fixtures:
+      - file: merge_requests.json
+        filters: {project: my-group/my-project}
+        expect_rows: 1
+        expect_columns: {iid: 1, id: 1, title: test1, state: merged, author: admin, merge_user: DouweM, target_branch: main, source_branch: test1, reference: "my-group/my-project!1", ts: "2017-04-29T08:46:00Z", merged_at: "2018-09-07T11:16:17Z", url: "http://gitlab.example.com/my-group/my-project/merge_requests/1"}
+        note: "Official example response of GET /projects/:id/merge_requests (docs.gitlab.com/api/merge_requests/#list-project-merge-requests); a '// Deprecated' doc comment was removed."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/merge_requests?scope=all&state=all"
+    docs_url: https://docs.gitlab.com/api/merge_requests/#list-project-merge-requests
+
+  - name: gitlab_merged_merge_requests
+    title: Merge requests merged in a time window (project or group-wide change feed)
+    description: >-
+      Merge requests MERGED inside the ts window (state=merged, merged_after / merged_before).
+      Scope with project (one project) or group (default GITLAB_GROUP: the group and all its
+      subgroups via GET /groups/:id/merge_requests). One row per MR, ts = merged_at. The best
+      group-wide 'what changed before the incident' feed.
+    kind: changes
+    steps:
+      - name: list
+        when: "filters.project or filters.group or env.GITLAB_GROUP"
+        method: GET
+        path: "{% if filters.project %}/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}{% else %}/groups/{{ (filters.group or env.GITLAB_GROUP) | string | urlencode | replace('/', '%2F') }}{% endif %}/merge_requests"
+        query:
+          state: merged
+          merged_after: "{{ time.start | rfc3339 }}"
+          merged_before: "{{ time.end | rfc3339 }}"
+          target_branch: "{{ filters.target_branch }}"
+          labels: "{{ filters.label }}"
+          order_by: updated_at
+          sort: desc
+          per_page: 100
+    filters:
+      - {column: project, ops: ["=", "in"], max_fan_out: 10, description: "Project ID or full path (scope to one project)", examples: [acme/checkout]}
+      - {column: group, description: "Group full path or ID (default GITLAB_GROUP)", examples: [acme]}
+      - {column: target_branch, description: "Target branch", examples: [main]}
+      - {column: label, description: "Label name", examples: [hotfix]}
+    time: {column: ts, default_lookback: 48h, max_window: 90d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: merged_at, description: "Merge time"}
+      - {name: iid, type: BIGINT, path: iid}
+      - {name: title, path: title}
+      - {name: author, path: author.username}
+      - {name: merge_user, path: merge_user.username}
+      - {name: project, expr: "filters.project if filters.project else ((_.references.full or '').split('!')[0] if _.references is mapping else none)", description: "Project (the filter value when given, else the full path from references)"}
+      - {name: project_id, type: BIGINT, path: project_id}
+      - {name: target_branch, path: target_branch}
+      - {name: source_branch, path: source_branch}
+      - {name: merge_commit_sha, path: merge_commit_sha}
+      - {name: squash_commit_sha, path: squash_commit_sha}
+      - {name: sha, path: sha}
+      - {name: labels, type: JSON, path: labels}
+      - {name: reference, path: references.full}
+      - {name: description, path: description}
+      - {name: url, path: web_url}
+      - {name: group, filter_only: true}
+      - {name: label, filter_only: true}
+    pitfalls:
+      - "Without project, group and GITLAB_GROUP the table does not run (0 rows)."
+      - "Group listing excludes archived projects by default (non_archived=true)."
+      - "The deployed commit is merge_commit_sha (merge commits) or squash_commit_sha (squash merges); with fast-forward merges both are NULL and sha is the commit."
+    examples:
+      - sql: >-
+          SELECT ts, project, iid, author, title, url FROM gitlab_merged_merge_requests
+          WHERE group = 'acme' AND ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 12:00:00' ORDER BY ts DESC
+        description: Every MR merged anywhere in the group in the 36h before the incident.
+    fixtures:
+      - file: group_merge_requests.json
+        filters: {group: my-group, project: null}
+        expect_rows: 1
+        expect_columns: {ts: "2018-09-07T11:16:17Z", iid: 1, title: test1, author: admin, merge_user: DouweM, project: my-group/my-project, project_id: 3, target_branch: main}
+        note: "Official example response of GET /groups/:id/merge_requests (docs.gitlab.com/api/merge_requests/#list-group-merge-requests); a '// Deprecated' doc comment was removed."
+    ui_link: "{{ ui_base_url }}/{{ ('groups/' ~ (filters.group or env.GITLAB_GROUP)) if not filters.project else filters.project }}/-/merge_requests?state=merged"
+    docs_url: https://docs.gitlab.com/api/merge_requests/#list-group-merge-requests
+
+  - name: gitlab_merge_request_diffs
+    title: Files changed by a merge request
+    description: >-
+      One row per file changed by a merge request, with its diff. Filter on project and iid (the
+      !number; both required).
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/merge_requests/{{ filters.iid }}/diffs"
+      query:
+        per_page: 100
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: iid, required: true, type: BIGINT, ops: ["=", "in"], max_fan_out: 10, description: "MR iid (the !number)", examples: ["1"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 10}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: new_path, path: new_path}
+      - {name: old_path, path: old_path}
+      - {name: status, expr: "'added' if _.new_file else ('removed' if _.deleted_file else ('renamed' if _.renamed_file else 'modified'))"}
+      - {name: diff, path: diff}
+      - {name: new_file, type: BOOLEAN, path: new_file}
+      - {name: renamed_file, type: BOOLEAN, path: renamed_file}
+      - {name: deleted_file, type: BOOLEAN, path: deleted_file}
+      - {name: generated_file, type: BOOLEAN, path: generated_file}
+      - {name: too_large, type: BOOLEAN, path: too_large}
+      - {name: collapsed, type: BOOLEAN, path: collapsed}
+      - {name: project, filter_only: true}
+      - {name: iid, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Subject to the merge request diff limits: huge MRs return limited results."
+    examples:
+      - sql: "SELECT new_path, status, diff FROM gitlab_merge_request_diffs WHERE project = 'acme/checkout' AND iid = 42 AND NOT generated_file"
+        description: The hand-written changes of a suspect MR.
+    fixtures:
+      - file: merge_request_diffs.json
+        filters: {project: my-group/my-project, iid: 1}
+        expect_rows: 2
+        expect_columns: {new_path: README, old_path: README, status: modified, generated_file: false, iid: 1}
+        note: "Official example response of GET /projects/:id/merge_requests/:iid/diffs (docs.gitlab.com/api/merge_requests/#list-merge-request-diffs); the doc's invalid JSON escapes '\\ ' were replaced by spaces."
+    docs_url: https://docs.gitlab.com/api/merge_requests/#list-merge-request-diffs
+
+  # ----------------------------------------------------------------------------------------------
+  # Deployments and environments
+  # ----------------------------------------------------------------------------------------------
+  - name: gitlab_deployments
+    title: Deployments of a project
+    description: >-
+      One row per deployment UPDATED inside the ts window (updated_after / updated_before with
+      order_by=updated_at, newest first): environment, status (created | running | success |
+      failed | canceled | skipped | blocked), ref, SHA, the deploy job and its pipeline. Filter on
+      project (required), env (environment name), status.
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/deployments"
+      query:
+        environment: "{{ filters.environment }}"
+        status: "{{ filters.status }}"
+        updated_after: "{{ time.start | rfc3339 }}"
+        updated_before: "{{ time.end | rfc3339 }}"
+        order_by: updated_at
+        sort: desc
+        per_page: 100
+    filters:
+      - {column: project, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: env, param: environment, description: "Environment name (exact)", examples: [production]}
+      - {column: status, description: "created | running | success | failed | canceled | skipped | blocked", examples: [success]}
+    time: {column: ts, default_lookback: 7d, max_window: 180d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: updated_at, description: "Last update of the deployment (~ finish time)"}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: id, type: BIGINT, path: id}
+      - {name: iid, type: BIGINT, path: iid}
+      - {name: status, path: status}
+      - {name: env, path: environment.name}
+      - {name: environment_url, path: environment.external_url}
+      - {name: ref, path: ref}
+      - {name: sha, path: sha}
+      - {name: title, expr: "'deploy ' ~ (_.ref or '') ~ ' (' ~ (_.sha or '')[:8] ~ ') to ' ~ ((_.environment.name if _.environment is mapping else none) or '?') ~ ': ' ~ (_.status or '')"}
+      - {name: author, path: user.username}
+      - {name: job_id, type: BIGINT, path: deployable.id}
+      - {name: job_name, path: deployable.name}
+      - {name: job_status, path: deployable.status}
+      - {name: job_finished_at, type: TIMESTAMP, path: deployable.finished_at}
+      - {name: commit_title, path: deployable.commit.title}
+      - {name: pipeline_id, type: BIGINT, path: deployable.pipeline.id}
+      - {name: pipeline_status, path: deployable.pipeline.status}
+      - {name: url, path: deployable.pipeline.web_url, description: "Pipeline web URL"}
+      - {name: project, filter_only: true}
+    pitfalls:
+      - "Deployments exist only for CI jobs with an 'environment:' keyword; plain deploy scripts leave no record (check gitlab_pipelines / gitlab_jobs)."
+      - "The API 400s on some filter/sort combinations; this table always sends order_by=updated_at with the updated_* window, which is valid."
+      - "Environment names are exact (production != prod); list them with gitlab_environments."
+    examples:
+      - sql: >-
+          SELECT ts, env, status, ref, sha, author, commit_title FROM gitlab_deployments
+          WHERE project = 'acme/checkout' AND env = 'production' AND ts >= now() - INTERVAL 2 DAY ORDER BY ts DESC
+        description: Production deploys of a service in the last two days.
+    fixtures:
+      - file: deployments.json
+        filters: {project: root/project}
+        expect_rows: 2
+        expect_columns: {ts: "2016-08-11T07:38:12Z", id: 41, iid: 1, status: created, env: production, ref: main, sha: 99d03678b90d914dbb1b109132516d71a4a03ea8, author: root, job_name: deploy, job_status: success, pipeline_id: 36, title: "deploy main (99d03678) to production: created"}
+        note: "Official example response of GET /projects/:id/deployments (docs.gitlab.com/api/deployments/#list-all-project-deployments)."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/environments"
+    docs_url: https://docs.gitlab.com/api/deployments/#list-all-project-deployments
+
+  - name: gitlab_environments
+    title: Environments of a project
+    description: >-
+      One row per environment (production, staging, review apps): state (available | stopping |
+      stopped), tier, external URL, Kubernetes namespace. Filter on project (required), env (exact
+      name), state, search (>= 3 chars).
+    kind: entities
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/environments"
+      query:
+        name: "{{ filters.name }}"
+        search: "{{ filters.search }}"
+        states: "{{ filters.state }}"
+        per_page: 100
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: env, param: name, description: "Exact environment name (mutually exclusive with search)", examples: [production]}
+      - {column: state, description: "available | stopping | stopped", examples: [available]}
+      - {column: search, description: "Name substring, at least 3 characters", examples: [review]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: env, path: name, description: "Environment name"}
+      - {name: id, type: BIGINT, path: id}
+      - {name: state, path: state}
+      - {name: tier, path: tier, description: "production | staging | testing | development | other"}
+      - {name: external_url, path: external_url}
+      - {name: kubernetes_namespace, path: kubernetes_namespace}
+      - {name: slug, path: slug}
+      - {name: description, path: description}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: auto_stop_at, type: TIMESTAMP, path: auto_stop_at}
+      - {name: project, filter_only: true}
+      - {name: search, filter_only: true}
+    examples:
+      - sql: "SELECT env, tier, state, external_url FROM gitlab_environments WHERE project = 'acme/checkout' AND state = 'available'"
+        description: The exact environment names to use with gitlab_deployments.
+    fixtures:
+      - file: environments.json
+        filters: {project: root/project}
+        expect_rows: 1
+        expect_columns: {env: review/fix-foo, id: 1, state: available, tier: development, external_url: "https://review-fix-foo-dfjre3.gitlab.example.com", kubernetes_namespace: flux-system}
+        note: "Official example response of GET /projects/:id/environments (docs.gitlab.com/api/environments/#list-all-environments)."
+    docs_url: https://docs.gitlab.com/api/environments/#list-all-environments
+
+  # ----------------------------------------------------------------------------------------------
+  # CI/CD
+  # ----------------------------------------------------------------------------------------------
+  - name: gitlab_pipelines
+    title: CI/CD pipelines of a project
+    description: >-
+      One row per pipeline CREATED inside the ts window (created_after / created_before), newest
+      first. Filter on project (required), status (created | waiting_for_resource | preparing |
+      pending | running | success | failed | canceled | skipped | manual | scheduled), ref
+      (branch/tag), sha, source (push | web | trigger | schedule | api | merge_request_event |
+      parent_pipeline ...), username. Child pipelines need source = 'parent_pipeline'.
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/pipelines"
+      query:
+        status: "{{ filters.status }}"
+        ref: "{{ filters.ref }}"
+        sha: "{{ filters.sha }}"
+        source: "{{ filters.source }}"
+        username: "{{ filters.username }}"
+        created_after: "{{ time.start | rfc3339 }}"
+        created_before: "{{ time.end | rfc3339 }}"
+        order_by: id
+        sort: desc
+        per_page: 100
+    filters:
+      - {column: project, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: status, description: "Pipeline status", examples: [failed]}
+      - {column: ref, description: "Branch or tag", examples: [main]}
+      - {column: sha, description: "Full commit SHA", examples: [a91957a858320c0e17f3a0eca7cfacbff50ea29a]}
+      - {column: source, description: "Pipeline source", examples: [push]}
+      - {column: username, description: "Username that triggered the pipelines"}
+    time: {column: ts, default_lookback: 48h, max_window: 90d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: id, type: BIGINT, path: id, description: "Pipeline id (gitlab_pipeline_jobs.pipeline_id)"}
+      - {name: iid, type: BIGINT, path: iid}
+      - {name: status, path: status}
+      - {name: source, path: source}
+      - {name: ref, path: ref}
+      - {name: sha, path: sha}
+      - {name: name, path: name}
+      - {name: project_id, type: BIGINT, path: project_id}
+      - {name: url, path: web_url}
+      - {name: project, filter_only: true}
+      - {name: username, filter_only: true}
+    pitfalls:
+      - "The list omits durations and the triggering user: get timings from gitlab_pipeline_jobs."
+    examples:
+      - sql: >-
+          SELECT ts, id, ref, sha, status, source, url FROM gitlab_pipelines
+          WHERE project = 'acme/checkout' AND ref = 'main' AND ts >= now() - INTERVAL 1 DAY ORDER BY ts DESC
+        description: Pipelines on main in the last day (did the deploy pipeline fail?).
+    fixtures:
+      - file: pipelines.json
+        filters: {project: foo/bar}
+        expect_rows: 2
+        expect_columns: {ts: "2016-08-11T11:28:34Z", id: 47, iid: 12, status: pending, source: push, ref: new-pipeline, sha: a91957a858320c0e17f3a0eca7cfacbff50ea29a, url: "https://example.com/foo/bar/pipelines/47"}
+        note: "Official example response of GET /projects/:id/pipelines (docs.gitlab.com/api/pipelines/#list-project-pipelines)."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/pipelines"
+    docs_url: https://docs.gitlab.com/api/pipelines/#list-project-pipelines
+
+  - name: gitlab_pipeline_jobs
+    title: Jobs of a pipeline
+    description: >-
+      One row per job of a pipeline (newest first): stage, status, failure_reason, duration,
+      runner, commit. Filter on project and pipeline_id (both required); status = '...' or IN
+      (...) is sent as scope[] (created | pending | running | failed | success | canceled |
+      skipped | waiting_for_resource | manual); include_retried = true adds retried jobs.
+    kind: events
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/pipelines/{{ filters.pipeline_id }}/jobs"
+      query:
+        "scope[]": "{{ filters.status }}"
+        include_retried: "{{ filters.include_retried }}"
+        per_page: 100
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: pipeline_id, required: true, type: BIGINT, ops: ["=", "in"], max_fan_out: 10, description: "gitlab_pipelines.id", examples: ["6"]}
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "Job status(es), sent as scope[]", examples: [failed]}
+      - {column: include_retried, type: BOOLEAN, description: "Include retried jobs (default false)"}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id, description: "Job id (gitlab_job_log.job_id)"}
+      - {name: name, path: name}
+      - {name: stage, path: stage}
+      - {name: status, path: status}
+      - {name: failure_reason, path: failure_reason, description: "script_failure, stuck_or_timeout_failure, runner_system_failure ..."}
+      - {name: allow_failure, type: BOOLEAN, path: allow_failure}
+      - {name: ts, type: TIMESTAMP, expr: "_.started_at or _.created_at", description: "Start time (created_at if never started)"}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: finished_at, type: TIMESTAMP, path: finished_at}
+      - {name: duration_s, type: DOUBLE, path: duration, description: "Run time in seconds"}
+      - {name: queued_duration_s, type: DOUBLE, path: queued_duration, description: "Time spent queued, seconds"}
+      - {name: ref, path: ref}
+      - {name: tag, type: BOOLEAN, path: tag}
+      - {name: commit_sha, path: commit.id}
+      - {name: commit_title, path: commit.title}
+      - {name: author, path: user.username}
+      - {name: runner, path: runner.description}
+      - {name: tags, type: JSON, path: tag_list, description: "Runner tags"}
+      - {name: url, path: web_url}
+      - {name: project, filter_only: true}
+      - {name: pipeline_id, type: BIGINT, filter_only: true}
+      - {name: include_retried, type: BOOLEAN, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT name, stage, status, failure_reason, duration_s, url FROM gitlab_pipeline_jobs
+          WHERE project = 'acme/checkout' AND pipeline_id = 1234 AND status IN ('failed', 'canceled')
+        description: Which jobs of the deploy pipeline failed and why.
+    fixtures:
+      - file: pipeline_jobs.json
+        filters: {project: foo/bar, pipeline_id: 6}
+        expect_rows: 2
+        expect_columns: {id: 6, name: "rspec:other", stage: test, status: failed, failure_reason: stuck_or_timeout_failure, duration_s: 0.192, ts: "2015-12-24T17:54:24Z", commit_sha: 0ff3ae198f8601a285adcf5c0fff204ee6fba5fd, author: root, pipeline_id: 6}
+        note: "Official example response of GET /projects/:id/pipelines/:pipeline_id/jobs (docs.gitlab.com/api/jobs/#list-all-jobs-by-pipeline); a trailing comma in the doc example was removed."
+    docs_url: https://docs.gitlab.com/api/jobs/#list-all-jobs-by-pipeline
+
+  - name: gitlab_jobs
+    title: Recent jobs of a project (all pipelines)
+    description: >-
+      The project's most recent CI jobs across all pipelines, newest first (jobs are returned by
+      ID in descending order; up to 500 jobs). Filter on project (required) and status (sent as scope[]). There is no
+      server-side time filter: the ts range is applied after fetching. Use it to find the latest
+      failed deploy job without knowing the pipeline.
+    kind: events
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/jobs"
+      query:
+        "scope[]": "{{ filters.status }}"
+        per_page: 100
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "Job status(es), sent as scope[]", examples: [failed]}
+    time: {column: ts, default_lookback: 48h}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, type: BIGINT, path: id}
+      - {name: name, path: name}
+      - {name: stage, path: stage}
+      - {name: status, path: status}
+      - {name: failure_reason, path: failure_reason}
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: started_at, type: TIMESTAMP, path: started_at}
+      - {name: finished_at, type: TIMESTAMP, path: finished_at}
+      - {name: duration_s, type: DOUBLE, path: duration}
+      - {name: ref, path: ref}
+      - {name: commit_sha, path: commit.id}
+      - {name: commit_title, path: commit.title}
+      - {name: pipeline_id, type: BIGINT, path: pipeline.id}
+      - {name: author, path: user.username}
+      - {name: url, path: web_url}
+      - {name: project, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT ts, name, stage, status, failure_reason, pipeline_id, url FROM gitlab_jobs
+          WHERE project = 'acme/checkout' AND status = 'failed' AND ts >= now() - INTERVAL 1 DAY ORDER BY ts DESC
+        description: Failed CI jobs of the last day.
+    fixtures:
+      - file: project_jobs.json
+        filters: {project: foo/bar}
+        expect_rows: 2
+        expect_columns: {id: 7, name: teaspoon, stage: test, status: failed, failure_reason: script_failure, pipeline_id: 6, ts: "2015-12-24T15:51:21Z", duration_s: 0.173}
+        note: "Official example response of GET /projects/:id/jobs (docs.gitlab.com/api/jobs/#list-all-jobs-for-a-project)."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/jobs"
+    docs_url: https://docs.gitlab.com/api/jobs/#list-all-jobs-for-a-project
+
+  - name: gitlab_job_log
+    title: Log (trace) of one CI job, one row per line
+    description: >-
+      The plain-text log of a CI job: one row per line with its line number. Filter on project and
+      job_id (both required; from gitlab_pipeline_jobs.id / gitlab_jobs.id). Use it to read the
+      actual error of a failed deploy or test job.
+    kind: logs
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/jobs/{{ filters.job_id }}/trace"
+      response_format: text
+      timeout_s: 90
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: job_id, required: true, type: BIGINT, description: "Job id", examples: ["8"]}
+    response:
+      text: {skip_empty: true}
+    columns:
+      - {name: line_no, type: BIGINT, expr: "_i + 1", description: "Line number among non-empty lines"}
+      - {name: message, path: line, description: "Raw line (may contain ANSI color codes and section_start/section_end markers)"}
+      - {name: project, filter_only: true}
+      - {name: job_id, type: BIGINT, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "Lines contain ANSI escape codes and 'section_start:<epoch>:<name>' markers: strip with regexp_replace(message, '\\x1b\\[[0-9;]*[A-Za-z]', '', 'g') before matching exact text."
+      - "404 = job not found OR no log (erased, expired artifacts, or job never started)."
+    examples:
+      - sql: >-
+          SELECT line_no, message FROM gitlab_job_log
+          WHERE project = 'acme/checkout' AND job_id = 8 AND (message ILIKE '%error%' OR message ILIKE '%fail%') ORDER BY line_no LIMIT 50
+        description: The error lines of a failed job.
+    fixtures:
+      - file: job_trace.txt
+        filters: {project: foo/bar, job_id: 8}
+        expect_rows: 5
+        expect_columns: {line_no: 1, message: "Running with gitlab-runner 16.11.1 (535ced5f)"}
+        note: "The docs give no example body ('Serves the log file' as plain text). Constructed minimal plain-text job log; the runner version matches the docs' runner_manager example (16.11.1 / 535ced5f)."
+    docs_url: https://docs.gitlab.com/api/jobs/#retrieve-a-log-file-for-a-job
+
+  # ----------------------------------------------------------------------------------------------
+  # Releases and tags
+  # ----------------------------------------------------------------------------------------------
+  - name: gitlab_releases
+    title: Releases of a project
+    description: >-
+      One row per release, newest released_at first: tag (version), name, notes, commit,
+      milestones. Filter on project (required).
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/releases"
+      query:
+        order_by: released_at
+        sort: desc
+        per_page: 100
+    filters:
+      - {column: project, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Project ID or full path", examples: [acme/checkout]}
+    time: {column: ts, default_lookback: 30d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: released_at}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: version, path: tag_name}
+      - {name: title, expr: "_.name or _.tag_name"}
+      - {name: description, path: description, description: "Release notes (markdown)"}
+      - {name: author, path: author.username}
+      - {name: commit_sha, path: commit.id}
+      - {name: commit_title, path: commit.title}
+      - {name: upcoming_release, type: BOOLEAN, path: upcoming_release}
+      - {name: milestones, type: JSON, path: "milestones[*].title"}
+      - {name: url, path: _links.self}
+      - {name: project, filter_only: true}
+    examples:
+      - sql: "SELECT ts, version, title, author, commit_sha FROM gitlab_releases WHERE project = 'acme/checkout' ORDER BY ts DESC LIMIT 5"
+        description: The last releases, to pick base/head for gitlab_compare_commits.
+    fixtures:
+      - file: releases.json
+        filters: {project: root/awesome-app}
+        expect_rows: 2
+        expect_columns: {ts: "2019-01-03T01:56:19Z", version: v0.2, title: "Awesome app v0.2 beta", author: root, commit_sha: 079e90101242458910cccd35eab0e211dfc359c0, commit_title: "Update README.md"}
+        note: "Official example response of GET /projects/:id/releases (docs.gitlab.com/api/releases/#list-releases)."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/releases"
+    docs_url: https://docs.gitlab.com/api/releases/#list-releases
+
+  - name: gitlab_tags
+    title: Repository tags
+    description: >-
+      One row per tag (most recently updated first): name, target commit, tag message, protected
+      flag and the attached release notes. Filter on project (required), search ('^v1.5' prefix /
+      'rc$' suffix match).
+    kind: entities
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/tags"
+      query:
+        search: "{{ filters.search }}"
+        order_by: updated
+        sort: desc
+        per_page: 100
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: search, description: "Substring; ^term = prefix, term$ = suffix", examples: ['^v1.5']}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: version, path: name, description: "Tag name"}
+      - {name: sha, path: commit.id, description: "Commit the tag points to"}
+      - {name: target, path: target, description: "Tag object SHA (annotated) or commit SHA"}
+      - {name: ts, type: TIMESTAMP, expr: "_.created_at or _.commit.created_at", description: "Tag creation time (commit time for old tags)"}
+      - {name: message, path: message}
+      - {name: protected, type: BOOLEAN, path: protected}
+      - {name: commit_title, path: commit.title}
+      - {name: release_description, path: release.description}
+      - {name: project, filter_only: true}
+      - {name: search, filter_only: true}
+    examples:
+      - sql: "SELECT version, sha, ts FROM gitlab_tags WHERE project = 'acme/checkout' AND search = '^v1.5' ORDER BY ts DESC"
+        description: Which commit a version tag points to.
+    fixtures:
+      - file: tags.json
+        filters: {project: root/project}
+        expect_rows: 1
+        expect_columns: {version: v1.0.0, sha: 2695effb5807a22ff3d138d593fd856244e155e7, protected: true, ts: "2017-07-26T11:08:53+02:00", release_description: "Amazing release. Wow"}
+        note: "Official example response of GET /projects/:id/repository/tags (docs.gitlab.com/api/tags/#list-all-project-repository-tags)."
+    docs_url: https://docs.gitlab.com/api/tags/#list-all-project-repository-tags
+
+  # ----------------------------------------------------------------------------------------------
+  # Repository files and search
+  # ----------------------------------------------------------------------------------------------
+  - name: gitlab_repository_file
+    title: File metadata at a ref (last commit, blob, size)
+    description: >-
+      Metadata of one file at a ref: size, blob SHA, the commit the ref resolves to and the LAST
+      commit that modified the file, plus the base64 content (not decoded - use gitlab_file_lines
+      to read it). Filter on project and path (required) and ref (default HEAD = default branch).
+    kind: entities
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/files/{{ filters.path | trim('/') | urlencode | replace('/', '%2F') }}"
+      query:
+        ref: "{{ filters.ref or 'HEAD' }}"
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: path, required: true, description: "File path in the repository", examples: [app/models/key.rb]}
+      - {column: ref, ops: ["=", "in"], max_fan_out: 4, description: "Branch, tag or SHA (default HEAD)", examples: [main]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: file_name, path: file_name}
+      - {name: file_path, path: file_path}
+      - {name: size, type: BIGINT, path: size}
+      - {name: last_commit_id, path: last_commit_id, description: "Last commit that modified this file (at ref)"}
+      - {name: commit_id, path: commit_id, description: "Commit the ref resolved to"}
+      - {name: blob_id, path: blob_id}
+      - {name: content_sha256, path: content_sha256}
+      - {name: encoding, path: encoding}
+      - {name: content, path: content, description: "Base64 content (not decoded)"}
+      - {name: execute_filemode, type: BOOLEAN, path: execute_filemode}
+      - {name: project, filter_only: true}
+      - {name: path, filter_only: true}
+      - {name: ref, filter_only: true}
+    examples:
+      - sql: "SELECT ref, last_commit_id, blob_id, size FROM gitlab_repository_file WHERE project = 'acme/checkout' AND path = 'config/database.yml' AND ref IN ('v1.4.2', 'v1.5.0')"
+        description: Did a config file change between two releases (blob_id differs), and in which commit.
+    fixtures:
+      - file: repository_file.json
+        filters: {project: root/project, path: app/models/key.rb, ref: main}
+        expect_rows: 1
+        expect_columns: {file_name: key.rb, file_path: app/models/key.rb, size: 1476, last_commit_id: 570e7b2abdd848b95f2f578043fc23bd6f6fd24d, blob_id: 79f7bbd25901e8334750839545a9bd021f0e4c83, encoding: base64, ref: main}
+        note: "Official example response of GET /projects/:id/repository/files/:file_path (docs.gitlab.com/api/repository_files/#retrieve-a-file-from-a-repository)."
+    docs_url: https://docs.gitlab.com/api/repository_files/#retrieve-a-file-from-a-repository
+
+  - name: gitlab_file_lines
+    title: A file's text at a ref, one row per line
+    description: >-
+      Read a file as text at any ref (GET .../repository/files/:file_path/raw): one row per line
+      with its 1-based line number. Filter on project and path (both required) and ref (default:
+      HEAD of the project; IN-lists fan out to compare versions).
+    kind: text
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/files/{{ filters.path | trim('/') | urlencode | replace('/', '%2F') }}/raw"
+      query:
+        ref: "{{ filters.ref }}"
+      response_format: text
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: path, required: true, description: "File path", examples: [config/database.yml]}
+      - {column: ref, ops: ["=", "in"], max_fan_out: 4, description: "Branch, tag or SHA", examples: [v1.5.0]}
+    response:
+      text: {skip_empty: false}
+    columns:
+      - {name: line_no, type: BIGINT, expr: "_i + 1", description: "1-based line number"}
+      - {name: line, path: line}
+      - {name: project, filter_only: true}
+      - {name: path, filter_only: true}
+      - {name: ref, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "Raw endpoint traffic is limited to 300 requests/minute per project, commit or file path on GitLab.com."
+      - "Git LFS files return the LFS pointer text unless lfs=true (not set here)."
+    examples:
+      - sql: >-
+          SELECT ref, line_no, line FROM gitlab_file_lines
+          WHERE project = 'acme/checkout' AND path = 'config/database.yml' AND ref IN ('v1.4.2', 'v1.5.0') AND line ILIKE '%pool%' ORDER BY line_no, ref
+        description: A config setting at two releases.
+    fixtures:
+      - file: file_raw.txt
+        filters: {project: root/project, path: config/database.yml, ref: main}
+        expect_rows: 6
+        expect_columns: {line_no: 1, line: "production:", ref: main}
+        note: "The raw endpoint returns the file's bytes and the docs show no example body; this fixture is a short plain-text file body (YAML lines incl. an empty line that must keep its line number)."
+    ui_link: "{{ ui_base_url }}/{{ filters.project }}/-/blob/{{ filters.ref or 'HEAD' }}/{{ filters.path }}"
+    docs_url: https://docs.gitlab.com/api/repository_files/#retrieve-a-raw-file-from-a-repository
+
+  - name: gitlab_file_blame
+    title: Blame of a file (who last changed each line)
+    description: >-
+      git blame of a file at a ref: one row per line with the commit (SHA, author, date, message)
+      that last changed it. Filter on project and path (required), ref (default HEAD), and
+      optionally range_start / range_end (both, 1-based) to blame a line range. Use it to find who
+      changed a suspicious config value or code line, and when.
+    kind: changes
+    request:
+      method: GET
+      path: "/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}/repository/files/{{ filters.path | trim('/') | urlencode | replace('/', '%2F') }}/blame"
+      query:
+        ref: "{{ filters.ref or 'HEAD' }}"
+        "range[start]": "{{ filters.range_start }}"
+        "range[end]": "{{ filters.range_end }}"
+    filters:
+      - {column: project, required: true, description: "Project ID or full path", examples: [acme/checkout]}
+      - {column: path, required: true, description: "File path", examples: [config/database.yml]}
+      - {column: ref, description: "Branch, tag or SHA (default HEAD)", examples: [main]}
+      - {column: range_start, type: BIGINT, description: "First line to blame (1-based; give range_end too)"}
+      - {column: range_end, type: BIGINT, description: "Last line to blame"}
+    response:
+      rows_path: "$"
+      expand:
+        - {explode: lines, as: l}
+    columns:
+      - {name: line, path: "@l", description: "Line text"}
+      - {name: sha, path: commit.id, description: "Commit that last changed the line"}
+      - {name: ts, type: TIMESTAMP, path: commit.committed_date}
+      - {name: authored_at, type: TIMESTAMP, path: commit.authored_date}
+      - {name: author, path: commit.author_name}
+      - {name: author_email, path: commit.author_email}
+      - {name: title, expr: "((_.commit.message or '').split('\n'))[0]"}
+      - {name: message, path: commit.message}
+      - {name: project, filter_only: true}
+      - {name: path, filter_only: true}
+      - {name: ref, filter_only: true}
+      - {name: range_start, type: BIGINT, filter_only: true}
+      - {name: range_end, type: BIGINT, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "Rows carry no line numbers (the API groups lines by commit); use gitlab_file_lines for numbering, or blame a range."
+      - "400 requests/minute per user and project."
+    examples:
+      - sql: >-
+          SELECT line, author, ts, title, sha FROM gitlab_file_blame
+          WHERE project = 'acme/checkout' AND path = 'config/database.yml' AND line ILIKE '%pool%'
+        description: Who last changed the connection pool setting, and when.
+    fixtures:
+      - file: file_blame.json
+        filters: {project: root/project, path: path/to/file.rb, ref: main}
+        expect_rows: 3
+        expect_columns: {line: "require 'fileutils'", sha: d42409d56517157c48bf3bd97d3f75974dde19fb, author: John Doe, ts: "2015-12-18T08:12:22Z", title: "Add feature"}
+        note: "Official example response of GET /projects/:id/repository/files/:file_path/blame (docs.gitlab.com/api/repository_files/#retrieve-file-blame-history-from-a-repository)."
+    docs_url: https://docs.gitlab.com/api/repository_files/#retrieve-file-blame-history-from-a-repository
+
+  - name: gitlab_search_blobs
+    title: Code search (blobs) in a project or group
+    description: >-
+      Search code (scope=blobs) in one project (GET /projects/:id/search, optional ref) or a whole
+      group (GET /groups/:id/search, default GITLAB_GROUP). query is required (terms plus
+      filename:/path:/extension: filters). One row per matching snippet with path and start line.
+      Use it to find where an error message, config key or endpoint lives.
+    kind: text
+    steps:
+      - name: search
+        when: "filters.project or filters.group or env.GITLAB_GROUP"
+        method: GET
+        path: "{% if filters.project %}/projects/{{ ((filters.project | string) if ('/' in (filters.project | string) or (filters.project | string).isdigit() or not env.GITLAB_GROUP) else (env.GITLAB_GROUP ~ '/' ~ filters.project)) | urlencode | replace('/', '%2F') }}{% else %}/groups/{{ (filters.group or env.GITLAB_GROUP) | string | urlencode | replace('/', '%2F') }}{% endif %}/search"
+        query:
+          scope: blobs
+          search: "{{ filters.query }}"
+          ref: "{{ filters.ref if filters.project else none }}"
+          per_page: 100
+    filters:
+      - {column: query, required: true, description: "Search terms; filters filename:, path:, extension: (wildcards *)", examples: ['"connection pool exhausted" extension:rb']}
+      - {column: project, ops: ["=", "in"], max_fan_out: 5, description: "Project ID or full path (project scope)", examples: [acme/checkout]}
+      - {column: group, description: "Group full path or ID (default GITLAB_GROUP) when project is not given", examples: [acme]}
+      - {column: ref, description: "Branch or tag to search (project scope only; default branch otherwise)", examples: [main]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 2}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: file_path, path: path, description: "Full path of the file"}
+      - {name: basename, path: basename}
+      - {name: fragment, path: data, description: "Matching snippet"}
+      - {name: startline, type: BIGINT, path: startline, description: "First line of the snippet"}
+      - {name: ref, path: ref}
+      - {name: project_id, type: BIGINT, path: project_id}
+      - {name: query, filter_only: true}
+      - {name: project, filter_only: true}
+      - {name: group, filter_only: true}
+    pitfalls:
+      - "Group-level (and often project-level) blob search needs advanced search (Elasticsearch, Premium) or exact code search; with basic search only, group blobs search may return 400/empty."
+      - "Results matching file NAMES come before content matches, and one file can appear several times."
+      - "With advanced search at most 10,000 results (page x per_page) are reachable."
+    examples:
+      - sql: "SELECT project_id, file_path, startline, fragment FROM gitlab_search_blobs WHERE group = 'acme' AND query = '\"connection pool exhausted\"'"
+        description: Which projects can emit the error message seen in the logs.
+      - sql: "SELECT file_path, startline, fragment FROM gitlab_search_blobs WHERE project = 'acme/checkout' AND query = 'PAYMENT_TIMEOUT filename:*.yml'"
+        description: Where a config key is set.
+    fixtures:
+      - file: search_blobs.json
+        filters: {project: '6', query: keyword}
+        expect_rows: 1
+        expect_columns: {file_path: README.md, basename: README, startline: 46, ref: main, project_id: 6}
+        note: "Official example response of GET /projects/:id/search?scope=blobs (docs.gitlab.com/api/search/#search-a-project, scope blobs)."
+    docs_url: https://docs.gitlab.com/api/search/#search-a-project
+
+roles:
+  code_changes:
+    - table: gitlab_merged_merge_requests
+      filters: {project: "{{ service }}"}
+      columns: {ts: ts, service: project, title: title, author: author, url: url, version: merge_commit_sha}
+      notes: "Merged MRs in the window; without a service it covers the whole GITLAB_GROUP."
+    - table: gitlab_commits
+      filters: {project: "{{ service }}"}
+      columns: {ts: ts, service: project, title: title, version: sha, author: author, url: url}
+      notes: "Default-branch commits; needs a service (= project path or name under GITLAB_GROUP)."
+  change_events:
+    - table: gitlab_deployments
+      filters: {project: "{{ service }}"}
+      columns: {ts: ts, service: project, title: title, version: sha, author: author, env: env, url: url}
+    - table: gitlab_releases
+      filters: {project: "{{ service }}"}
+      columns: {ts: ts, service: project, title: title, version: version, author: author, url: url}

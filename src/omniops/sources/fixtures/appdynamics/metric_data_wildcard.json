@@ -1,0 +1,8 @@
+[
+  {"metricId": 2231, "metricPath": "Application Infrastructure Performance|Fulfillment-Client-Services|Individual Nodes|FulfillmentClient|Hardware Resources|CPU|%Busy", "metricName": "Hardware Resources|CPU|%Busy", "frequency": "ONE_MIN", "metricValues": [
+    {"startTimeInMillis": 1450563000000, "value": 10, "min": 2, "max": 82, "current": 6, "sum": 4474, "count": 450, "standardDeviation": 0.0, "occurrences": 0, "useRange": true}
+  ]},
+  {"metricId": 2231, "metricPath": "Application Infrastructure Performance|Fulfillment-Services|Individual Nodes|Fulfillment|Hardware Resources|CPU|%Busy", "metricName": "Hardware Resources|CPU|%Busy", "frequency": "ONE_MIN", "metricValues": [
+    {"startTimeInMillis": 1450563000000, "value": 10, "min": 2, "max": 82, "current": 6, "sum": 4478, "count": 450, "standardDeviation": 0.0, "occurrences": 0, "useRange": true}
+  ]}
+]

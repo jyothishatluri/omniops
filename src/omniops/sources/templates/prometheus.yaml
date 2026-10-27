@@ -1,0 +1,302 @@
+# Prometheus HTTP API (v1). Reusable template: Prometheus, Grafana Mimir, Cortex, Thanos Query,
+# VictoriaMetrics, Chronosphere, Grafana Cloud Metrics, Amazon Managed Prometheus (sigv4),
+# Azure Monitor managed Prometheus and Google Managed Prometheus all expose this API.
+# Docs: https://prometheus.io/docs/prometheus/latest/querying/api/
+source: prometheus
+display_name: Prometheus
+vendor: Prometheus (CNCF)
+description: Prometheus-compatible metrics API (PromQL range/instant queries, series, labels, alerts, rules, targets).
+docs_url: https://prometheus.io/docs/prometheus/latest/querying/api/
+categories: [metrics, alerts]
+base_url: "{{ env.PROMETHEUS_URL }}"
+env:
+  - {name: PROMETHEUS_URL, description: "Base URL, e.g. http://prometheus:9090 (no trailing /api/v1)"}
+  - {name: PROMETHEUS_TOKEN, description: "Optional bearer token", secret: true}
+required_env: [PROMETHEUS_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: "{{ ('Bearer ' ~ env.PROMETHEUS_TOKEN) if env.PROMETHEUS_TOKEN else None }}"
+rate_limit: {concurrency: 6}
+errors:
+  - {path: "$.status", equals: "error", message: "$.error", hint: "PromQL error: fix the expression; do not retry unchanged"}
+query_languages:
+  promql: >-
+    PromQL. Selectors use braces: metric{label="value"}. rate()/increase() need a range vector
+    [5m]. Aggregate with sum by (label) (...). Histograms: histogram_quantile(0.95, sum by (le)
+    (rate(x_bucket[5m]))). Instant tables need vector results; wrap scalars with vector().
+pitfalls:
+  - "An unknown metric or label returns 0 series, not an error: list label values first, then filter."
+  - "Range queries are capped at ~11,000 points per series; the engine auto-sizes step to ~300 points."
+tables:
+  - name: prometheus_query_range
+    title: PromQL range query
+    description: >-
+      Evaluate a PromQL expression over a time range. One row per (series, timestamp).
+      Filter on query (required) and ts (time range). Optional step (seconds).
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/v1/query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step if filters.step else time.step_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression", examples: ['sum by (job) (rate(http_requests_total[5m]))']}
+      - {column: step, type: BIGINT, description: "Resolution step in seconds (default: auto, ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    response:
+      rows_path: "$.data.result[*]"
+      expand:
+        - {explode: values, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s, description: "Sample timestamp (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value (NaN/Inf preserved)"}
+      - {name: metric, path: "metric.__name__", description: "Metric name when the expression keeps it"}
+      - {name: labels, type: JSON, path: metric, description: "All series labels as JSON; use labels->>'job'"}
+      - {name: query, filter_only: true, description: "The PromQL expression"}
+      - {name: step, type: BIGINT, filter_only: true, description: "Step in seconds"}
+    pitfalls:
+      - "Use rate()/increase() on counters; raw counter values only ever go up."
+      - "Group with sum by (...) in PromQL before fetching; it is far cheaper than grouping millions of points in SQL."
+    examples:
+      - sql: >-
+          SELECT labels->>'job' AS job, max(value) AS peak, arg_max(ts, value) AS peak_at
+          FROM prometheus_query_range
+          WHERE query = 'sum by (job) (rate(http_requests_total{code=~"5.."}[5m]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1 ORDER BY peak DESC
+        description: Peak 5xx rate per job over an hour, and when it peaked.
+        verified: true
+    fixtures:
+      - file: query_range.json
+        filters: {query: 'up'}
+        expect_rows: 4
+        expect_columns: {ts: "2015-07-01T20:10:30Z", value: 1.0, metric: up}
+    ui_link: "{{ source.base_url }}/graph?g0.expr={{ filters.query | urlencode }}&g0.range_input={{ time.range_s }}s&g0.end_input={{ time.end | strftime('%Y-%m-%d %H:%M:%S') | urlencode }}&g0.tab=0"
+
+  - name: prometheus_query
+    title: PromQL instant query
+    description: Evaluate a PromQL expression at one instant (ts = evaluation time, default the analysis window end). One row per series.
+    kind: timeseries
+    request:
+      method: GET
+      path: /api/v1/query
+      query:
+        query: "{{ filters.query }}"
+        time: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression returning an instant vector", examples: ['topk(5, sum by (instance) (rate(node_cpu_seconds_total{mode!="idle"}[5m])))']}
+    time: {column: ts, default_lookback: 5m, reapply: false}
+    response:
+      rows_path: "$.data.result[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Scalar results (e.g. count(x) > 0 without aggregation labels is still a vector, but time() is a scalar) must be wrapped in vector()."
+      - "Evaluation time is the end of the ts range; put the instant you care about as the upper bound."
+    examples:
+      - sql: "SELECT labels->>'instance' AS instance, value FROM prometheus_query WHERE query = 'up == 0'"
+        description: Targets that are down right now (at the anchor time).
+        verified: true
+    fixtures:
+      - file: query_vector.json
+        filters: {query: up}
+        expect_rows: 2
+        expect_columns: {value: 1.0, metric: up}
+
+  - name: prometheus_series
+    title: Series matching selectors
+    description: List label sets of series matching a selector in a time range (cheap discovery before querying).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/series
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        limit: "{{ limit }}"
+    filters:
+      - {column: match, required: true, description: "Series selector, e.g. up{job=\"api\"}", examples: ['up']}
+    time: {column: ts, default_lookback: 1h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: metric, path: "__name__"}
+      - {name: labels, type: JSON, path: "."}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT DISTINCT labels->>'job' AS job FROM prometheus_series WHERE match = 'up'"
+        description: Which jobs exist.
+        verified: true
+    fixtures:
+      - file: series.json
+        filters: {match: up}
+        expect_rows: 3
+
+  - name: prometheus_label_values
+    title: Values of one label
+    description: List the values of a label (e.g. job, namespace, service) - use before filtering to confirm a value exists.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v1/label/{{ filters.label }}/values"
+      query:
+        "match[]": "{{ filters.match }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+    filters:
+      - {column: label, required: true, description: "Label name", examples: [job]}
+      - {column: match, description: "Optional series selector to scope values"}
+    time: {column: ts, default_lookback: 6h}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: value, path: "."}
+      - {name: label, filter_only: true}
+      - {name: match, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value AS job FROM prometheus_label_values WHERE label = 'job'"
+        verified: true
+    fixtures:
+      - file: label_values.json
+        filters: {label: job}
+        expect_rows: 2
+        expect_columns: {value: node}
+
+  - name: prometheus_metric_metadata
+    title: Metric metadata
+    description: Type (counter/gauge/histogram), help text and unit for metrics. Filter on metric to look one up.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/metadata
+      query:
+        metric: "{{ filters.metric }}"
+        limit: "{{ limit }}"
+    filters:
+      - {column: metric, description: "Metric name"}
+    response:
+      rows_path: "$.data"
+      expand:
+        - {entries: ".", as: e}
+        - {explode: "@e.value", as: m}
+    columns:
+      - {name: metric, path: "@e.key"}
+      - {name: type, path: "@m.type"}
+      - {name: help, path: "@m.help"}
+      - {name: unit, path: "@m.unit"}
+    examples:
+      - sql: "SELECT metric, type, help FROM prometheus_metric_metadata WHERE metric = 'http_requests_total'"
+        verified: true
+    fixtures:
+      - file: metadata.json
+        expect_rows: 3
+        expect_columns: {metric: cortex_ring_tokens, type: gauge}
+
+  - name: prometheus_alerts
+    title: Active alerts
+    description: Alerts currently pending or firing, as evaluated by this Prometheus.
+    kind: alerts
+    request: {method: GET, path: /api/v1/alerts}
+    response:
+      rows_path: "$.data.alerts[*]"
+    columns:
+      - {name: alertname, path: "labels.alertname"}
+      - {name: state, path: state, description: "pending | firing"}
+      - {name: active_at, type: TIMESTAMP, path: activeAt}
+      - {name: value, type: DOUBLE, path: value}
+      - {name: severity, path: "labels.severity"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+    examples:
+      - sql: "SELECT alertname, state, active_at, labels FROM prometheus_alerts WHERE state = 'firing' ORDER BY active_at"
+        verified: true
+    fixtures:
+      - file: alerts.json
+        expect_rows: 1
+        expect_columns: {alertname: HighErrorRate, state: firing}
+
+  - name: prometheus_rules
+    title: Alerting and recording rules
+    description: Rule definitions with their PromQL, thresholds (in the expression), durations and current health.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/rules
+      query:
+        type: "{{ filters.type }}"
+    filters:
+      - {column: type, description: "alert | record"}
+    response:
+      rows_path: "$.data.groups[*]"
+      expand:
+        - {explode: rules, as: r}
+    columns:
+      - {name: group_name, path: name}
+      - {name: file, path: file}
+      - {name: rule_name, path: "@r.name"}
+      - {name: type, path: "@r.type", description: "alerting | recording"}
+      - {name: query, path: "@r.query", description: "PromQL expression (threshold is part of it)"}
+      - {name: duration_s, type: DOUBLE, path: "@r.duration", description: "for: duration in seconds"}
+      - {name: state, path: "@r.state"}
+      - {name: health, path: "@r.health"}
+      - {name: last_error, path: "@r.lastError"}
+      - {name: labels, type: JSON, path: "@r.labels"}
+      - {name: annotations, type: JSON, path: "@r.annotations"}
+      - {name: active_alerts, type: JSON, path: "@r.alerts"}
+    examples:
+      - sql: "SELECT rule_name, query, duration_s, state FROM prometheus_rules WHERE rule_name = 'HighErrorRate'"
+        description: Look up the alert rule that fired, with its full expression.
+        verified: true
+    fixtures:
+      - file: rules.json
+        expect_rows: 2
+        expect_columns: {rule_name: HighRequestLatency, type: alerting}
+
+  - name: prometheus_targets
+    title: Scrape targets
+    description: Active scrape targets and their health (a down target is a data gap, not absence of a problem).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/targets
+      query: {state: active}
+    response:
+      rows_path: "$.data.activeTargets[*]"
+    columns:
+      - {name: job, path: "labels.job"}
+      - {name: instance, path: "labels.instance"}
+      - {name: health, path: health}
+      - {name: last_scrape, type: TIMESTAMP, path: lastScrape}
+      - {name: last_error, path: lastError}
+      - {name: scrape_url, path: scrapeUrl}
+      - {name: labels, type: JSON, path: labels}
+    examples:
+      - sql: "SELECT job, instance, health, last_error FROM prometheus_targets WHERE health <> 'up'"
+        verified: true
+    fixtures:
+      - file: targets.json
+        expect_rows: 1
+        expect_columns: {job: prometheus, health: up}
+
+roles:
+  metrics: {table: prometheus_query_range, query_language: promql}
+  active_alerts:
+    table: prometheus_alerts
+    columns: {name: alertname, state: state, ts: active_at, labels: labels}
+  alert_rules:
+    table: prometheus_rules
+    columns: {name: rule_name, query: query}
+  hosts:
+    table: prometheus_targets
+    columns: {host: instance, health: health}

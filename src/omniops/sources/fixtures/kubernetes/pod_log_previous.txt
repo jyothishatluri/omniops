@@ -1,0 +1,4 @@
+2026-10-01T11:58:01.104738915Z report-generator starting: building nightly report
+2026-10-01T11:58:01.105112040Z connecting to reports-db.batch.svc.cluster.local:5432
+2026-10-01T11:58:31.106002145Z ERROR dial tcp 10.96.120.4:5432: connect: connection refused
+2026-10-01T11:58:31.106377410Z fatal: report generation aborted, exiting with status 1

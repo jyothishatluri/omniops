@@ -1,0 +1,17 @@
+{
+  "name": "API Errors",
+  "type": "metric_threshold",
+  "evaluation_type": "sliding_window",
+  "evaluation_function": "sum",
+  "evaluation_window": 900,
+  "threshold_type": "above",
+  "warning_threshold": 3,
+  "alert_threshold": 10,
+  "no_data_behavior": "show_no_data",
+  "formula_query": {
+    "formula": "A",
+    "queries": {
+      "A": {"scope": "metric", "query": "sum:api.error.count{service.name:\"api\"}.rollup(60)"}
+    }
+  }
+}

@@ -1,0 +1,635 @@
+# Slack Web API (READ-ONLY) as SQL tables: channel history, threads, pins, channels, users, bots
+# and message search. Direct REST (https://slack.com/api/<method>), no MCP.
+#
+# Checked on 2026-10-27 against the method reference pages on docs.slack.dev (each table's
+# docs_url); every fixture is the "Typical success response" (or error response) shown on that
+# page, unmodified. Research notes, scopes and rate limits: docs/sources/slack.md.
+#
+# Conventions:
+#   * Slack answers HTTP 200 with {"ok": false, "error": "..."} for almost every failure: that is a
+#     source-wide error rule, never "0 rows".
+#   * Message timestamps (ts, thread_ts, oldest, latest) are epoch SECONDS strings with a
+#     microsecond suffix ("1512085950.000216"); oldest/latest are sent as epoch seconds. ISO
+#     strings are silently treated as 0.
+#   * ts (TIMESTAMP) is the message time; message_ts (VARCHAR) is Slack's own id of the message,
+#     needed for slack_thread_replies and permalinks. Never compare message_ts to a timestamp.
+#   * Bot token (SLACK_BOT_TOKEN, xoxb) is sent by default. search.messages only accepts a USER
+#     token (SLACK_USER_TOKEN, xoxp, scope search:read): the search tables send that instead.
+source: slack
+display_name: Slack
+vendor: Salesforce (Slack Technologies)
+description: >-
+  Slack Web API, read-only: channel message history in a time window, thread replies, pinned
+  items, channel list and info, users and bots, plus message search (search.messages with a user
+  token, and the Real-time Search API assistant.search.context). Use it to read the incident
+  channel, find earlier discussions of the same alert, and see what humans and alert bots said.
+docs_url: https://docs.slack.dev/reference/methods
+categories: [chat, collaboration, incidents]
+base_url: "https://slack.com/api"
+env:
+  - {name: SLACK_BOT_TOKEN, description: "Bot User OAuth token (xoxb-...). Read scopes: channels:history, groups:history, im:history, mpim:history, channels:read, groups:read, users:read (users:read.email for emails), pins:read. The bot must be a member of private channels it reads.", secret: true}
+  - {name: SLACK_USER_TOKEN, description: "Optional user token (xoxp-...) with search:read (search.messages) and/or search:read.public etc. (assistant.search.context). Needed only for the search tables.", secret: true}
+required_env: [SLACK_BOT_TOKEN]
+auth:
+  type: none
+headers:
+  Authorization: "{{ ('Bearer ' ~ env.SLACK_BOT_TOKEN) if env.SLACK_BOT_TOKEN else None }}"
+rate_limit:
+  concurrency: 3
+  requests_per_minute: 50
+  max_retries: 3
+  notes: >-
+    Per method, per workspace, per minute: Tier 2 ~20/min (conversations.list, users.list,
+    search.messages, pins.list), Tier 3 ~50/min (conversations.history, conversations.replies,
+    conversations.info, bots.info), Tier 4 ~100/min (users.info). Exceeding returns HTTP 429 with
+    Retry-After (seconds). Since 29 May 2025 commercially distributed NON-Marketplace apps (new
+    installs) get conversations.history / conversations.replies at 1 request/minute and at most
+    15 messages per call; internal customer-built apps keep Tier 3 and limit up to 1000.
+    assistant.search.context: special limit ~10/min per workspace and 10/min per user; paginated
+    calls count.
+errors:
+  - {path: "$.ok", equals: false, message: "$.error", hint: "Slack returned ok:false. channel_not_found / not_in_channel: use a channel ID the bot is a member of (invite it); missing_scope: add the scope to the app; not_allowed_token_type / not_authed on search tables: set SLACK_USER_TOKEN (xoxp) with search:read; invalid_ts_oldest / invalid_ts_latest: epoch seconds expected; ratelimited: retry later"}
+pitfalls:
+  - "channel / channel_id filters take conversation IDs (C..., G..., D...), never '#name': resolve names with slack_channels first. A wrong id is an ok:false channel_not_found error."
+  - "A bot token only reads conversations the bot is a member of (not_in_channel otherwise); public channels it is not in need the user token."
+  - "Thread replies are NOT in channel history (only the parent message with reply_count): read them with slack_thread_replies WHERE channel = ... AND thread_ts = <parent message_ts>."
+  - "Alert bots (Datadog, PagerDuty, Grafana, Opsgenie) often put the alert body in attachments / blocks, not text: check attachment_text and attachments."
+  - "Message text uses Slack markup: <@U123> mentions, <#C123|name> channels, <https://...|label> links."
+  - "Free workspaces only expose the last 90 days of history; older messages are hidden (is_limited), not deleted."
+query_languages:
+  slack_search: >-
+    Slack search syntax (search.messages query): words and "quoted phrases", plus modifiers
+    in:channel_name (or in:<#C123>), from:<@U123> or from:botname, has:link, has:reaction,
+    has:pin, is:thread, -word to exclude. Do not add after:/before:/on:/during: dates: the ts
+    window is pushed down as after:/before: (YYYY-MM-DD) automatically. Results are filtered by
+    the searching user's access.
+
+tables:
+  # ----------------------------------------------------------------------------------------------
+  # Messages
+  # ----------------------------------------------------------------------------------------------
+  - name: slack_channel_history
+    title: Messages of a channel in a time window
+    description: >-
+      One row per top-level message (and channel event) posted to a conversation in the ts window,
+      newest first (conversations.history with oldest/latest in epoch seconds, inclusive). Filter
+      channel (conversation id, required). Thread replies are not included: follow reply_count > 0
+      rows into slack_thread_replies. Use it to read the incident channel or an alerts channel
+      around the onset.
+    kind: events
+    request:
+      method: GET
+      path: /conversations.history
+      query:
+        channel: "{{ filters.channel }}"
+        oldest: "{{ time.start | epoch_s }}"
+        latest: "{{ time.end | epoch_s }}"
+        inclusive: "true"
+        limit: "{{ [limit or 200, 200] | min }}"
+    filters:
+      - {column: channel, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Conversation id (C..., G..., D...)", examples: [C012AB3CD]}
+    time: {column: ts, default_lookback: 24h, max_window: 90d}
+    pagination: {type: cursor, cursor_path: "$.response_metadata.next_cursor", cursor_param: query.cursor, has_more_path: "$.has_more", max_pages: 5}
+    response:
+      rows_path: "$.messages[*]"
+    columns: &slack_message_columns
+      - {name: ts, type: TIMESTAMP, path: ts, transform: epoch_s, description: "Message time (UTC)"}
+      - {name: message_ts, path: ts, description: "Slack message id ('1512085950.000216'): use as thread_ts for replies"}
+      - {name: thread_ts, path: thread_ts, description: "Parent message id when part of a thread (equals message_ts on the parent)"}
+      - {name: user, path: user, description: "User id (U.../W...) of the author; NULL for most bot/webhook posts"}
+      - {name: bot_id, path: bot_id, description: "Bot id (B...) for bot / integration posts (resolve with slack_bot)"}
+      - {name: username, path: username, description: "Display name of bot/webhook posts"}
+      - {name: subtype, path: subtype, description: "NULL for normal messages; bot_message, channel_join, thread_broadcast ..."}
+      - {name: type, path: type}
+      - {name: message, path: text, description: "Message text (Slack markup)"}
+      - {name: attachment_text, path: "attachments[*].text", transform: join, transform_arg: " | ", description: "Text of legacy attachments (where alert bots put the alert body)"}
+      - {name: attachments, type: JSON, path: attachments, description: "Legacy attachments (title, text, fallback, fields, color)"}
+      - {name: blocks, type: JSON, path: blocks, description: "Block Kit content"}
+      - {name: files, type: JSON, path: "files[*].name", description: "Names of attached files"}
+      - {name: reply_count, type: BIGINT, path: reply_count, description: "Replies in the thread (parent messages only)"}
+      - {name: reply_users_count, type: BIGINT, path: reply_users_count}
+      - {name: latest_reply, path: latest_reply, description: "message_ts of the newest reply"}
+      - {name: reactions, type: JSON, path: reactions, description: "[{name, count, users}]"}
+      - {name: is_thread_parent, type: BOOLEAN, expr: "(_.thread_ts == _.ts) if _.thread_ts else false"}
+      - {name: edited_ts, path: edited.ts}
+      - {name: channel, filter_only: true}
+    max_rows: 1000
+    sort_hint: "newest first"
+    pitfalls:
+      - "Without a ts predicate the window is the analysis window (minutes during an alert): give an explicit range such as ts >= now() - INTERVAL 6 HOUR."
+      - "At most 5 pages of 200 messages are read (1000 messages); a busy channel over a long window is truncated - narrow ts."
+      - "Non-Marketplace distributed apps installed after 2025-05-29 get 15 messages per call and 1 call per minute here; internal (custom) apps are not affected."
+    examples:
+      - sql: >-
+          SELECT ts, coalesce(user, username, bot_id) AS who, message, attachment_text, reply_count, message_ts
+          FROM slack_channel_history
+          WHERE channel = 'C012AB3CD' AND ts BETWEEN TIMESTAMP '2026-10-01 10:30:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Read the incident channel around the onset, oldest first.
+      - sql: >-
+          SELECT ts, username, attachment_text FROM slack_channel_history
+          WHERE channel = 'C0ALERTS1' AND bot_id IS NOT NULL AND ts >= now() - INTERVAL 2 HOUR ORDER BY ts
+        description: What the alert bots posted in the alerts channel in the last two hours.
+    fixtures:
+      - file: history.json
+        filters: {channel: C012AB3CD}
+        expect_rows: 2
+        expect_columns: {ts: "2017-11-30T23:52:30.000216Z", message_ts: "1512085950.000216", user: U123ABC456, type: message, message: "I find you punny and would like to smell your nose letter", channel: C012AB3CD, is_thread_parent: false}
+        note: "Official 'Typical success response containing a channel's messages' of conversations.history (docs.slack.dev), unmodified."
+      - file: history_attachments.json
+        filters: {channel: C012AB3CD}
+        expect_rows: 2
+        expect_columns: {message_ts: "1512085950.000216"}
+        note: "Official 'Typical success response included formatted messages from bots and incoming webhooks' of conversations.history, unmodified (second message has attachments)."
+      - file: error_channel_not_found.json
+        filters: {channel: C000BAD}
+        expect_error: channel_not_found
+        note: "Official 'Typical error response' of conversations.history: HTTP 200 with ok:false must raise, not return 0 rows."
+    ui_link: "https://slack.com/app_redirect?channel={{ filters.channel }}"
+    docs_url: https://docs.slack.dev/reference/methods/conversations.history
+
+  - name: slack_thread_replies
+    title: All messages of one thread
+    description: >-
+      The parent message and every reply of a thread, oldest first (conversations.replies).
+      Filter channel (conversation id) and thread_ts (the parent's message_ts), both required.
+      Use it to read the discussion under an alert post or an incident announcement.
+    kind: events
+    request:
+      method: GET
+      path: /conversations.replies
+      query:
+        channel: "{{ filters.channel }}"
+        ts: "{{ filters.thread_ts }}"
+        limit: 200
+    filters:
+      - {column: channel, required: true, description: "Conversation id", examples: [C012AB3CD]}
+      - {column: thread_ts, required: true, ops: ["=", "in"], max_fan_out: 10, description: "message_ts of the thread's parent message", examples: ["1482960137.003543"]}
+    pagination: {type: cursor, cursor_path: "$.response_metadata.next_cursor", cursor_param: query.cursor, has_more_path: "$.has_more", max_pages: 5}
+    response:
+      rows_path: "$.messages[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: ts, transform: epoch_s, description: "Message time (UTC)"}
+      - {name: message_ts, path: ts}
+      - {name: thread_ts, path: thread_ts, description: "Parent message id (same for every row of the thread)"}
+      - {name: user, path: user}
+      - {name: bot_id, path: bot_id}
+      - {name: username, path: username}
+      - {name: subtype, path: subtype}
+      - {name: message, path: text}
+      - {name: attachment_text, path: "attachments[*].text", transform: join, transform_arg: " | "}
+      - {name: attachments, type: JSON, path: attachments}
+      - {name: files, type: JSON, path: "files[*].name"}
+      - {name: reactions, type: JSON, path: reactions}
+      - {name: reply_count, type: BIGINT, path: reply_count, description: "On the parent row only"}
+      - {name: is_parent, type: BOOLEAN, expr: "_.thread_ts == _.ts if _.thread_ts else true"}
+      - {name: channel, filter_only: true}
+    sort_hint: "oldest first (parent first)"
+    pitfalls:
+      - "thread_ts must be the PARENT's message_ts; passing a reply's ts still returns the thread, but every row's thread_ts then differs from the filter value and the SQL re-check drops them."
+      - "reply_users may contain bot ids instead of user ids."
+    examples:
+      - sql: >-
+          SELECT ts, coalesce(user, username) AS who, message FROM slack_thread_replies
+          WHERE channel = 'C012AB3CD' AND thread_ts = '1482960137.003543' ORDER BY ts
+        description: Read the discussion under an alert message.
+    fixtures:
+      - file: replies.json
+        filters: {channel: C012AB3CD, thread_ts: "1482960137.003543"}
+        expect_rows: 4
+        expect_columns: {ts: "2016-12-28T21:22:17.003543Z", message_ts: "1482960137.003543", thread_ts: "1482960137.003543", user: U061F7AUR, message: island, reply_count: 3, is_parent: true, channel: C012AB3CD}
+        note: "Official 'Typical success response' of conversations.replies (docs.slack.dev), unmodified."
+      - file: error_thread_not_found.json
+        filters: {channel: C012AB3CD, thread_ts: "1482960137.003543"}
+        expect_error: thread_not_found
+        note: "Official 'Typical error response' of conversations.replies (ok:false in a 200 body)."
+    ui_link: "https://slack.com/app_redirect?channel={{ filters.channel }}"
+    docs_url: https://docs.slack.dev/reference/methods/conversations.replies
+
+  - name: slack_pins
+    title: Pinned items of a channel
+    description: >-
+      One row per item pinned in a channel (pins.list): incident channels pin the status summary,
+      the incident doc, the dashboard link. Filter channel (required).
+    kind: entities
+    request:
+      method: GET
+      path: /pins.list
+      query:
+        channel: "{{ filters.channel }}"
+    filters:
+      - {column: channel, required: true, description: "Conversation id", examples: [C123ABC456]}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created, transform: epoch_s, description: "When the item was pinned"}
+      - {name: pinned_by, path: created_by}
+      - {name: type, path: type, description: "message | file | file_comment"}
+      - {name: message_ts, path: message.ts}
+      - {name: user, path: message.user}
+      - {name: message, path: message.text}
+      - {name: file_name, path: file.name}
+      - {name: url, expr: "(_.message.permalink if _.message else None) or (_.file.permalink if _.file else None)"}
+      - {name: channel, path: channel}
+    examples:
+      - sql: "SELECT ts, pinned_by, message, url FROM slack_pins WHERE channel = 'C123ABC456' ORDER BY ts"
+        description: What is pinned in the incident channel.
+    fixtures:
+      - file: pins_list.json
+        filters: {channel: C123ABC456}
+        expect_rows: 2
+        expect_columns: {ts: "2017-10-24T21:37:58Z", pinned_by: U123ABC456, type: message, message_ts: "1508197641.000151", message: "What is the meaning of life?", url: "https://hitchhikers.slack.com/archives/C2U86NC6H/p1508197641000151", channel: C123ABC456}
+        note: "Official 'Typical success response' of pins.list (docs.slack.dev), unmodified."
+    ui_link: "https://slack.com/app_redirect?channel={{ filters.channel }}"
+    docs_url: https://docs.slack.dev/reference/methods/pins.list
+
+  # ----------------------------------------------------------------------------------------------
+  # Search (user token / Real-time Search API)
+  # ----------------------------------------------------------------------------------------------
+  - name: slack_search_messages
+    title: Message search across the workspace (user token)
+    description: >-
+      Messages matching a Slack search query across every conversation the USER token can see
+      (search.messages, sort by timestamp newest first, 100 per page). Filter query (required;
+      Slack search syntax), channel_name (adds in:<name>), sort (timestamp | score) and a ts range
+      (pushed down as after:/before: dates, re-checked exactly). Use it to find earlier
+      discussions of an alert, error message or service ("has this happened before?").
+    kind: events
+    request:
+      method: GET
+      path: /search.messages
+      headers:
+        Authorization: "{{ ('Bearer ' ~ env.SLACK_USER_TOKEN) if env.SLACK_USER_TOKEN else None }}"
+      query:
+        query: "{{ filters.query }}{{ (' in:' ~ filters.channel_name) if filters.channel_name else '' }} after:{{ ((time.start | epoch_s) - 129600) | strftime('%Y-%m-%d') }} before:{{ ((time.end | epoch_s) + 136800) | strftime('%Y-%m-%d') }}"
+        sort: "{{ filters.sort or 'timestamp' }}"
+        sort_dir: desc
+        highlight: "false"
+    filters:
+      - {column: query, required: true, description: "Slack search query (words, \"phrases\", from:, in:, has: modifiers; no date modifiers)", examples: ["checkout 502"]}
+      - {column: channel_name, description: "Only this channel (by name, without #)", examples: [incidents]}
+      - {column: sort, description: "timestamp (default, newest first) | score (relevance)", examples: [timestamp]}
+    time: {column: ts, default_lookback: 14d, max_window: 365d}
+    pagination: {type: page, page_param: query.page, limit_param: query.count, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$.messages.matches[*]"
+    columns: &slack_search_columns
+      - {name: ts, type: TIMESTAMP, path: ts, transform: epoch_s}
+      - {name: message_ts, path: ts}
+      - {name: channel_id, path: channel.id}
+      - {name: channel_name, path: channel.name, description: "Channel name (user id for IMs)"}
+      - {name: is_private, type: BOOLEAN, path: channel.is_private}
+      - {name: user, path: user}
+      - {name: username, path: username}
+      - {name: message, path: text}
+      - {name: type, path: type, description: "message | im | group ..."}
+      - {name: url, path: permalink, description: "Permalink to the message"}
+      - {name: team, path: team}
+      - {name: query, filter_only: true}
+      - {name: sort, filter_only: true}
+    max_rows: 300
+    sort_hint: "newest first (sort = timestamp)"
+    pitfalls:
+      - "Requires SLACK_USER_TOKEN (xoxp) with search:read; a bot token gets ok:false not_allowed_token_type. search.messages is a legacy method (still supported); slack_search_context is the newer Real-time Search API."
+      - "Results respect the token owner's access and their Slack search preferences (excluded channels are silently skipped)."
+      - "Close matches in the same conversation are collapsed into one result; read the thread or channel history for full context."
+      - "At most 100 results per page and 3 pages here (the API allows page <= 100)."
+    examples:
+      - sql: >-
+          SELECT ts, channel_name, coalesce(username, user) AS who, message, url FROM slack_search_messages
+          WHERE query = 'HighErrorRate checkout' AND ts >= now() - INTERVAL 30 DAY ORDER BY ts DESC
+        description: Earlier Slack discussions of the same alert in the last 30 days.
+      - sql: >-
+          SELECT ts, who, message, url FROM (
+            SELECT ts, coalesce(username, user) AS who, message, url FROM slack_search_messages
+            WHERE query = '"connection pool exhausted"' AND channel_name = 'incidents' AND ts >= now() - INTERVAL 180 DAY)
+          ORDER BY ts
+        description: Every incident-channel mention of an error string in the last six months.
+    fixtures:
+      - file: search_messages.json
+        filters: {query: The meaning of life the universe and everything}
+        expect_rows: 2
+        expect_columns: {ts: "2017-10-17T23:49:57.000015Z", message_ts: "1508284197.000015", channel_id: C12345678, channel_name: general, is_private: false, user: U2U85N1RV, username: roach, message: The meaning of life the universe and everything is 42., url: "https://hitchhikers.slack.com/archives/C12345678/p1508284197000015", team: T12345678}
+        note: "Official 'Typical success response' of search.messages (docs.slack.dev), unmodified."
+      - file: error_search_no_query.json
+        filters: {query: ""}
+        expect_error: No query passed
+        note: "Official 'Typical error response' of search.messages (ok:false in a 200 body)."
+    docs_url: https://docs.slack.dev/reference/methods/search.messages
+
+  - name: slack_search_context
+    title: Real-time Search API (assistant.search.context)
+    description: >-
+      Messages matching a natural-language or keyword query across the organization
+      (assistant.search.context, POST JSON, up to 20 per page). Filter query (required),
+      channel_types (default public_channel; public_channel,private_channel,mpim,im), sort
+      (score = semantic+keyword relevance, default | timestamp = keyword only), action_token (only
+      with a bot token: from the triggering message event) and a ts range (after/before, epoch
+      seconds). Sends SLACK_USER_TOKEN when set, else the bot token.
+    kind: events
+    request:
+      method: POST
+      path: /assistant.search.context
+      headers:
+        Authorization: "{{ 'Bearer ' ~ (env.SLACK_USER_TOKEN or env.SLACK_BOT_TOKEN or '') }}"
+      body:
+        query: "{{ filters.query }}"
+        action_token: "{{ filters.action_token }}"
+        content_types: [messages]
+        channel_types: "{{ (filters.channel_types or 'public_channel').split(',') }}"
+        include_bots: true
+        sort: "{{ filters.sort or 'score' }}"
+        sort_dir: desc
+        after: "{{ time.start | epoch_s }}"
+        before: "{{ time.end | epoch_s }}"
+        limit: 20
+    filters:
+      - {column: query, required: true, description: "Question or keywords (Slack search filters like in:<#C123> from:<@U123> allowed)", examples: ["checkout 502 errors after deploy"]}
+      - {column: channel_types, description: "Comma list of public_channel, private_channel, mpim, im (default public_channel)", examples: ["public_channel,private_channel"]}
+      - {column: sort, description: "score (default, semantic + keyword) | timestamp (keyword only, newest first)", examples: [score]}
+      - {column: action_token, description: "action_token from a message event (required by Slack when calling with a BOT token)", examples: ["12345.98765.abcd2358fdea"]}
+    time: {column: ts, default_lookback: 14d, max_window: 365d}
+    pagination: {type: cursor, cursor_path: "$.response_metadata.next_cursor", cursor_param: body.cursor, max_pages: 3}
+    response:
+      rows_path: "$.results.messages[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: message_ts, transform: epoch_s}
+      - {name: message_ts, path: message_ts}
+      - {name: channel_id, path: channel_id}
+      - {name: channel_name, path: channel_name}
+      - {name: user, path: author_user_id}
+      - {name: author_name, path: author_name}
+      - {name: is_author_bot, type: BOOLEAN, path: is_author_bot}
+      - {name: message, path: content}
+      - {name: url, path: permalink}
+      - {name: team_id, path: team_id}
+      - {name: context_messages, type: JSON, path: context_messages, description: "Messages before/after (when include_context_messages)"}
+      - {name: query, filter_only: true}
+      - {name: channel_types, filter_only: true}
+      - {name: sort, filter_only: true}
+      - {name: action_token, filter_only: true}
+    max_rows: 60
+    positive_control: false
+    pitfalls:
+      - "Only for apps with the AI app features enabled and search:read.* scopes; bot tokens additionally need a fresh action_token from a user's message event, otherwise ok:false. A user token needs no action_token."
+      - "Special rate limit: ~10 requests/minute per workspace AND per user, paginated calls included; keep queries few and specific."
+      - "sort = timestamp switches to keyword retrieval and can return a different set of messages, not just a different order."
+    examples:
+      - sql: >-
+          SELECT ts, channel_name, author_name, message, url FROM slack_search_context
+          WHERE query = 'checkout API 502 after deploy' AND ts >= now() - INTERVAL 30 DAY
+        description: Semantic search for earlier discussions of the symptom.
+    fixtures:
+      - file: search_context.json
+        filters: {query: "What is the latest on project Gizmo?"}
+        expect_rows: 1
+        expect_columns: {message_ts: "123456.7890", channel_id: C0123456, user: U0123456, is_author_bot: false, message: "Hey team, we'll be kicking off our mobile UX revamp for the Gizmo App...", url: "https://mycompany.slack.com/archives/C012345ABC/p123456789", team_id: T0123456}
+        note: "Official 'Typical success response' of assistant.search.context (docs.slack.dev), unmodified."
+      - file: error_search_invalid_auth.json
+        filters: {query: x}
+        expect_error: invalid_auth
+        note: "Official 'Typical error response for invalid token' of assistant.search.context."
+    docs_url: https://docs.slack.dev/reference/methods/assistant.search.context
+
+  # ----------------------------------------------------------------------------------------------
+  # Conversations, users, bots
+  # ----------------------------------------------------------------------------------------------
+  - name: slack_channels
+    title: Channels (conversations) the token can see
+    description: >-
+      One row per conversation from conversations.list (types default public_channel,
+      private_channel; archived excluded unless exclude_archived = 'false'). No server-side name
+      filter: filter name in SQL. Use it to turn '#incident-1234' into the channel id other
+      tables need.
+    kind: entities
+    request:
+      method: GET
+      path: /conversations.list
+      query:
+        types: "{{ filters.types or 'public_channel,private_channel' }}"
+        exclude_archived: "{{ filters.exclude_archived or 'true' }}"
+        limit: 999
+    filters:
+      - {column: types, description: "Comma list of public_channel, private_channel, mpim, im", examples: ["public_channel,private_channel"]}
+      - {column: exclude_archived, description: "'true' (default) | 'false'", examples: ["true"]}
+    pagination: {type: cursor, cursor_path: "$.response_metadata.next_cursor", cursor_param: query.cursor, max_pages: 10}
+    response:
+      rows_path: "$.channels[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: is_private, type: BOOLEAN, path: is_private}
+      - {name: is_archived, type: BOOLEAN, path: is_archived}
+      - {name: is_member, type: BOOLEAN, path: is_member, description: "The token's user/bot is a member (required for a bot to read history)"}
+      - {name: is_im, type: BOOLEAN, path: is_im}
+      - {name: is_mpim, type: BOOLEAN, path: is_mpim}
+      - {name: is_shared, type: BOOLEAN, path: is_ext_shared, description: "Slack Connect (shared with another organization)"}
+      - {name: num_members, type: BIGINT, path: num_members}
+      - {name: topic, path: topic.value}
+      - {name: purpose, path: purpose.value}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_s}
+      - {name: updated, type: TIMESTAMP, path: updated, transform: epoch_ms, description: "Last channel update (epoch ms in the API)"}
+      - {name: creator, path: creator}
+      - {name: user, path: user, description: "For IMs: the other user's id"}
+      - {name: types, filter_only: true}
+      - {name: exclude_archived, filter_only: true}
+    max_rows: 10000
+    pitfalls:
+      - "Slack applies exclude_archived AFTER paging, so pages can be short or empty while more channels exist; the cursor is followed regardless (up to 10 pages of 999)."
+      - "Private channels appear only if the token's user/bot is a member."
+    examples:
+      - sql: "SELECT id, name, is_member, num_members, topic FROM slack_channels WHERE name LIKE 'inc-%' ORDER BY created DESC"
+        description: Incident channels (by naming convention), newest first.
+      - sql: "SELECT id FROM slack_channels WHERE name = 'alerts-prod'"
+        description: Channel id for a channel name.
+    fixtures:
+      - file: conversations_list.json
+        expect_rows: 2
+        expect_columns: {id: C012AB3CD, name: general, is_private: false, is_archived: false, is_member: true, num_members: 4, topic: Company-wide announcements and work-based matters, created: "2015-12-04T18:14:49Z", updated: "2023-03-07T22:54:24.302Z", creator: U012A3CDE}
+        note: "Official 'Typical success response with only public channels' of conversations.list (docs.slack.dev), unmodified."
+      - file: conversations_list_mixed.json
+        filters: {types: "mpim,im"}
+        expect_rows: 3
+        expect_columns: {id: G0AKFJBEU, is_mpim: true, is_private: true}
+        note: "Official 'Example response when mixing different conversation types together, like im and mpim' of conversations.list, unmodified."
+    docs_url: https://docs.slack.dev/reference/methods/conversations.list
+
+  - name: slack_channel_info
+    title: One channel's details (topic, purpose, members)
+    description: One row per channel id (conversations.info with include_num_members). Topic and purpose often carry the incident status, commander and links.
+    kind: entities
+    request:
+      method: GET
+      path: /conversations.info
+      query:
+        channel: "{{ filters.channel }}"
+        include_num_members: "true"
+    filters:
+      - {column: channel, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Conversation id", examples: [C012AB3CD]}
+    response:
+      rows_path: "$.channel"
+    columns:
+      - {name: channel, path: id}
+      - {name: name, path: name}
+      - {name: is_private, type: BOOLEAN, path: is_private}
+      - {name: is_archived, type: BOOLEAN, path: is_archived}
+      - {name: is_im, type: BOOLEAN, path: is_im}
+      - {name: topic, path: topic.value}
+      - {name: topic_set_at, type: TIMESTAMP, path: topic.last_set, transform: epoch_s}
+      - {name: purpose, path: purpose.value}
+      - {name: num_members, type: BIGINT, path: num_members}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_s}
+      - {name: creator, path: creator}
+      - {name: user, path: user, description: "For IMs: the other user's id"}
+      - {name: previous_names, type: JSON, path: previous_names}
+    examples:
+      - sql: "SELECT name, topic, purpose, num_members FROM slack_channel_info WHERE channel = 'C012AB3CD'"
+        description: Incident channel topic and purpose.
+    fixtures:
+      - file: conversations_info.json
+        filters: {channel: C012AB3CD}
+        expect_rows: 1
+        expect_columns: {channel: C012AB3CD, name: general, is_private: false, topic: For public discussion of generalities, topic_set_at: "2015-12-10T01:02:44Z", purpose: This part of the workspace is for fun. Make fun here., created: "2022-06-10T13:38:54Z", creator: U123ABC456}
+        note: "Official 'Typical success response for a public channel' of conversations.info (docs.slack.dev), unmodified."
+    ui_link: "https://slack.com/app_redirect?channel={{ filters.channel }}"
+    docs_url: https://docs.slack.dev/reference/methods/conversations.info
+
+  - name: slack_users
+    title: Workspace members
+    description: >-
+      One row per member, including bots and deactivated users (users.list, paged). Filter in SQL
+      by name, real_name, display_name or email. Use it to name the user ids found in messages,
+      or to find a person's Slack id from their email.
+    kind: entities
+    request:
+      method: GET
+      path: /users.list
+      query: {limit: 500}
+    pagination: {type: cursor, cursor_path: "$.response_metadata.next_cursor", cursor_param: query.cursor, max_pages: 10}
+    response:
+      rows_path: "$.members[*]"
+    columns: &slack_user_columns
+      - {name: id, path: id}
+      - {name: name, path: name, description: "Handle"}
+      - {name: real_name, expr: "_.real_name or (_.profile.real_name if _.profile else None)"}
+      - {name: display_name, path: profile.display_name}
+      - {name: email, path: profile.email, description: "Needs users:read.email"}
+      - {name: title, path: profile.title}
+      - {name: tz, path: tz}
+      - {name: is_bot, type: BOOLEAN, path: is_bot}
+      - {name: is_app_user, type: BOOLEAN, path: is_app_user}
+      - {name: deleted, type: BOOLEAN, path: deleted}
+      - {name: is_admin, type: BOOLEAN, path: is_admin}
+      - {name: status_text, path: profile.status_text}
+      - {name: team_id, path: team_id}
+      - {name: updated, type: TIMESTAMP, path: updated, transform: epoch_s}
+    max_rows: 5000
+    pitfalls:
+      - "Large workspaces page slowly (Tier 2, ~20 requests/minute); prefer slack_user for a few known ids."
+    examples:
+      - sql: "SELECT id, real_name, display_name, title FROM slack_users WHERE NOT deleted AND email = 'mia@example.com'"
+        description: Slack id of a person by email.
+    fixtures:
+      - file: users_list.json
+        expect_rows: 2
+        expect_columns: {id: W012A3CDE, name: spengler, real_name: spengler, display_name: spengler, email: spengler@ghostbusters.example.com, tz: America/Los_Angeles, is_bot: false, deleted: false, is_admin: true, updated: "2017-08-07T20:44:46Z"}
+        note: "Official 'Typical success response' of users.list (docs.slack.dev), unmodified."
+    docs_url: https://docs.slack.dev/reference/methods/users.list
+
+  - name: slack_user
+    title: One user by id
+    description: One row per user id (users.info). Resolve the user ids in message rows to names, titles and time zones.
+    kind: entities
+    request:
+      method: GET
+      path: /users.info
+      query:
+        user: "{{ filters.id }}"
+    filters:
+      - {column: id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "User id (U... / W...)", examples: [W012A3CDE]}
+    response:
+      rows_path: "$.user"
+    columns: *slack_user_columns
+    examples:
+      - sql: "SELECT id, real_name, title, tz FROM slack_user WHERE id IN ('W012A3CDE', 'U061F7AUR')"
+        description: Who wrote these messages.
+    fixtures:
+      - file: users_info.json
+        filters: {id: W012A3CDE}
+        expect_rows: 1
+        expect_columns: {id: W012A3CDE, name: spengler, real_name: Egon Spengler, display_name: spengler, title: null, status_text: Print is dead, is_admin: true}
+        note: "Official 'Typical success response' of users.info (docs.slack.dev), unmodified."
+      - file: error_user_not_found.json
+        filters: {id: W000BAD}
+        expect_error: user_not_found
+        note: "Official 'Typical error response' of users.info (ok:false in a 200 body)."
+    docs_url: https://docs.slack.dev/reference/methods/users.info
+
+  - name: slack_bot
+    title: One bot by bot id
+    description: "One row per bot id (bots.info): name and app of the integration that posted a message (bot_id column of message tables)."
+    kind: entities
+    request:
+      method: GET
+      path: /bots.info
+      query:
+        bot: "{{ filters.id }}"
+    filters:
+      - {column: id, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Bot id (B...)", examples: [B123456]}
+    response:
+      rows_path: "$.bot"
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: app_id, path: app_id}
+      - {name: user_id, path: user_id, description: "Bot user id (resolve with slack_user)"}
+      - {name: deleted, type: BOOLEAN, path: deleted}
+      - {name: updated, type: TIMESTAMP, path: updated, transform: epoch_s}
+    examples:
+      - sql: "SELECT id, name, app_id FROM slack_bot WHERE id = 'B123456'"
+        description: Which integration posted a bot message.
+    fixtures:
+      - file: bots_info.json
+        filters: {id: B123456}
+        expect_rows: 1
+        expect_columns: {id: B123456, name: beforebot, app_id: A123456, user_id: U123456, deleted: false, updated: "2015-12-04T23:33:24Z"}
+        note: "Official success response of bots.info (docs.slack.dev), unmodified."
+    docs_url: https://docs.slack.dev/reference/methods/bots.info
+
+  - name: slack_auth
+    title: Identity of the configured token
+    description: "One row (auth.test): workspace URL and name, team id and the bot/user identity behind SLACK_BOT_TOKEN. Use it to build message links and to check the token works."
+    kind: entities
+    request: {method: POST, path: /auth.test}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: url, path: url, description: "Workspace URL, e.g. https://acme.slack.com/"}
+      - {name: team, path: team}
+      - {name: team_id, path: team_id}
+      - {name: user, path: user}
+      - {name: user_id, path: user_id}
+      - {name: bot_id, path: bot_id}
+      - {name: enterprise_id, path: enterprise_id}
+    examples:
+      - sql: "SELECT url, team, user, bot_id FROM slack_auth"
+        description: Which workspace and bot this deployment reads as.
+    fixtures:
+      - file: auth_test_bot.json
+        expect_rows: 1
+        expect_columns: {url: "https://subarachnoid.slack.com/", team: Subarachnoid Workspace, team_id: T0G9PQBBK, user: bot, user_id: W23456789, bot_id: BZYBOTHED}
+        note: "Official 'Success response when using a bot user token' of auth.test (docs.slack.dev), unmodified."
+      - file: error_invalid_auth.json
+        expect_error: invalid_auth
+        note: "Official 'Standard failure response when used with an invalid token' of auth.test."
+    docs_url: https://docs.slack.dev/reference/methods/auth.test
+
+roles:
+  chat_history:
+    - table: slack_search_messages
+      columns: {ts: ts, message: message, user: user, channel: channel_name, url: url}
+      query_language: slack_search
+      notes: "Seeds pass the alert or service name as query and a 14-day ts window; needs SLACK_USER_TOKEN."
+    - table: slack_search_context
+      columns: {ts: ts, message: message, user: user, channel: channel_name, url: url}
+      notes: "Real-time Search API; needs SLACK_USER_TOKEN (or a bot token with an action_token)."

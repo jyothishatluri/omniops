@@ -1,0 +1,80 @@
+# OmniOps' Kubernetes identity for the Arena (D11 / Part 8 #34: read-only), applied by
+# deploy/arena/port-forward.sh. Its token goes only to helper.py's kube-proxy, never to OmniOps:
+# OmniOps' kubeconfig points at the proxy and carries no credential. The proxy also hides the Arena's
+# benchmark-control namespace (ConfigMap suite-state names the active scenario, 3.16), which RBAC
+# cannot carve out of the cluster-wide lists OmniOps' change feed uses.
+#
+# Resources: what the kubernetes source reads (docs/sources/kubernetes.md, "Minimum RBAC"), get/list
+# only: no watch, no exec / attach / port-forward / proxy subresources, nothing that writes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: omniops-arena
+  namespace: observability
+  labels: {app.kubernetes.io/part-of: omniops-arena}
+automountServiceAccountToken: false
+---
+# Long-lived token, filled in by the token controller (the benchmark runs for hours).
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/service-account-token
+metadata:
+  name: omniops-arena-token
+  namespace: observability
+  labels: {app.kubernetes.io/part-of: omniops-arena}
+  annotations: {kubernetes.io/service-account.name: omniops-arena}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: omniops-arena-read
+  labels: {app.kubernetes.io/part-of: omniops-arena}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, services, endpoints, configmaps, secrets, persistentvolumeclaims,
+                persistentvolumes, resourcequotas, limitranges, nodes, namespaces, serviceaccounts,
+                replicationcontrollers]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets, controllerrevisions]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [get, list]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies, ingresses, ingressclasses]
+    verbs: [get, list]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses, csinodes, csidrivers, volumeattachments]
+    verbs: [get, list]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations, validatingadmissionpolicies,
+                validatingadmissionpolicybindings]
+    verbs: [get, list]
+  - apiGroups: [scheduling.k8s.io]
+    resources: [priorityclasses]
+    verbs: [get, list]
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods, nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: omniops-arena-read
+  labels: {app.kubernetes.io/part-of: omniops-arena}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: omniops-arena-read}
+subjects:
+  - {kind: ServiceAccount, name: omniops-arena, namespace: observability}

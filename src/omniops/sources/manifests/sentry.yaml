@@ -1,0 +1,1573 @@
+# Sentry web API (v0): issues, issue events (+ latest/recommended event with stack trace), issue tag
+# distributions, Explore events table / timeseries (errors, spans, logs...), releases + deploys +
+# commits, release health, feature-flag change log, trace metadata, crons, detectors (monitors /
+# alert rules), alert workflows, org stats (dropped / rate-limited events), projects, replays.
+# Docs: https://docs.sentry.io/api/  (OpenAPI: https://github.com/getsentry/sentry-api-schema)
+source: sentry
+display_name: Sentry
+vendor: Functional Software, Inc. (Sentry)
+description: >-
+  Sentry error tracking and tracing API: issues with counts in the incident window, the events and
+  stack traces behind them, which release/host/environment they hit, Explore queries over errors /
+  spans / logs, releases with their deploys and commits, crash-free release health, feature-flag
+  changes, crons and alert detectors.
+docs_url: https://docs.sentry.io/api/
+categories: [errors, traces, logs, alerts, changes, rum, releases]
+base_url: "{{ env.SENTRY_URL }}"
+env:
+  - {name: SENTRY_AUTH_TOKEN, description: "Auth token (internal integration or user token) with org:read, project:read, event:read (and member:read / team:read for owners)", secret: true}
+  - {name: SENTRY_ORG, description: "Organization slug (or id), e.g. acme"}
+  - {name: SENTRY_URL, description: "API host without /api/0: https://sentry.io (default), https://us.sentry.io / https://de.sentry.io (region domains), or your self-hosted URL", default: "https://sentry.io"}
+required_env: [SENTRY_AUTH_TOKEN, SENTRY_ORG]
+auth:
+  type: bearer
+  token: "{{ env.SENTRY_AUTH_TOKEN }}"
+rate_limit:
+  concurrency: 3
+  notes: >-
+    Sentry limits every (caller, endpoint) pair with a fixed-window requests-per-second limit AND a
+    concurrent-requests limit (see X-Sentry-Rate-Limit-* headers); limits are per caller identity,
+    not per token. Keep concurrency low and avoid polling; HTTP 429 is retried with backoff.
+retention:
+  errors: 90d
+  events: 90d
+  spans: 30d
+  traces: 30d
+  logs: 30d
+  rum: 90d
+ui_base_url: "{{ env.SENTRY_URL }}/organizations/{{ env.SENTRY_ORG }}"
+pitfalls:
+  - "Every list endpoint returns ONE page of at most 100 rows here (Sentry's Link header always advertises a next cursor; results=\"false\" marks the end, which this engine cannot read yet). Results are sorted server-side, so ask for the top (sort / query) instead of paging. Exactly 100 rows means there are probably more: narrow project / environment / query / time."
+  - "Time windows are sent as start/end (ISO-8601 UTC). Retention: errors 90 days (30 on Developer plans), spans / logs / profiles 30 days."
+  - "project filters take project slugs or numeric ids (older self-hosted versions accept ids only). An unknown project slug is an HTTP 400/403, not empty data: list sentry_projects first."
+  - "Issue search syntax (query): is:unresolved / is:resolved / is:ignored, level:error, release:1.2.3, environment:prod, assigned:me, firstSeen:-1h, lastSeen:-15m, times_seen:>100, error.type:TimeoutError, message:\"timeout\", user.email:..., transaction:/checkout, has:user. Unknown keys become free-text and match nothing."
+  - "SaaS organizations live in a region (us / de). sentry.io works for most endpoints; set SENTRY_URL=https://de.sentry.io for EU-hosted orgs if region-bound endpoints (events, issues) return 404."
+query_languages:
+  sentry_search: >-
+    Sentry search syntax: key:value tokens ANDed by space, OR / parentheses supported, negate with
+    !key:value, wildcards key:*part*, lists key:[a,b], comparisons times_seen:>10 / span.duration:>500,
+    relative times lastSeen:-1h. Issues: is:unresolved|resolved|ignored|archived, issue.category:error|
+    performance|cron|uptime, level, release, environment, error.type, error.handled:false. Explore
+    (sentry_events): dataset-specific fields, e.g. spans: span.op:db span.duration:>1000 transaction:/api*;
+    logs: severity:error message:*timeout*; errors: error.type:KeyError release:frontend@1.2.
+
+tables:
+  # ------------------------------------------------------------------------------------------
+  # Issues
+  # ------------------------------------------------------------------------------------------
+  - name: sentry_issues
+    title: Issues (grouped errors / performance problems)
+    description: >-
+      Issues of the organization that had events in the ts window, one row per issue with
+      count / user_count in that window, level, status, first/last seen, project and permalink.
+      Filter query (Sentry issue search; default is:unresolved, use '*' for every status), project
+      (slugs, IN list sent as one request), environment (IN list), sort (date = last seen
+      [default], freq = events, new = first seen, trends, user) and ts. This is the starting
+      point for "what errors started / spiked during the incident".
+    kind: incidents
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/issues/"
+      query:
+        query: "{{ filters.short_id or (' ' if filters.query in ['*', 'all'] else filters.query) }}"
+        project: "{{ filters.project | as_list }}"
+        environment: "{{ filters.environment | as_list }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        sort: "{{ filters.sort or 'date' }}"
+        limit: "{{ [limit or 100, 100] | min }}"
+        groupStatsPeriod: "{{ filters.group_stats_period or '24h' }}"
+        shortIdLookup: "{{ '1' if filters.short_id else none }}"
+    filters:
+      - {column: query, description: "Issue search (default is:unresolved; '*' = all statuses)", examples: ["is:unresolved level:error"]}
+      - {column: project, ops: ["=", "in"], fan_out: false, description: "Project slug(s) or id(s)", examples: ["pump-station"]}
+      - {column: environment, ops: ["=", "in"], fan_out: false, description: "Environment name(s), e.g. production", examples: ["production"]}
+      - {column: sort, description: "date (last seen, default) | freq (event count) | new (first seen) | trends | user | recommended | inbox"}
+      - {column: group_stats_period, description: "Bucket set for the stats column: 24h (hourly, default) | 14d (daily) | auto"}
+      - {column: short_id, description: "Look up by short id (e.g. PUMP-STATION-1): sent as the query with shortIdLookup=1 (ignores other filters)"}
+    time: {column: ts, default_lookback: 24h, retention: 90d, reapply: false}
+    response: {rows_path: "$"}
+    columns:
+      - {name: issue_id, path: id, description: "Numeric issue (group) id used by the other sentry_issue_* tables"}
+      - {name: id, path: id}
+      - {name: short_id, path: shortId, description: "Human id, e.g. PUMP-STATION-1"}
+      - {name: title, path: title}
+      - {name: message, path: title}
+      - {name: culprit, path: culprit, description: "Function / transaction / route the issue is attributed to"}
+      - {name: level, path: level, description: "fatal | error | warning | info | debug"}
+      - {name: status, path: status, description: "unresolved | resolved | ignored"}
+      - {name: substatus, path: substatus, description: "new | ongoing | escalating | regressed | archived_* ..."}
+      - {name: state, path: status}
+      - {name: count, type: BIGINT, path: count, description: "Events in the requested window (string in the API)"}
+      - {name: user_count, type: BIGINT, path: userCount, description: "Affected users in the window"}
+      - {name: lifetime_count, type: BIGINT, path: "lifetime.count", description: "All-time events (when not collapsed)"}
+      - {name: first_seen, type: TIMESTAMP, path: firstSeen, transform: auto_time}
+      - {name: last_seen, type: TIMESTAMP, path: lastSeen, transform: auto_time}
+      - {name: ts, type: TIMESTAMP, path: lastSeen, transform: auto_time, description: "= last_seen; the ts predicate selects issues with events in the window (pushed down, not re-applied)"}
+      - {name: project, path: "project.slug"}
+      - {name: service, path: "project.slug", description: "Project slug (Sentry's notion of a service)"}
+      - {name: project_id, path: "project.id"}
+      - {name: platform, path: platform}
+      - {name: priority, path: priority, description: "high | medium | low"}
+      - {name: severity, path: priority}
+      - {name: issue_category, path: issueCategory, description: "error | performance | cron | uptime | feedback ..."}
+      - {name: issue_type, path: issueType, description: "e.g. error, performance_n_plus_one_db_queries"}
+      - {name: is_unhandled, type: BOOLEAN, path: isUnhandled}
+      - {name: assigned_to, path: "assignedTo.name"}
+      - {name: url, path: permalink}
+      - {name: metadata, type: JSON, path: metadata, description: "type / value / filename / function of the error"}
+      - {name: stats, type: JSON, path: stats, description: "Event-count buckets [[epoch_s, count], ...] for groupStatsPeriod"}
+      - {name: environment, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: sort, filter_only: true}
+      - {name: group_stats_period, filter_only: true}
+    max_rows: 100
+    sort_hint: "Server-side sort (default last seen desc); one page of up to 100 issues."
+    pitfalls:
+      - "Without query the API applies is:unresolved: a resolved-then-regressed or ignored issue is hidden. Use query = '*' (all) or 'is:resolved' explicitly when looking for regressions."
+      - "count and user_count are for the requested window; lifetime_count is all-time."
+      - "sort = 'freq' to find the noisiest issues, 'new' for issues first seen in the window (likely caused by the incident's change)."
+    examples:
+      - sql: >-
+          SELECT short_id, title, culprit, count, user_count, first_seen, url FROM sentry_issues
+          WHERE project = 'pump-station' AND environment = 'production' AND sort = 'freq'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY count DESC LIMIT 20
+        description: Noisiest unresolved issues of a project during the incident hour.
+      - sql: >-
+          SELECT short_id, title, first_seen, count, level FROM sentry_issues
+          WHERE query = 'is:unresolved firstSeen:-6h' AND sort = 'new'
+          ORDER BY first_seen DESC
+        description: Issues that appeared for the first time in the last 6 hours (new regressions).
+    fixtures:
+      - file: issues.json
+        filters: {project: pump-station}
+        expect_rows: 1
+        expect_columns: {issue_id: "1", short_id: PUMP-STATION-1, title: "This is an example Python exception", count: 150, user_count: 0, status: ignored, project: pump-station, issue_category: performance, ts: "2018-12-06T21:19:55Z", url: "https://sentry.io/the-interstellar-jurisdiction/pump-station/issues/1/", assigned_to: "John Doe"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/issues/ (docs.sentry.io/api/events/list-an-organizations-issues/)."
+    ui_link: "{{ env.SENTRY_URL }}/organizations/{{ env.SENTRY_ORG }}/issues/?query={{ (filters.query or 'is:unresolved') | urlencode }}&start={{ time.start | rfc3339 | urlencode }}&end={{ time.end | rfc3339 | urlencode }}"
+    docs_url: https://docs.sentry.io/api/events/list-an-organizations-issues/
+
+  - name: sentry_issue
+    title: Issue details
+    description: >-
+      One issue by issue_id (IN fans out): status, counts, first / last seen, first and last
+      release it was seen in, tag keys, activity log (resolved / regressed / assigned...), hourly
+      (24h) and daily (30d) event stats. Use it to answer "did this start with release X?".
+    kind: incidents
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/issues/{{ filters.issue_id }}/"
+      query:
+        environment: "{{ filters.environment | as_list }}"
+    filters:
+      - {column: issue_id, required: true, description: "Numeric issue id (sentry_issues.issue_id; resolve short ids with sentry_issue_by_short_id)", examples: ["1"]}
+      - {column: environment, ops: ["=", "in"], fan_out: false, description: "Restrict counts to environment(s)"}
+    response: {rows_path: "$"}
+    columns:
+      - {name: issue_id, path: id}
+      - {name: short_id, path: shortId}
+      - {name: title, path: title}
+      - {name: culprit, path: culprit}
+      - {name: level, path: level}
+      - {name: status, path: status}
+      - {name: substatus, path: substatus}
+      - {name: count, type: BIGINT, path: count}
+      - {name: user_count, type: BIGINT, path: userCount}
+      - {name: first_seen, type: TIMESTAMP, path: firstSeen, transform: auto_time}
+      - {name: last_seen, type: TIMESTAMP, path: lastSeen, transform: auto_time}
+      - {name: first_release, path: "firstRelease.version", description: "Release the issue was first seen in"}
+      - {name: first_release_at, type: TIMESTAMP, path: "firstRelease.dateCreated", transform: auto_time}
+      - {name: last_release, path: "lastRelease.version"}
+      - {name: project, path: "project.slug"}
+      - {name: service, path: "project.slug"}
+      - {name: platform, path: platform}
+      - {name: priority, path: priority}
+      - {name: issue_category, path: issueCategory}
+      - {name: issue_type, path: issueType}
+      - {name: assigned_to, path: "assignedTo.name"}
+      - {name: user_report_count, type: BIGINT, path: userReportCount}
+      - {name: num_comments, type: BIGINT, path: numComments}
+      - {name: url, path: permalink}
+      - {name: tags, type: JSON, path: tags, description: "Tag keys with totalValues; read value distributions with sentry_issue_tags"}
+      - {name: activity, type: JSON, path: activity, description: "first_seen / set_resolved / set_regression / assigned ... with dateCreated"}
+      - {name: stats, type: JSON, path: stats, description: "{'24h': [[epoch_s, count]...], '30d': [...]}"}
+      - {name: metadata, type: JSON, path: metadata}
+      - {name: environment, filter_only: true}
+    examples:
+      - sql: "SELECT short_id, status, first_seen, first_release, last_release, count, activity FROM sentry_issue WHERE issue_id = '1'"
+        description: When did this issue start and in which release.
+    fixtures:
+      - file: issue.json
+        filters: {issue_id: "1"}
+        expect_rows: 1
+        expect_columns: {issue_id: "1", short_id: PUMP-STATION-1, status: unresolved, count: 150, user_count: 12, first_release: "17642328ead24b51867165985996d04b29310337", first_seen: "2018-11-06T21:19:55Z"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/issues/{issue_id}/ (docs.sentry.io/api/events/retrieve-an-issue/)."
+    ui_link: "{{ env.SENTRY_URL }}/organizations/{{ env.SENTRY_ORG }}/issues/{{ filters.issue_id }}/"
+    docs_url: https://docs.sentry.io/api/events/retrieve-an-issue/
+
+  - name: sentry_issue_events
+    title: Events of an issue
+    description: >-
+      Individual error events of one issue in the ts window (newest first, max 100): timestamp,
+      message, release, environment, host (server_name), tags, exception type/value. Filter
+      issue_id (required), ts, environment, query (event search, e.g. release:1.2.3) and full
+      (true = include stack traces/contexts, page capped at 10).
+    kind: events
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/issues/{{ filters.issue_id }}/events/"
+      query:
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        environment: "{{ filters.environment | as_list }}"
+        query: "{{ filters.query }}"
+        full: "{{ filters.full }}"
+        per_page: "{{ [limit or 100, 100] | min }}"
+    filters:
+      - {column: issue_id, required: true, description: "Numeric issue id", examples: ["1889724436"]}
+      - {column: environment, ops: ["=", "in"], fan_out: false, description: "Environment name(s)"}
+      - {column: query, description: "Event search, e.g. 'release:frontend@1.2.3 server_name:web1'"}
+      - {column: full, type: BOOLEAN, description: "true = full event bodies (stack traces, contexts); max 10 per page"}
+    time: {column: ts, default_lookback: 24h, retention: 90d}
+    response: {rows_path: "$"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: dateCreated, transform: auto_time, description: "Event time"}
+      - {name: event_id, path: eventID, description: "32-hex event id"}
+      - {name: id, path: id}
+      - {name: issue_id, path: groupID}
+      - {name: title, path: title}
+      - {name: message, expr: "_.message or _.title"}
+      - {name: level, expr: "(_.tags or []) | selectattr('key', 'equalto', 'level') | map(attribute='value') | first"}
+      - {name: release, expr: "(_.tags or []) | selectattr('key', 'equalto', 'release') | map(attribute='value') | first"}
+      - {name: env, expr: "(_.tags or []) | selectattr('key', 'equalto', 'environment') | map(attribute='value') | first", description: "environment tag"}
+      - {name: host, expr: "(_.tags or []) | selectattr('key', 'equalto', 'server_name') | map(attribute='value') | first", description: "server_name tag"}
+      - {name: transaction, expr: "(_.tags or []) | selectattr('key', 'equalto', 'transaction') | map(attribute='value') | first"}
+      - {name: trace_id, expr: "((_.contexts or {}).trace or {}).trace_id or ((_.tags or []) | selectattr('key', 'equalto', 'trace') | map(attribute='value') | first)", description: "Trace id (full=true contexts, or the trace tag)"}
+      - {name: exception_type, path: "metadata.type"}
+      - {name: exception_value, path: "metadata.value"}
+      - {name: location, path: location, description: "file:line of the crash, when known"}
+      - {name: culprit, path: culprit}
+      - {name: platform, path: platform}
+      - {name: event_type, path: "['event.type']"}
+      - {name: project_id, path: projectID}
+      - {name: user_id, path: "user.id"}
+      - {name: tags, type: JSON, path: tags, description: "[{key, value}] list"}
+      - {name: entries, type: JSON, path: entries, description: "Stack trace / breadcrumbs (full=true only)"}
+      - {name: environment, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: full, type: BOOLEAN, filter_only: true}
+    max_rows: 100
+    sort_hint: "Newest first; one page of up to 100 events (10 with full=true)."
+    examples:
+      - sql: >-
+          SELECT release, host, count(*) AS events, min(ts) AS first, max(ts) AS last
+          FROM sentry_issue_events WHERE issue_id = '1889724436'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY 1, 2 ORDER BY events DESC
+        description: Which release / host the sampled events of an issue came from during the incident.
+    fixtures:
+      - file: issue_events.json
+        filters: {issue_id: "1889724436"}
+        expect_rows: 1
+        expect_columns: {ts: "2020-09-11T17:46:36Z", event_id: 9fac2ceed9344f2bbfdd1fdacb0ed9b1, issue_id: "1889724436", release: "17642328ead24b51867165985996d04b29310337", env: production, host: web1.example.com, level: fatal, exception_type: ExampleException, location: "example.py:123"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/issues/{issue_id}/events/ (docs.sentry.io/api/events/list-an-issues-events/)."
+    docs_url: https://docs.sentry.io/api/events/list-an-issues-events/
+
+  - name: sentry_issue_event
+    title: One event of an issue (latest / oldest / recommended) with stack trace
+    description: >-
+      The full event of an issue: event_id = 'latest' (default), 'oldest', 'recommended' or an
+      event id. Returns exception type/value, the crashing in-app frame, the full stack trace,
+      breadcrumbs, request, tags, contexts (trace id, runtime, browser...), release and a
+      markdown rendering of the whole event for reading (formatted, via llmFormat). One row.
+    kind: events
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/issues/{{ filters.issue_id }}/events/{{ filters.event_id or 'latest' }}/"
+      query:
+        environment: "{{ filters.environment | as_list }}"
+        llmFormat: "{{ filters.llm_format }}"
+    filters:
+      - {column: issue_id, required: true, description: "Numeric issue id", examples: ["1341191803"]}
+      - {column: event_id, description: "latest (default) | oldest | recommended | a 32-hex event id", examples: ["latest"]}
+      - {column: environment, ops: ["=", "in"], fan_out: false, description: "Pick the event from these environments"}
+      - {column: llm_format, default: markdown, description: "markdown (default) | json | xml: adds the `formatted` rendering; set '' to skip"}
+    response: {rows_path: "$"}
+    columns:
+      - {name: event_id, path: eventID}
+      - {name: issue_id, path: groupID}
+      - {name: ts, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: received_at, type: TIMESTAMP, path: dateReceived, transform: auto_time}
+      - {name: title, path: title}
+      - {name: message, expr: "_.message or _.title"}
+      - {name: exception_type, path: "metadata.type"}
+      - {name: exception_value, path: "metadata.value"}
+      - {name: top_frame, type: JSON, expr: "((((_.entries or []) | selectattr('type', 'equalto', 'exception') | map(attribute='data') | list | first)['values'] | list | last).stacktrace.frames | selectattr('inApp') | list | last) or ((((_.entries or []) | selectattr('type', 'equalto', 'exception') | map(attribute='data') | list | first)['values'] | list | last).stacktrace.frames | list | last) or none", description: "Innermost in-app frame of the crashing exception (else its innermost frame): filename, function, lineNo, context lines"}
+      - {name: exception, type: JSON, expr: "((_.entries or []) | selectattr('type', 'equalto', 'exception') | map(attribute='data') | list | first)['values']", description: "Exception chain with full stack traces"}
+      - {name: breadcrumbs, type: JSON, expr: "((_.entries or []) | selectattr('type', 'equalto', 'breadcrumbs') | map(attribute='data') | list | first)['values']", description: "Breadcrumbs before the error (HTTP calls, logs, navigation)"}
+      - {name: request, type: JSON, expr: "(_.entries or []) | selectattr('type', 'equalto', 'request') | map(attribute='data') | list | first", description: "HTTP request (url, method, headers)"}
+      - {name: release, expr: "(_.release or {}).version or ((_.tags or []) | selectattr('key', 'equalto', 'release') | map(attribute='value') | first)"}
+      - {name: release_deployed_at, type: TIMESTAMP, path: "release.lastDeploy.dateFinished", transform: auto_time}
+      - {name: env, expr: "(_.tags or []) | selectattr('key', 'equalto', 'environment') | map(attribute='value') | first"}
+      - {name: level, expr: "(_.tags or []) | selectattr('key', 'equalto', 'level') | map(attribute='value') | first"}
+      - {name: host, expr: "(_.tags or []) | selectattr('key', 'equalto', 'server_name') | map(attribute='value') | first"}
+      - {name: handled, expr: "(_.tags or []) | selectattr('key', 'equalto', 'handled') | map(attribute='value') | first"}
+      - {name: trace_id, path: "contexts.trace.trace_id"}
+      - {name: span_id, path: "contexts.trace.span_id"}
+      - {name: location, path: location}
+      - {name: culprit, path: culprit}
+      - {name: platform, path: platform}
+      - {name: sdk, expr: "(_.sdk.name ~ ' ' ~ _.sdk.version) if _.sdk else none"}
+      - {name: project_id, path: projectID}
+      - {name: tags, type: JSON, path: tags}
+      - {name: contexts, type: JSON, path: contexts}
+      - {name: processing_errors, type: JSON, path: errors, description: "Symbolication / source map errors (unminified stack traces missing?)"}
+      - {name: formatted, path: formatted, transform: redact, description: "Whole event rendered for reading (llmFormat), secrets masked"}
+      - {name: previous_event_id, path: previousEventID}
+      - {name: next_event_id, path: nextEventID}
+      - {name: environment, filter_only: true}
+      - {name: llm_format, filter_only: true}
+    pitfalls:
+      - "'latest' is the newest event in the issue overall, not necessarily inside the incident window; pass an event_id from sentry_issue_events for a specific one."
+      - "Minified JavaScript / unsymbolicated native frames: check processing_errors (missing source maps) before trusting top_frame."
+    examples:
+      - sql: "SELECT exception_type, exception_value, top_frame, release, trace_id FROM sentry_issue_event WHERE issue_id = '1341191803' AND event_id = 'latest'"
+        description: What exactly is failing (exception, crashing frame) and which trace to follow.
+      - sql: "SELECT formatted FROM sentry_issue_event WHERE issue_id = '1341191803' AND event_id = 'recommended'"
+        description: Read the most representative event in full.
+    fixtures:
+      - file: issue_event.json
+        filters: {issue_id: "1341191803"}
+        expect_rows: 1
+        expect_columns: {event_id: 9999aaaaca8b46d797c23c6077c6ff01, issue_id: "1341191803", ts: "2020-06-17T22:26:56.098086Z", exception_type: ForbiddenError, release: b65bc521378269d3eaefdc964f8ef56621414943, env: prod, trace_id: da6caabcd90e45fdb81f6655824a5f88, handled: "yes", release_deployed_at: "2020-06-17T19:20:55.641748Z", top_frame: {not_null: true}, breadcrumbs: {not_null: true}}
+        note: "Official docs example response of GET /api/0/organizations/{org}/issues/{issue_id}/events/{event_id}/ (docs.sentry.io/api/events/retrieve-an-issue-event/)."
+    ui_link: "{{ env.SENTRY_URL }}/organizations/{{ env.SENTRY_ORG }}/issues/{{ filters.issue_id }}/events/{{ filters.event_id or 'latest' }}/"
+    docs_url: https://docs.sentry.io/api/events/retrieve-an-issue-event/
+
+  - name: sentry_issue_tags
+    title: Tag value distribution of an issue
+    description: >-
+      Top values of one tag key for an issue with counts and first/last seen: which release,
+      environment, server_name (host), browser, url, transaction, customer... the events
+      concentrate on. Filter issue_id and key (both required; key IN fans out, e.g. key IN
+      ('release', 'server_name', 'environment')). One row per (key, value).
+    kind: entities
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/issues/{{ filters.issue_id }}/tags/{{ filters.key }}/"
+      query:
+        environment: "{{ filters.environment | as_list }}"
+    filters:
+      - {column: issue_id, required: true, description: "Numeric issue id", examples: ["1"]}
+      - {column: key, required: true, description: "Tag key: release, environment, server_name, transaction, url, browser, os, user, level, handled...", examples: ["release"]}
+      - {column: environment, ops: ["=", "in"], fan_out: false, description: "Restrict to environment(s)"}
+    response:
+      rows_path: "$.topValues[*]"
+    columns:
+      - {name: key, path: "$.key"}
+      - {name: value, path: value}
+      - {name: name, path: name}
+      - {name: count, type: BIGINT, path: count}
+      - {name: pct, type: DOUBLE, expr: "(100.0 * _.count / root.totalValues) if (root.totalValues and _.count is number) else none", description: "Share of the issue's events with this value"}
+      - {name: first_seen, type: TIMESTAMP, path: firstSeen, transform: auto_time}
+      - {name: last_seen, type: TIMESTAMP, path: lastSeen, transform: auto_time}
+      - {name: total_values, type: BIGINT, path: "$.totalValues"}
+      - {name: unique_values, type: BIGINT, path: "$.uniqueValues"}
+      - {name: issue_id, filter_only: true}
+      - {name: environment, filter_only: true}
+    pitfalls:
+      - "topValues are the top values only (about 10); unique_values tells how many exist."
+      - "Counts are over the issue's lifetime (or environment), not the incident window: compare first_seen / last_seen with the incident."
+    examples:
+      - sql: "SELECT key, value, count, pct, first_seen FROM sentry_issue_tags WHERE issue_id = '1' AND key IN ('release', 'server_name', 'environment') ORDER BY key, count DESC"
+        description: Is the issue concentrated on one release / host / environment?
+    fixtures:
+      - file: issue_tag.json
+        filters: {issue_id: "1", key: flavors}
+        expect_rows: 2
+        expect_columns: {key: flavors, value: strawberry, count: 2, total_values: 3, unique_values: 2, first_seen: "2024-01-01T00:00:00Z"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/issues/{issue_id}/tags/{key}/ (docs.sentry.io/api/events/retrieve-tag-details/)."
+    docs_url: https://docs.sentry.io/api/events/retrieve-tag-details/
+
+  - name: sentry_issue_by_short_id
+    title: Resolve an issue short id
+    description: >-
+      Resolve a short id such as PUMP-STATION-1 (from an alert, a Slack message, a ticket) to the
+      numeric issue_id, project and issue summary. One row; IN fans out.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/shortids/{{ filters.short_id }}/"
+    filters:
+      - {column: short_id, required: true, description: "Short id, e.g. PUMP-STATION-1", examples: ["PUMP-STATION-1"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: short_id, path: shortId}
+      - {name: issue_id, path: groupId}
+      - {name: project, path: projectSlug}
+      - {name: title, path: "group.title"}
+      - {name: status, path: "group.status"}
+      - {name: level, path: "group.level"}
+      - {name: count, type: BIGINT, path: "group.count"}
+      - {name: user_count, type: BIGINT, path: "group.userCount"}
+      - {name: first_seen, type: TIMESTAMP, path: "group.firstSeen", transform: auto_time}
+      - {name: last_seen, type: TIMESTAMP, path: "group.lastSeen", transform: auto_time}
+      - {name: url, path: "group.permalink"}
+    examples:
+      - sql: "SELECT issue_id, project, title, status, last_seen FROM sentry_issue_by_short_id WHERE short_id = 'PUMP-STATION-1'"
+        description: Turn the short id from an alert into an issue id for the other tables.
+    fixtures:
+      - file: short_id.json
+        filters: {short_id: PUMP-STATION-1}
+        expect_rows: 1
+        expect_columns: {short_id: PUMP-STATION-1, issue_id: "1", project: pump-station, status: unresolved, count: 1}
+        note: "Official docs example response of GET /api/0/organizations/{org}/shortids/{short_id}/ (docs.sentry.io/api/organizations/resolve-a-short-id/)."
+    docs_url: https://docs.sentry.io/api/organizations/resolve-a-short-id/
+
+  - name: sentry_event_lookup
+    title: Resolve an event id
+    description: >-
+      Resolve a 32-hex event id (seen in logs, a crash report or an HTTP response header) to its
+      issue_id, project and event summary. One row; IN fans out.
+    kind: events
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/eventids/{{ filters.event_id }}/"
+    filters:
+      - {column: event_id, required: true, description: "Event id (32 hex chars, no dashes)", examples: ["9fac2ceed9344f2bbfdd1fdacb0ed9b1"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: event_id, path: "event.eventID"}
+      - {name: issue_id, path: groupId}
+      - {name: project, path: projectSlug}
+      - {name: ts, type: TIMESTAMP, path: "event.dateCreated", transform: auto_time}
+      - {name: title, path: "event.title"}
+      - {name: location, path: "event.location"}
+      - {name: level, path: "event.occurrence.level"}
+      - {name: release, expr: "(_.event.tags or []) | selectattr('key', 'equalto', 'release') | map(attribute='value') | first"}
+      - {name: tags, type: JSON, path: "event.tags"}
+    examples:
+      - sql: "SELECT issue_id, project, title, ts FROM sentry_event_lookup WHERE event_id = '9fac2ceed9344f2bbfdd1fdacb0ed9b1'"
+        description: Which issue a logged Sentry event id belongs to.
+    fixtures:
+      - file: event_id.json
+        filters: {event_id: 9fac2ceed9344f2bbfdd1fdacb0ed9b1}
+        expect_rows: 1
+        expect_columns: {event_id: 9fac2ceed9344f2bbfdd1fdacb0ed9b1, issue_id: "1", project: pump-station, release: "17642328ead24b51867165985996d04b29310337", ts: "2018-11-06T21:19:55Z"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/eventids/{event_id}/ (docs.sentry.io/api/organizations/resolve-an-event-id/)."
+    docs_url: https://docs.sentry.io/api/organizations/resolve-an-event-id/
+
+  # ------------------------------------------------------------------------------------------
+  # Explore (errors, spans, logs, metrics): table + timeseries
+  # ------------------------------------------------------------------------------------------
+  - name: sentry_events
+    title: Explore query (errors / spans / logs table)
+    description: >-
+      Sentry Explore in table form: rows of the chosen dataset (errors [default], spans, logs,
+      tracemetrics, profile_functions, uptime_results) or aggregates when field contains
+      functions (count(), p95(span.duration), count_unique(user), failure_rate()...). Filter
+      dataset, field (IN list, max 20; default a useful per-dataset set), query (search syntax),
+      sort (e.g. '-count()' or '-timestamp'), project, environment, trace_id and ts. Every
+      requested field is a dynamic column (span.op -> span_op, count() -> count,
+      p95(span.duration) -> p95_span_duration) and is in the data JSON.
+    kind: logs
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/events/"
+      query:
+        dataset: "{{ filters.dataset or 'errors' }}"
+        field: >-
+          {{ (filters.field | as_list) if filters.field else {'errors': ['id', 'timestamp', 'title', 'message', 'level', 'project', 'release', 'environment', 'trace', 'culprit', 'issue'], 'logs': ['id', 'timestamp', 'message', 'severity', 'project', 'environment', 'release', 'trace', 'span_id'], 'spans': ['id', 'timestamp', 'span.op', 'span.description', 'span.duration', 'span.status_code', 'transaction', 'project', 'trace', 'is_transaction']}.get(filters.dataset or 'errors', ['timestamp', 'project', 'trace']) }}
+        query: "{{ ((filters.query or '') ~ ((' trace:' ~ filters.trace_id) if filters.trace_id else '')) | trim }}"
+        sort: "{{ filters.sort if filters.sort else ('-timestamp' if (not filters.field or 'timestamp' in (filters.field | as_list)) else none) }}"
+        project: "{{ filters.project | as_list }}"
+        environment: "{{ filters.environment | as_list }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        per_page: "{{ [limit or 100, 100] | min }}"
+    filters:
+      - {column: dataset, description: "errors (default) | spans | logs | tracemetrics | profile_functions | uptime_results", examples: ["spans"]}
+      - {column: field, ops: ["=", "in"], fan_out: false, description: "Fields / functions to select (max 20), e.g. field IN ('transaction', 'count()', 'p95(span.duration)')", examples: ["span.op"]}
+      - {column: query, description: "Search syntax for the dataset, e.g. 'span.op:db span.duration:>1000' or 'severity:error'", examples: ["span.op:http.server"]}
+      - {column: sort, description: "A selected field, '-' for descending: '-count()', '-timestamp' (default when timestamp is selected)"}
+      - {column: project, ops: ["=", "in"], fan_out: false, description: "Project slug(s) or id(s)"}
+      - {column: environment, ops: ["=", "in"], fan_out: false, description: "Environment(s)"}
+      - {column: trace_id, description: "Adds trace:<id> to the query (all spans / logs / errors of one trace)"}
+    time: {column: ts, default_lookback: 1h, retention: 90d, reapply: false}
+    response:
+      rows_path: "$.data[*]"
+      dynamic: "."
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "Event / span / log time (when timestamp is selected)"}
+      - {name: id, path: id, description: "Event id (errors) / span id (spans) / log id (logs)"}
+      - {name: trace_id, path: trace}
+      - {name: project, path: project}
+      - {name: service, path: project}
+      - {name: title, path: title}
+      - {name: message, expr: "_.message or _['span.description'] or _.title"}
+      - {name: level, expr: "_.level or _.severity", description: "level (errors) or severity (logs)"}
+      - {name: release, path: release}
+      - {name: env, path: environment}
+      - {name: transaction, path: transaction}
+      - {name: span_op, path: "['span.op']"}
+      - {name: duration_ms, type: DOUBLE, path: "['span.duration']", description: "span.duration (milliseconds)"}
+      - {name: status_code, path: "['span.status_code']"}
+      - {name: data, type: JSON, path: ".", description: "The whole row keyed by the requested field names, e.g. data->>'p95(span.duration)'"}
+      - {name: dataset, filter_only: true}
+      - {name: field, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: sort, filter_only: true}
+      - {name: environment, filter_only: true}
+    max_rows: 100
+    sort_hint: "Sorted server-side by sort (default newest first); one page of up to 100 rows: aggregate with field functions instead of fetching raw rows."
+    pitfalls:
+      - "Aggregates happen server-side: select field IN ('transaction', 'count()', 'p95(span.duration)') and sort = '-count()' to get the top groups; non-function fields become the group-by."
+      - "Field names differ per dataset (spans: span.op, span.description, span.duration (ms), span.status_code, transaction, is_transaction; logs: message, severity, trace, span_id; errors: title, message, level, error.type, culprit, issue). An invalid field is HTTP 400 naming it: fix the field, list valid ones with sentry_trace_item_attributes."
+      - "Span and log data is sampled / extrapolated; counts are estimates (and retention is 30 days)."
+      - "sort must be one of the selected fields (not an equation)."
+    examples:
+      - sql: >-
+          SELECT data->>'transaction' AS transaction, CAST(data->>'count()' AS BIGINT) AS spans,
+                 CAST(data->>'p95(span.duration)' AS DOUBLE) AS p95_ms
+          FROM sentry_events
+          WHERE dataset = 'spans' AND field IN ('transaction', 'count()', 'p95(span.duration)')
+            AND query = 'is_transaction:true' AND sort = '-p95(span.duration)' AND project = 'backend'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          LIMIT 20
+        description: Slowest transactions (p95) of a project in the incident hour.
+      - sql: >-
+          SELECT ts, level, message, trace_id FROM sentry_events
+          WHERE dataset = 'logs' AND query = 'severity:error' AND project = 'backend'
+          ORDER BY ts DESC LIMIT 50
+        description: Latest error logs of a project (Sentry Logs).
+      - sql: >-
+          SELECT ts, span_op, data->>'span.description' AS description, duration_ms, status_code
+          FROM sentry_events WHERE dataset = 'spans' AND trace_id = 'da6caabcd90e45fdb81f6655824a5f88'
+          ORDER BY ts
+        description: Every span of one trace, in time order.
+    fixtures:
+      - file: events_table.json
+        filters: {dataset: spans, field: [transaction, "count()"]}
+        expect_rows: 3
+        expect_columns: {transaction: foo, count: 10, count_if_transaction_duration_greater_300: 5}
+        note: "Official docs example response of GET /api/0/organizations/{org}/events/ (docs.sentry.io/api/explore/query-explore-events-in-table-format/)."
+    docs_url: https://docs.sentry.io/api/explore/query-explore-events-in-table-format/
+
+  - name: sentry_events_timeseries
+    title: Explore timeseries
+    description: >-
+      Sentry Explore as a time series: one row per (series, bucket) of y_axis (count() by default;
+      avg/pNN/sum/min/max(field), count_unique(field), epm(), failure_rate()...) over a dataset,
+      optionally the top N groups (group_by IN list + top_events). Filter dataset (default
+      errors), y_axis, query, group_by, top_events, interval (seconds), project, environment, ts.
+      Use it to find when errors / latency / log volume changed.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/events-timeseries/"
+      query:
+        dataset: "{{ filters.dataset or 'errors' }}"
+        yAxis: "{{ filters.y_axis or 'count()' }}"
+        query: "{{ filters.query }}"
+        groupBy: "{{ filters.group_by | as_list }}"
+        topEvents: "{{ (filters.top_events or 5) if filters.group_by else none }}"
+        sort: "{{ filters.sort or ('-' ~ (filters.y_axis or 'count()')) if filters.group_by else none }}"
+        interval: "{{ filters.interval }}"
+        project: "{{ filters.project | as_list }}"
+        environment: "{{ filters.environment | as_list }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        excludeOther: "{{ '1' if filters.group_by else none }}"
+    filters:
+      - {column: dataset, description: "errors (default) | spans | logs | tracemetrics | profile_functions | uptime_results", examples: ["errors"]}
+      - {column: y_axis, description: "Aggregate: count() (default), avg(span.duration), p95(span.duration), count_unique(user), epm(), failure_rate()", examples: ["count()"]}
+      - {column: query, description: "Search syntax filter", examples: ["level:error"]}
+      - {column: group_by, ops: ["=", "in"], fan_out: false, description: "Group by field(s) (top_events groups by these)"}
+      - {column: top_events, type: BIGINT, description: "Number of top groups (1-10, default 5 when group_by is set)"}
+      - {column: sort, description: "Ranking of top groups (default '-<y_axis>')"}
+      - {column: interval, type: BIGINT, description: "Bucket size in seconds (default chosen by Sentry from the window)"}
+      - {column: project, ops: ["=", "in"], fan_out: false, description: "Project slug(s) or id(s)"}
+      - {column: environment, ops: ["=", "in"], fan_out: false, description: "Environment(s)"}
+    time: {column: ts, default_lookback: 6h, retention: 90d, reapply: false}
+    response:
+      rows_path: "$.timeSeries[*]"
+      expand:
+        - {explode: values, as: v}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@v.timestamp", transform: epoch_ms, description: "Bucket start"}
+      - {name: value, type: DOUBLE, path: "@v.value"}
+      - {name: y_axis, path: yAxis}
+      - {name: group, expr: "(_.groupBy or []) | map(attribute='value') | join(' / ')", description: "Group values joined with ' / ' (empty for an ungrouped series)"}
+      - {name: labels, type: JSON, path: groupBy, description: "[{key, value}] of the group"}
+      - {name: incomplete, type: BOOLEAN, path: "@v.incomplete", description: "Bucket still being ingested / not elapsed: do not read a drop here as recovery"}
+      - {name: incomplete_reason, path: "@v.incompleteReason"}
+      - {name: is_other, type: BOOLEAN, path: "meta.isOther"}
+      - {name: value_type, path: "meta.valueType"}
+      - {name: value_unit, path: "meta.valueUnit"}
+      - {name: dataset, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: top_events, type: BIGINT, filter_only: true}
+      - {name: sort, filter_only: true}
+      - {name: interval, type: BIGINT, filter_only: true}
+      - {name: project, filter_only: true}
+      - {name: environment, filter_only: true}
+    pitfalls:
+      - "The last buckets are often incomplete (INGESTION_PENDING / NOT_ELAPSED): an apparent drop at the end is not a recovery."
+      - "count_unique() and high-cardinality filters on sampled spans or >30d windows are estimates."
+    examples:
+      - sql: >-
+          SELECT ts, value AS errors FROM sentry_events_timeseries
+          WHERE dataset = 'errors' AND project = 'backend' AND query = 'level:error'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: Error volume of a project around the incident.
+      - sql: >-
+          SELECT ts, "group" AS release, value FROM sentry_events_timeseries
+          WHERE dataset = 'errors' AND group_by = 'release' AND top_events = 3
+          ORDER BY ts, release
+        description: Errors over time split by the top 3 releases (did the new release bring them?).
+      - sql: >-
+          SELECT ts, "group" AS severity, value AS logs FROM sentry_events_timeseries
+          WHERE dataset = 'logs' AND project = 'backend' AND group_by = 'severity' AND top_events = 5
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts, severity
+        description: Log volume by severity around the incident (Sentry Logs).
+      - sql: >-
+          SELECT ts, value AS p95_ms FROM sentry_events_timeseries
+          WHERE dataset = 'spans' AND y_axis = 'p95(span.duration)' AND query = 'is_transaction:true transaction:/api/checkout'
+            AND project = 'backend'
+          ORDER BY ts
+        description: p95 latency of one transaction over the default window.
+    fixtures:
+      - file: events_timeseries.json
+        filters: {dataset: spans}
+        expect_rows: 6
+        expect_columns: {ts: "2025-03-07T17:00:00Z", value: 5.0, y_axis: "count()", group: "foo / bar / baz", incomplete: false}
+        note: "Official docs example response of GET /api/0/organizations/{org}/events-timeseries/ (docs.sentry.io/api/explore/query-explore-events-in-timeseries-format/)."
+    docs_url: https://docs.sentry.io/api/explore/query-explore-events-in-timeseries-format/
+
+  - name: sentry_trace_item_attributes
+    title: Attribute keys of spans / logs / metrics
+    description: >-
+      Attribute (field) names available in a trace-item dataset (spans [default], logs,
+      tracemetrics...) over the ts window, with type and source (sentry or user). Use it before
+      writing sentry_events fields / queries. Filter dataset, substring, attribute_type, project.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/trace-items/attributes/"
+      query:
+        dataset: "{{ filters.dataset or 'spans' }}"
+        substringMatch: "{{ filters.substring }}"
+        attributeType: "{{ filters.attribute_type | as_list }}"
+        project: "{{ filters.project | as_list }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+    filters:
+      - {column: dataset, description: "spans (default) | logs | tracemetrics | processing_errors | preprod", examples: ["spans"]}
+      - {column: substring, description: "Case-sensitive substring of the attribute name", examples: ["http"]}
+      - {column: attribute_type, ops: ["=", "in"], fan_out: false, description: "string | number | boolean | array"}
+      - {column: project, ops: ["=", "in"], fan_out: false}
+    time: {column: ts, default_lookback: 24h, retention: 30d, reapply: false}
+    response: {rows_path: "$"}
+    columns:
+      - {name: key, path: key, description: "Name to use in field / query, e.g. tags[Batch Size,number]"}
+      - {name: name, path: name}
+      - {name: attribute_type, path: attributeType}
+      - {name: source, path: "attributeSource.source_type", description: "sentry (built-in) | user (custom)"}
+      - {name: dataset, filter_only: true}
+      - {name: substring, filter_only: true}
+      - {name: project, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT key, attribute_type, source FROM sentry_trace_item_attributes WHERE dataset = 'spans' AND substring = 'http'"
+        description: Which HTTP attributes spans carry.
+    fixtures:
+      - file: trace_item_attributes.json
+        expect_rows: 2
+        expect_columns: {key: device.class, attribute_type: string, source: sentry}
+        note: "Official docs example response of GET /api/0/organizations/{org}/trace-items/attributes/ (docs.sentry.io/api/discover/list-trace-item-attributes/)."
+    docs_url: https://docs.sentry.io/api/discover/list-trace-item-attributes/
+
+  - name: sentry_trace_meta
+    title: Trace summary
+    description: >-
+      Counts for one trace: spans, errors, performance issues, logs, metrics, spans per op and
+      children per transaction. One row. Filter trace_id (required) and ts (a window that
+      contains the trace; default the last 24h).
+    kind: traces
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/trace-meta/{{ filters.trace_id }}/"
+      query:
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+    filters:
+      - {column: trace_id, required: true, description: "32-hex trace id", examples: ["da6caabcd90e45fdb81f6655824a5f88"]}
+    time: {column: ts, default_lookback: 24h, retention: 30d, reapply: false}
+    response: {rows_path: "$"}
+    columns:
+      - {name: spans_count, type: BIGINT, path: spansCount}
+      - {name: errors_count, type: BIGINT, path: errorsCount}
+      - {name: performance_issues_count, type: BIGINT, path: performanceIssuesCount}
+      - {name: logs_count, type: BIGINT, path: logsCount}
+      - {name: metrics_count, type: BIGINT, path: metricsCount}
+      - {name: span_ops, type: JSON, path: spansCountMap, description: "{op: count}, e.g. {'db': 58}"}
+      - {name: transaction_children, type: JSON, path: transactionChildCountMap}
+      - {name: trace_id, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT spans_count, errors_count, span_ops FROM sentry_trace_meta WHERE trace_id = 'da6caabcd90e45fdb81f6655824a5f88'"
+        description: How big is this trace and does it contain errors.
+    fixtures:
+      - file: trace_meta.json
+        filters: {trace_id: da6caabcd90e45fdb81f6655824a5f88}
+        expect_rows: 1
+        expect_columns: {spans_count: 195, errors_count: 0, logs_count: 5}
+        note: "Official docs example response of GET /api/0/organizations/{org}/trace-meta/{trace_id}/ (docs.sentry.io/api/discover/retrieve-trace-metadata/)."
+    ui_link: "{{ env.SENTRY_URL }}/organizations/{{ env.SENTRY_ORG }}/explore/traces/trace/{{ filters.trace_id }}/"
+    docs_url: https://docs.sentry.io/api/discover/retrieve-trace-metadata/
+
+  # ------------------------------------------------------------------------------------------
+  # Releases, deploys, commits, release health, feature flags
+  # ------------------------------------------------------------------------------------------
+  - name: sentry_releases
+    title: Releases (with last deploy)
+    description: >-
+      Releases of the organization, newest first (max 100): version, created / released dates,
+      last deploy (environment + finish time), commit and deploy counts, new issues introduced,
+      projects. ts = last deploy finish, else release date, else creation. Filter query
+      (substring of the version), project, environment. Sentry's change feed.
+    kind: changes
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/releases/"
+      query:
+        query: "{{ filters.query }}"
+        project: "{{ filters.project | as_list }}"
+        environment: "{{ filters.environment | as_list }}"
+        per_page: "{{ [limit or 100, 100] | min }}"
+    filters:
+      - {column: query, description: "Case-insensitive substring of the version", examples: ["frontend@"]}
+      - {column: project, ops: ["=", "in"], fan_out: false, description: "Project slug(s) or id(s)", examples: ["sentry"]}
+      - {column: environment, ops: ["=", "in"], fan_out: false, description: "Only releases seen in these environments"}
+    response: {rows_path: "$"}
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "(_.lastDeploy.dateFinished if _.lastDeploy else none) or _.dateReleased or _.dateCreated", transform: auto_time, description: "Last deploy finish, else release date, else creation"}
+      - {name: version, path: version}
+      - {name: short_version, path: shortVersion}
+      - {name: title, expr: "'Release ' ~ _.version ~ ((' deployed to ' ~ _.lastDeploy.environment) if _.lastDeploy else '')"}
+      - {name: package, path: "versionInfo.package"}
+      - {name: service, expr: "(_.projects or []) | map(attribute='slug') | join(',')", description: "Project slug(s) of the release"}
+      - {name: projects, type: JSON, path: projects}
+      - {name: date_created, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: date_released, type: TIMESTAMP, path: dateReleased, transform: auto_time}
+      - {name: last_deploy_env, path: "lastDeploy.environment"}
+      - {name: last_deploy_at, type: TIMESTAMP, path: "lastDeploy.dateFinished", transform: auto_time}
+      - {name: deploy_count, type: BIGINT, path: deployCount}
+      - {name: commit_count, type: BIGINT, path: commitCount}
+      - {name: new_groups, type: BIGINT, path: newGroups, description: "Issues first seen in this release"}
+      - {name: last_commit_message, path: "lastCommit.message"}
+      - {name: author, expr: "(_.authors or []) | map(attribute='name') | join(', ')"}
+      - {name: ref, path: ref}
+      - {name: url, path: url}
+      - {name: status, path: status}
+      - {name: first_event, type: TIMESTAMP, path: firstEvent, transform: auto_time}
+      - {name: last_event, type: TIMESTAMP, path: lastEvent, transform: auto_time}
+      - {name: query, filter_only: true}
+      - {name: project, filter_only: true}
+      - {name: environment, filter_only: true}
+    max_rows: 100
+    sort_hint: "Newest release first (by creation); the ts predicate is applied after fetching."
+    pitfalls:
+      - "No server-side time filter: only the newest 100 releases are fetched, then ts is filtered. Narrow with project / query in busy orgs."
+      - "Releases exist only if CI creates them (sentry-cli / SDK release option); deploys only if CI reports them. No release rows does not prove no change."
+      - "new_groups is the number of issues first seen in the release: a spike right after a deploy is strong evidence."
+    examples:
+      - sql: >-
+          SELECT ts, version, last_deploy_env, new_groups, commit_count, author FROM sentry_releases
+          WHERE project = 'backend' AND ts BETWEEN TIMESTAMP '2026-09-30 12:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Releases deployed in the 24 hours before the incident.
+    fixtures:
+      - file: releases.json
+        expect_rows: 1
+        expect_columns: {version: "frontend@1.0.0", ts: "2024-01-01T00:00:00Z", package: frontend, service: sentry, deploy_count: 0, title: "Release frontend@1.0.0"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/releases/ (docs.sentry.io/api/releases/list-an-organizations-releases/)."
+      - file: release_detail.json
+        expect_rows: 1
+        expect_columns: {version: "control@abc123", ts: "2024-05-21T11:26:17.597793Z", last_deploy_env: canary-test-control, commit_count: 2, title: "Release control@abc123 deployed to canary-test-control"}
+        note: "Official docs example of the Release object (GET .../releases/{version}/, same serializer as the list items) to exercise the lastDeploy / lastCommit paths."
+    docs_url: https://docs.sentry.io/api/releases/list-an-organizations-releases/
+
+  - name: sentry_release_health
+    title: Release details and health per project
+    description: >-
+      One release (version required; IN fans out) with health per project: crash-free sessions /
+      users %, crashed and errored sessions, adoption, adoption stage, new issues, plus last
+      deploy and last commit. One row per (release, project). Use it to judge whether a release
+      made things worse.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/releases/{{ filters.version | urlencode }}/"
+      query:
+        project: "{{ filters.project }}"
+        health: "true"
+        adoptionStages: "true"
+        healthStatsPeriod: "{{ filters.health_period or '24h' }}"
+        summaryStatsPeriod: "{{ filters.health_period or '24h' }}"
+    filters:
+      - {column: version, required: true, description: "Release version (URL-encoded automatically)", examples: ["control@abc123"]}
+      - {column: project, description: "Project slug or id"}
+      - {column: health_period, description: "1h | 24h (default) | 7d | 14d | 30d | 90d"}
+    response:
+      rows_path: "$"
+      expand:
+        - {explode: projects, as: p, keep_empty: true}
+    columns:
+      - {name: version, path: version}
+      - {name: project, path: "@p.slug"}
+      - {name: service, path: "@p.slug"}
+      - {name: crash_free_sessions_pct, type: DOUBLE, path: "@p.healthData.crashFreeSessions"}
+      - {name: crash_free_users_pct, type: DOUBLE, path: "@p.healthData.crashFreeUsers"}
+      - {name: sessions_crashed, type: BIGINT, path: "@p.healthData.sessionsCrashed"}
+      - {name: sessions_errored, type: BIGINT, path: "@p.healthData.sessionsErrored"}
+      - {name: total_sessions, type: BIGINT, path: "@p.healthData.totalSessions"}
+      - {name: adoption_pct, type: DOUBLE, path: "@p.healthData.adoption"}
+      - {name: has_health_data, type: BOOLEAN, path: "@p.hasHealthData"}
+      - {name: adoption_stage, expr: "(_.adoptionStages or {})[p.slug].stage if p else none", description: "low_adoption | adopted | replaced"}
+      - {name: new_groups, type: BIGINT, path: "@p.newGroups", description: "New issues in this project for this release"}
+      - {name: date_created, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: date_released, type: TIMESTAMP, path: dateReleased, transform: auto_time}
+      - {name: last_deploy_env, path: "lastDeploy.environment"}
+      - {name: last_deploy_at, type: TIMESTAMP, path: "lastDeploy.dateFinished", transform: auto_time}
+      - {name: commit_count, type: BIGINT, path: commitCount}
+      - {name: last_commit_message, path: "lastCommit.message"}
+      - {name: last_commit_pr, path: "lastCommit.pullRequest.externalUrl"}
+      - {name: health_period, filter_only: true}
+    pitfalls:
+      - "Health data needs release-health sessions (mobile / browser / server-mode SDKs); has_health_data = false means no sessions, not a healthy release."
+    examples:
+      - sql: "SELECT project, crash_free_sessions_pct, sessions_crashed, new_groups, last_deploy_at FROM sentry_release_health WHERE version IN ('backend@1.4.0', 'backend@1.3.9')"
+        description: Compare the new release's health with the previous one.
+    fixtures:
+      - file: release_detail.json
+        filters: {version: "control@abc123"}
+        expect_rows: 1
+        expect_columns: {version: "control@abc123", project: sentry, sessions_crashed: 0, has_health_data: false, adoption_stage: low_adoption, last_deploy_env: canary-test-control, commit_count: 2}
+        note: "Official docs example response of GET /api/0/organizations/{org}/releases/{version}/ (docs.sentry.io/api/releases/retrieve-an-organizations-release/)."
+    docs_url: https://docs.sentry.io/api/releases/retrieve-an-organizations-release/
+
+  - name: sentry_release_deploys
+    title: Deploys of a release
+    description: >-
+      Every deploy of a release (version required; IN fans out): environment, start / finish
+      time, name, url. One row per deploy, ts = finish time.
+    kind: changes
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/releases/{{ filters.version | urlencode }}/deploys/"
+    filters:
+      - {column: version, required: true, description: "Release version", examples: ["control@abc123"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.dateFinished or _.dateStarted", transform: auto_time, description: "Deploy finish (or start)"}
+      - {name: started_at, type: TIMESTAMP, path: dateStarted, transform: auto_time}
+      - {name: env, path: environment}
+      - {name: environment, path: environment}
+      - {name: title, expr: "_.name or ('Deploy to ' ~ _.environment)"}
+      - {name: url, path: url}
+      - {name: id, path: id}
+      - {name: version, filter_only: true}
+    examples:
+      - sql: "SELECT ts, env, title FROM sentry_release_deploys WHERE version = 'control@abc123' ORDER BY ts"
+        description: When and where a release was deployed.
+    fixtures:
+      - file: release_deploys.json
+        filters: {version: "control@abc123"}
+        expect_rows: 1
+        expect_columns: {ts: "2024-05-21T11:26:17.597793Z", env: canary-test-control, id: "53070941", version: "control@abc123"}
+        note: "The docs give only the Deploy schema for GET .../releases/{version}/deploys/; this is the official Deploy object (lastDeploy) of the Retrieve Release docs example, as a list per the deploys schema (docs.sentry.io/api/releases/list-a-releases-deploys/)."
+    docs_url: https://docs.sentry.io/api/releases/list-a-releases-deploys/
+
+  - name: sentry_release_commits
+    title: Commits of a release
+    description: >-
+      Commits included in a release (version required): sha, message, author, repository, pull
+      request. One row per commit, ts = commit date. Use it to find the change behind a
+      regression (suspect commits).
+    kind: changes
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/releases/{{ filters.version | urlencode }}/commits/"
+    filters:
+      - {column: version, required: true, description: "Release version", examples: ["frontend@1.0.0"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: sha, path: id}
+      - {name: title, expr: "(_.message or '').split('\\n')[0]"}
+      - {name: message, path: message}
+      - {name: author, expr: "(_.author.name if _.author else none) or (_.author.email if _.author else none)"}
+      - {name: repository, path: "repository.name"}
+      - {name: pull_request, path: "pullRequest.externalUrl"}
+      - {name: pull_request_title, path: "pullRequest.title"}
+      - {name: suspect_commit_type, path: suspectCommitType}
+      - {name: version, filter_only: true}
+    examples:
+      - sql: "SELECT ts, sha, title, author, pull_request FROM sentry_release_commits WHERE version = 'frontend@1.0.0' ORDER BY ts DESC"
+        description: What changed in the release that preceded the errors.
+    fixtures:
+      - file: release_commits.json
+        filters: {version: "frontend@1.0.0"}
+        expect_rows: 1
+        expect_columns: {sha: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2, title: "fix: handle empty release version", ts: "2024-01-01T00:00:00Z"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/releases/{version}/commits/ (docs.sentry.io/api/releases/list-an-organization-releases-commits/)."
+    docs_url: https://docs.sentry.io/api/releases/list-an-organization-releases-commits/
+
+  - name: sentry_sessions
+    title: Release health sessions (crash-free rate over time)
+    description: >-
+      Release-health session statistics as a time series: one row per (group, field, interval).
+      field IN list (default sum(session); also count_unique(user), crash_free_rate(session),
+      crash_free_rate(user), crash_rate(session)...), group_by IN ('release', 'environment',
+      'project', 'session.status'), interval (>= 1h), project, environment, query, ts.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/sessions/"
+      query:
+        field: "{{ (filters.field | as_list) if filters.field else ['sum(session)'] }}"
+        groupBy: "{{ filters.group_by | as_list }}"
+        interval: "{{ filters.interval or '1h' }}"
+        project: "{{ filters.project | as_list }}"
+        environment: "{{ filters.environment | as_list }}"
+        query: "{{ filters.query }}"
+        orderBy: "{{ filters.order_by or (('-' ~ ((filters.field | as_list | first) or 'sum(session)')) if 'release' in (filters.group_by | as_list) else none) }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        per_page: 100
+    filters:
+      - {column: field, ops: ["=", "in"], fan_out: false, description: "sum(session) (default), count_unique(user), crash_free_rate(session|user), crash_rate(session|user)", examples: ["crash_free_rate(session)"]}
+      - {column: group_by, ops: ["=", "in"], fan_out: false, description: "release | environment | project | session.status", examples: ["release"]}
+      - {column: interval, description: "1h (default, minimum) .. 1d; must divide a day"}
+      - {column: project, ops: ["=", "in"], fan_out: false}
+      - {column: environment, ops: ["=", "in"], fan_out: false}
+      - {column: query, description: "e.g. release:1.2.3"}
+      - {column: order_by, description: "A selected field, '-' for descending (needed with group_by release)"}
+    time: {column: ts, default_lookback: 24h, retention: 90d, reapply: false}
+    response:
+      rows_path: "$.groups[*]"
+      expand:
+        - {entries: series, as: f}
+        - {zip: {t: "$.intervals", v: "@f.value"}, as: pt}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@pt.t", transform: auto_time}
+      - {name: field, path: "@f.key"}
+      - {name: value, type: DOUBLE, path: "@pt.v"}
+      - {name: total, type: DOUBLE, expr: "(_.totals or {})[f.key]"}
+      - {name: release, path: "by.release"}
+      - {name: env, path: "by.environment"}
+      - {name: project, path: "by.project"}
+      - {name: session_status, path: "by['session.status']", description: "healthy | errored | crashed | abnormal"}
+      - {name: labels, type: JSON, path: by}
+      - {name: group_by, filter_only: true}
+      - {name: interval, filter_only: true}
+      - {name: environment, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: order_by, filter_only: true}
+    pitfalls:
+      - "The window is rounded to whole intervals (>= 1 hour); max 10000 data points (fewer groups for long windows)."
+      - "crash_free_rate values are fractions (0.995 = 99.5%)."
+    examples:
+      - sql: >-
+          SELECT ts, release, value AS crash_free FROM sentry_sessions
+          WHERE field = 'crash_free_rate(session)' AND group_by = 'release' AND project = 'mobile-app'
+            AND order_by = '-crash_free_rate(session)'
+          ORDER BY ts
+        description: Crash-free session rate per release over the last day.
+    fixtures:
+      - file: sessions.json
+        expect_rows: 6
+        expect_columns: {ts: "2024-01-29T07:30:00Z", field: "sum(session)", value: 368.0, total: 1000.0, session_status: errored}
+        note: "Official docs example response of GET /api/0/organizations/{org}/sessions/ (docs.sentry.io/api/releases/retrieve-release-health-session-statistics/)."
+    docs_url: https://docs.sentry.io/api/releases/retrieve-release-health-session-statistics/
+
+  - name: sentry_flag_logs
+    title: Feature flag change log
+    description: >-
+      Feature flag creations / updates / deletions recorded by Sentry's flag integrations
+      (LaunchDarkly, Statsig, Unleash, Flagpole, generic webhook) in the ts window, newest first:
+      flag, action, who changed it, provider, tags (environment). Filter flag (IN list), provider,
+      ts. A flag flip right before an incident is a prime suspect.
+    kind: changes
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/flags/logs/"
+      query:
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        flag: "{{ filters.flag | as_list }}"
+        provider: "{{ filters.provider | as_list }}"
+        sort: "-createdAt"
+        per_page: "{{ [limit or 100, 100] | min }}"
+    filters:
+      - {column: flag, ops: ["=", "in"], fan_out: false, description: "Flag name(s)", examples: ["new-checkout-flow"]}
+      - {column: provider, ops: ["=", "in"], fan_out: false, description: "launchdarkly | statsig | unleash | flagpole | generic | unknown"}
+    time: {column: ts, default_lookback: 24h, retention: 90d}
+    response: {rows_path: "$.data[*]"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: createdAt, transform: auto_time}
+      - {name: flag, path: flag}
+      - {name: action, path: action, description: "created | updated | deleted"}
+      - {name: title, expr: "'Feature flag ' ~ _.flag ~ ' ' ~ _.action"}
+      - {name: author, path: createdBy}
+      - {name: created_by_type, path: createdByType, description: "email | id | name"}
+      - {name: provider, path: provider}
+      - {name: env, path: "tags.environment"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: id, type: BIGINT, path: id}
+    pitfalls:
+      - "Only flag providers wired to Sentry's flag audit-log webhook appear here; empty does not prove no flag change."
+    examples:
+      - sql: >-
+          SELECT ts, flag, action, author, env FROM sentry_flag_logs
+          WHERE ts BETWEEN TIMESTAMP '2026-10-01 09:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Feature flags changed in the three hours before the incident.
+    fixtures:
+      - file: flag_logs.json
+        expect_rows: 1
+        expect_columns: {ts: "2024-01-01T05:12:33Z", flag: new-checkout-flow, action: updated, author: jane.doe@example.com, env: production, title: "Feature flag new-checkout-flow updated"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/flags/logs/ (docs.sentry.io/api/flags/list-an-organizations-flag-logs/)."
+    docs_url: https://docs.sentry.io/api/flags/list-an-organizations-flag-logs/
+
+  # ------------------------------------------------------------------------------------------
+  # Alerting: detectors (monitors), workflows (alerts), crons
+  # ------------------------------------------------------------------------------------------
+  - name: sentry_detectors
+    title: Monitors / detectors (alert rule definitions)
+    description: >-
+      Sentry monitors ("detectors": metric_issue = metric alert, error, uptime_domain_failure,
+      monitor_check_in_failure ...): name, type, the metric query / aggregate / time window,
+      threshold conditions, connected alert workflows and the latest issue it opened. Filter
+      query (name:, type:, assignee:), type (IN list), project, enabled. One row per detector.
+    kind: alerts
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/detectors/"
+      query:
+        query: "{{ filters.query }}"
+        type: "{{ filters.type | as_list }}"
+        project: "{{ filters.project | as_list }}"
+        enabled: "{{ filters.enabled }}"
+        sortBy: "{{ filters.sort or '-latestGroup' }}"
+        id: "{{ filters.id | as_list }}"
+        per_page: "{{ [limit or 100, 100] | min }}"
+    filters:
+      - {column: query, description: "Search: name:..., type:metric_issue, assignee:#team", examples: ["name:checkout"]}
+      - {column: type, ops: ["=", "in"], fan_out: false, description: "metric_issue | error | uptime_domain_failure | monitor_check_in_failure | issue_stream ..."}
+      - {column: project, ops: ["=", "in"], fan_out: false}
+      - {column: enabled, type: BOOLEAN, description: "true = only enabled monitors"}
+      - {column: id, ops: ["=", "in"], fan_out: false, description: "Detector id(s), e.g. from sentry_workflows.detector_ids or an alert notification", examples: ["123"]}
+      - {column: sort, description: "name | id | type | connectedWorkflows | latestGroup | openIssues ('-' = desc; default -latestGroup)"}
+    response: {rows_path: "$"}
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: title, path: name}
+      - {name: type, path: type}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: project_id, path: projectId}
+      - {name: description, path: description}
+      - {name: metric_query, expr: "((_.dataSources or []) | map(attribute='queryObj') | list | first).snubaQuery.query", description: "Metric alert search filter"}
+      - {name: aggregate, expr: "((_.dataSources or []) | map(attribute='queryObj') | list | first).snubaQuery.aggregate", description: "e.g. avg(span.duration), count()"}
+      - {name: time_window_s, type: BIGINT, expr: "((_.dataSources or []) | map(attribute='queryObj') | list | first).snubaQuery.timeWindow"}
+      - {name: metric_dataset, expr: "((_.dataSources or []) | map(attribute='queryObj') | list | first).snubaQuery.dataset"}
+      - {name: environment, expr: "((_.dataSources or []) | map(attribute='queryObj') | list | first).snubaQuery.environment or (_.config or {}).environment"}
+      - {name: conditions, type: JSON, path: "conditionGroup.conditions", description: "Threshold conditions: type (gt/lte/eq), comparison (threshold), conditionResult (priority 75=high, 50=medium, 0=resolve)"}
+      - {name: threshold, expr: "((_.conditionGroup or {}).conditions or []) | selectattr('conditionResult', 'gt', 0) | map(attribute='comparison') | map('string') | join(', ') or none", description: "Comparison values of the firing conditions"}
+      - {name: config, type: JSON, path: config}
+      - {name: data_sources, type: JSON, path: dataSources}
+      - {name: workflow_ids, type: JSON, path: workflowIds}
+      - {name: owner, path: "owner.name"}
+      - {name: latest_issue, path: "latestGroup.shortId", description: "Most recent issue this detector opened"}
+      - {name: latest_issue_title, path: "latestGroup.title"}
+      - {name: latest_issue_status, path: "latestGroup.status"}
+      - {name: latest_issue_substatus, path: "latestGroup.substatus"}
+      - {name: latest_issue_last_seen, type: TIMESTAMP, path: "latestGroup.lastSeen", transform: auto_time}
+      - {name: date_created, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: date_updated, type: TIMESTAMP, path: dateUpdated, transform: auto_time}
+      - {name: sort, filter_only: true}
+      - {name: project, filter_only: true}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT id, name, type, aggregate, metric_query, time_window_s, threshold, latest_issue, latest_issue_status FROM sentry_detectors WHERE type = 'metric_issue' AND name ILIKE '%latency%'"
+        description: The metric alert behind a page, with its aggregate, filter and threshold.
+      - sql: "SELECT id, name, type, environment, conditions, latest_issue, latest_issue_last_seen FROM sentry_detectors WHERE id IN ('123', '456')"
+        description: Look up the monitors connected to an alert (ids from sentry_workflows.detector_ids).
+    fixtures:
+      - file: detectors.json
+        expect_rows: 3
+        expect_columns: {id: "123", name: "Error Monitor", type: error, enabled: true, latest_issue: SENTRY-ABC12, latest_issue_status: unresolved, latest_issue_last_seen: "2026-01-08T21:23:45.723716Z"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/detectors/ (docs.sentry.io/api/monitors/fetch-an-organizations-monitors/)."
+    docs_url: https://docs.sentry.io/api/monitors/fetch-an-organizations-monitors/
+
+  - name: sentry_workflows
+    title: Alerts (notification workflows)
+    description: >-
+      Sentry alerts ("workflows"): what triggers a notification (conditions on new / escalating
+      issues, frequency), which detectors feed it, who is notified, and lastTriggered. One row per
+      alert. Filter query (name), detector (IN list of detector ids), project.
+    kind: alerts
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/workflows/"
+      query:
+        query: "{{ filters.query }}"
+        detector: "{{ filters.detector_id | as_list }}"
+        project: "{{ filters.project | as_list }}"
+        per_page: "{{ [limit or 100, 100] | min }}"
+    filters:
+      - {column: query, description: "Search on alert name", examples: ["checkout"]}
+      - {column: detector_id, ops: ["=", "in"], fan_out: false, description: "Detector id(s) connected to the alert"}
+      - {column: project, ops: ["=", "in"], fan_out: false}
+    response: {rows_path: "$"}
+    columns:
+      - {name: id, path: id}
+      - {name: name, path: name}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: last_triggered, type: TIMESTAMP, path: lastTriggered, transform: auto_time, description: "Last time this alert fired"}
+      - {name: ts, type: TIMESTAMP, path: lastTriggered, transform: auto_time}
+      - {name: frequency_min, type: BIGINT, path: "config.frequency", description: "Minimum minutes between notifications per issue"}
+      - {name: environment, path: environment}
+      - {name: detector_ids, type: JSON, path: detectorIds}
+      - {name: triggers, type: JSON, path: triggers, description: "When the alert evaluates (new_high_priority_issue, existing_high_priority_issue ...)"}
+      - {name: action_filters, type: JSON, path: actionFilters, description: "Conditions (event_frequency_count ...) and actions (email, slack, pagerduty...)"}
+      - {name: owner, path: owner}
+      - {name: date_created, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: date_updated, type: TIMESTAMP, path: dateUpdated, transform: auto_time}
+      - {name: query, filter_only: true}
+      - {name: detector_id, filter_only: true}
+      - {name: project, filter_only: true}
+    examples:
+      - sql: "SELECT name, last_triggered, action_filters FROM sentry_workflows WHERE last_triggered IS NOT NULL ORDER BY last_triggered DESC LIMIT 20"
+        description: Which alerts fired most recently and whom they notified.
+    fixtures:
+      - file: workflows.json
+        expect_rows: 3
+        expect_columns: {id: "123", name: "Send a notification for high priority issues", enabled: true, frequency_min: 30, last_triggered: null}
+        note: "Official docs example response of GET /api/0/organizations/{org}/workflows/ (docs.sentry.io/api/monitors/fetch-alerts/)."
+    docs_url: https://docs.sentry.io/api/monitors/fetch-alerts/
+
+  - name: sentry_monitors
+    title: Cron monitors
+    description: >-
+      Cron (scheduled job) monitors with schedule, margins and per-environment status (ok / error /
+      missed_checkin / timeout), last / next check-in and an active incident if the job is broken.
+      One row per monitor. Filter project, environment.
+    kind: alerts
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/monitors/"
+      query:
+        project: "{{ filters.project | as_list }}"
+        environment: "{{ filters.environment | as_list }}"
+    filters:
+      - {column: project, ops: ["=", "in"], fan_out: false, examples: ["pump-station"]}
+      - {column: environment, ops: ["=", "in"], fan_out: false}
+    response: {rows_path: "$"}
+    columns:
+      - {name: id, path: id}
+      - {name: slug, path: slug, description: "Use as monitor in sentry_monitor_checkins"}
+      - {name: name, path: name}
+      - {name: status, path: status, description: "active | disabled"}
+      - {name: is_muted, type: BOOLEAN, path: isMuted}
+      - {name: env_status, expr: "(_.environments | map(attribute='status') | join(',')) if (_.environments is sequence and _.environments is not mapping) else (_.environments.status if _.environments else none)", description: "Per-environment health: ok | error | missed_checkin | timeout (comma list)"}
+      - {name: state, expr: "'error' if (((_.environments if (_.environments is sequence and _.environments is not mapping) else [_.environments or {}]) | selectattr('status', 'in', ['error', 'missed_checkin', 'timeout']) | list) | length) else 'ok'", description: "error when any environment is failing (error / missed_checkin / timeout), else ok"}
+      - {name: last_checkin, type: TIMESTAMP, expr: "((_.environments | map(attribute='lastCheckIn') | select | list | sort | last) if (_.environments is sequence and _.environments is not mapping) else (_.environments.lastCheckIn if _.environments else none))", transform: auto_time}
+      - {name: environments, type: JSON, path: environments, description: "name, status, lastCheckIn, nextCheckIn, activeIncident per environment"}
+      - {name: schedule, path: "config.schedule"}
+      - {name: schedule_type, path: "config.schedule_type"}
+      - {name: checkin_margin_min, type: BIGINT, path: "config.checkin_margin"}
+      - {name: max_runtime_min, type: BIGINT, path: "config.max_runtime"}
+      - {name: timezone, path: "config.timezone"}
+      - {name: project, path: "project.slug"}
+      - {name: owner, path: "owner.name"}
+      - {name: date_created, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: environment, filter_only: true}
+    pitfalls:
+      - "The OpenAPI schema types `environments` as an object but Sentry's serializer returns a list of environment objects; env_status / last_checkin handle both."
+    examples:
+      - sql: "SELECT name, slug, env_status, last_checkin, schedule FROM sentry_monitors WHERE env_status LIKE '%error%' OR env_status LIKE '%missed%' OR env_status LIKE '%timeout%'"
+        description: Scheduled jobs that are currently failing or missing check-ins.
+    fixtures:
+      - file: monitors.json
+        expect_rows: 1
+        expect_columns: {slug: nightly-billing-job, env_status: error, last_checkin: "2024-01-02T02:31:00Z", schedule: "0 2 * * *", project: pump-station}
+        note: "Built strictly from the response schema of GET /api/0/organizations/{org}/monitors/ (docs.sentry.io/api/crons/retrieve-monitors-for-an-organization/; no example given). `environments` is a list, as returned by Sentry's MonitorSerializer (the schema mislabels it as an object)."
+    docs_url: https://docs.sentry.io/api/crons/retrieve-monitors-for-an-organization/
+
+  - name: sentry_monitor_checkins
+    title: Cron monitor check-ins
+    description: >-
+      Check-ins of one cron monitor (monitor slug or id required), newest first: status (ok |
+      error | missed | timeout | in_progress), duration, expected vs actual time, environment.
+      One row per check-in.
+    kind: events
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/monitors/{{ filters.monitor }}/checkins/"
+    filters:
+      - {column: monitor, required: true, description: "Monitor slug or id (sentry_monitors.slug)", examples: ["nightly-billing-job"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: status, path: status}
+      - {name: state, path: status}
+      - {name: env, path: environment}
+      - {name: duration_ms, type: DOUBLE, path: duration, description: "Run duration in milliseconds"}
+      - {name: expected_time, type: TIMESTAMP, path: expectedTime, transform: auto_time}
+      - {name: date_clock, type: TIMESTAMP, path: dateClock, transform: auto_time}
+      - {name: date_in_progress, type: TIMESTAMP, path: dateInProgress, transform: auto_time}
+      - {name: date_updated, type: TIMESTAMP, path: dateUpdated, transform: auto_time}
+      - {name: id, path: id}
+      - {name: monitor, filter_only: true}
+    max_rows: 100
+    examples:
+      - sql: "SELECT ts, status, duration_ms, expected_time FROM sentry_monitor_checkins WHERE monitor = 'nightly-billing-job' ORDER BY ts DESC LIMIT 20"
+        description: Recent runs of a scheduled job (did it time out or stop checking in?).
+    fixtures:
+      - file: monitor_checkins.json
+        filters: {monitor: nightly-billing-job}
+        expect_rows: 2
+        expect_columns: {ts: "2024-01-02T02:00:01Z", status: timeout, duration_ms: 1800000.0, env: production}
+        note: "Built strictly from the response schema of GET /api/0/organizations/{org}/monitors/{monitor}/checkins/ (docs.sentry.io/api/crons/retrieve-checkins-for-a-monitor/; no example given)."
+    docs_url: https://docs.sentry.io/api/crons/retrieve-checkins-for-a-monitor/
+
+  # ------------------------------------------------------------------------------------------
+  # Inventory, stats, dashboards, replays
+  # ------------------------------------------------------------------------------------------
+  - name: sentry_projects
+    title: Projects
+    description: >-
+      Projects of the organization (max 100): slug (the value for every project filter), name,
+      platform, teams, environments seen, first event, which products they use (sessions,
+      replays, logs, profiles, flags...). Filter query (name or slug).
+    kind: entities
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/projects/"
+      query:
+        query: "{{ filters.query }}"
+        per_page: 100
+    filters:
+      - {column: query, description: "Name or slug substring", examples: ["pump"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: project, path: slug}
+      - {name: service, path: slug}
+      - {name: name, path: name}
+      - {name: id, path: id}
+      - {name: platform, path: platform}
+      - {name: team, path: "team.slug"}
+      - {name: teams, type: JSON, expr: "(_.teams or []) | map(attribute='slug') | list"}
+      - {name: environments, type: JSON, path: environments}
+      - {name: features, type: JSON, path: features}
+      - {name: first_event, type: TIMESTAMP, path: firstEvent, transform: auto_time}
+      - {name: date_created, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: has_sessions, type: BOOLEAN, path: hasSessions}
+      - {name: has_logs, type: BOOLEAN, path: hasLogs}
+      - {name: has_replays, type: BOOLEAN, path: hasReplays}
+      - {name: has_profiles, type: BOOLEAN, path: hasProfiles}
+      - {name: has_flags, type: BOOLEAN, path: hasFlags}
+      - {name: has_monitors, type: BOOLEAN, path: hasMonitors}
+      - {name: latest_release, path: "latestRelease.version"}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT project, name, platform, team, environments FROM sentry_projects WHERE project ILIKE '%checkout%' OR name ILIKE '%checkout%'"
+        description: Find the Sentry project slug of a service.
+    tests:
+      - {sql: "SELECT project, platform FROM sentry_projects LIMIT 5", min_rows: 1}
+    fixtures:
+      - file: projects.json
+        expect_rows: 1
+        expect_columns: {project: prime-mover, name: "Prime Mover", team: powerful-abolitionist, has_sessions: true, has_logs: false}
+        note: "Official docs example response of GET /api/0/organizations/{org}/projects/ (docs.sentry.io/api/organizations/list-an-organizations-projects/)."
+    docs_url: https://docs.sentry.io/api/organizations/list-an-organizations-projects/
+
+  - name: sentry_environments
+    title: Environments
+    description: Environment names known to the organization (the exact values for every environment filter).
+    kind: entities
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/environments/"
+      query:
+        visibility: "{{ filters.visibility or 'visible' }}"
+    filters:
+      - {column: visibility, description: "visible (default) | hidden | all"}
+    response: {rows_path: "$"}
+    columns:
+      - {name: env, path: name}
+      - {name: name, path: name}
+      - {name: id, path: id}
+      - {name: visibility, filter_only: true}
+    examples:
+      - sql: "SELECT env FROM sentry_environments"
+        description: Valid environment names (production vs prod).
+    tests:
+      - {sql: "SELECT env FROM sentry_environments", min_rows: 0}
+    fixtures:
+      - file: environments.json
+        expect_rows: 2
+        expect_columns: {env: Production, id: "1"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/environments/ (docs.sentry.io/api/environments/list-an-organizations-environments/)."
+    docs_url: https://docs.sentry.io/api/environments/list-an-organizations-environments/
+
+  - name: sentry_org_stats
+    title: Event volume by outcome (accepted / rate-limited / filtered)
+    description: >-
+      Organization event counts (stats v2) over the ts window, grouped by outcome (accepted,
+      filtered, rate_limited, invalid, abuse, client_discard, cardinality_limited), category
+      (error, transaction, replay, attachment, profile, monitor...), reason and/or project. One row per
+      (group, interval). Use it to detect DATA GAPS: events dropped by quota / spike protection /
+      inbound filters mean "no errors in Sentry" may be false.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/stats_v2/"
+      query:
+        field: "{{ filters.field or 'sum(quantity)' }}"
+        groupBy: "{{ (filters.group_by | as_list) if filters.group_by else ['outcome', 'category'] }}"
+        interval: "{{ filters.interval or '1h' }}"
+        category: "{{ filters.category }}"
+        outcome: "{{ filters.outcome }}"
+        reason: "{{ filters.reason }}"
+        project: "{{ filters.project | as_list }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+    filters:
+      - {column: field, description: "sum(quantity) (default; events, or bytes for attachments) | sum(times_seen)"}
+      - {column: group_by, ops: ["=", "in"], fan_out: false, description: "outcome, category, reason, project (default outcome + category)", examples: ["outcome"]}
+      - {column: interval, description: "1h (default, minimum) .. 1d"}
+      - {column: category, description: "error | transaction | attachment | replay | profile | profile_duration | profile_duration_ui | profile_chunk | profile_chunk_ui | monitor (attachment / profile_duration* cannot be combined with others)", examples: ["error"]}
+      - {column: outcome, description: "accepted | filtered | rate_limited | invalid | abuse | client_discard | cardinality_limited"}
+      - {column: reason, description: "Why events were filtered / dropped"}
+      - {column: project, ops: ["=", "in"], fan_out: false, description: "Project id(s)"}
+    time: {column: ts, default_lookback: 24h, retention: 90d, reapply: false}
+    response:
+      rows_path: "$.groups[*]"
+      expand:
+        - {entries: series, as: f}
+        - {zip: {t: "$.intervals", v: "@f.value"}, as: pt}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@pt.t", transform: auto_time}
+      - {name: value, type: DOUBLE, path: "@pt.v"}
+      - {name: outcome, path: "by.outcome"}
+      - {name: category, path: "by.category"}
+      - {name: reason, path: "by.reason"}
+      - {name: project_id, path: "by.project"}
+      - {name: total, type: DOUBLE, expr: "(_.totals or {})[f.key]"}
+      - {name: labels, type: JSON, path: by}
+      - {name: field, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: interval, filter_only: true}
+      - {name: project, filter_only: true}
+    pitfalls:
+      - "Grouping by project returns sums over the whole period (no time series)."
+      - "Intervals are at least 1 hour; the window is rounded to whole intervals."
+    examples:
+      - sql: >-
+          SELECT ts, outcome, category, value FROM sentry_org_stats
+          WHERE category = 'error' AND group_by IN ('outcome', 'reason')
+            AND ts BETWEEN TIMESTAMP '2026-10-01 06:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND outcome <> 'accepted'
+          ORDER BY ts
+        description: Were error events dropped (rate limited / filtered) during the incident?
+    fixtures:
+      - file: stats_v2.json
+        expect_rows: 1
+        expect_columns: {ts: "2022-02-28T00:00:00Z", value: 165665.0, outcome: invalid, total: 165665.0}
+        note: "Official docs example response of GET /api/0/organizations/{org}/stats_v2/ (docs.sentry.io/api/organizations/retrieve-event-counts-for-an-organization-v2/)."
+    docs_url: https://docs.sentry.io/api/organizations/retrieve-event-counts-for-an-organization-v2/
+
+  - name: sentry_dashboards
+    title: Custom dashboards
+    description: Custom dashboards of the organization (title, projects, environments, filters, creator). Filter query (title).
+    kind: entities
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/dashboards/"
+      query:
+        query: "{{ filters.query }}"
+        per_page: 100
+    filters:
+      - {column: query, description: "Title substring", examples: ["checkout"]}
+    response: {rows_path: "$"}
+    columns:
+      - {name: id, path: id}
+      - {name: title, path: title}
+      - {name: projects, type: JSON, path: projects}
+      - {name: environments, type: JSON, path: environment}
+      - {name: filters, type: JSON, path: filters}
+      - {name: created_by, path: "createdBy.name"}
+      - {name: date_created, type: TIMESTAMP, path: dateCreated, transform: auto_time}
+      - {name: last_visited, type: TIMESTAMP, path: lastVisited, transform: auto_time}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT id, title, projects, last_visited FROM sentry_dashboards WHERE title ILIKE '%checkout%'"
+        description: Dashboards a team keeps for a service.
+    fixtures:
+      - file: dashboards.json
+        expect_rows: 2
+        expect_columns: {id: "1", title: Dashboard, created_by: Admin}
+        note: "Official docs example response of GET /api/0/organizations/{org}/dashboards/ (docs.sentry.io/api/dashboards/list-an-organizations-custom-dashboards/)."
+    ui_link: "{{ env.SENTRY_URL }}/organizations/{{ env.SENTRY_ORG }}/dashboards/"
+    docs_url: https://docs.sentry.io/api/dashboards/list-an-organizations-custom-dashboards/
+
+  - name: sentry_replays
+    title: Session replays
+    description: >-
+      Session replays in the ts window (newest first, max 100): duration, errors, dead / rage
+      clicks, urls, releases, trace ids and the error event ids seen in the session. Filter query
+      (replay search, e.g. count_errors:>0 url:*checkout*), project, environment, ts. Real-user
+      view of an incident.
+    kind: events
+    request:
+      method: GET
+      path: "/api/0/organizations/{{ env.SENTRY_ORG }}/replays/"
+      query:
+        query: "{{ filters.query }}"
+        project: "{{ filters.project | as_list }}"
+        environment: "{{ filters.environment | as_list }}"
+        sort: "{{ filters.sort or '-started_at' }}"
+        start: "{{ time.start | rfc3339 }}"
+        end: "{{ time.end | rfc3339 }}"
+        per_page: "{{ [limit or 100, 100] | min }}"
+    filters:
+      - {column: query, description: "Replay search, e.g. 'count_errors:>0', 'url:*checkout*', 'release:1.2.3'", examples: ["count_errors:>0"]}
+      - {column: project, ops: ["=", "in"], fan_out: false}
+      - {column: environment, ops: ["=", "in"], fan_out: false}
+      - {column: sort, description: "-started_at (default) | -count_errors | -duration | -count_rage_clicks ..."}
+    time: {column: ts, default_lookback: 6h, retention: 90d}
+    response: {rows_path: "$.data[*]"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: started_at, transform: auto_time}
+      - {name: finished_at, type: TIMESTAMP, path: finished_at, transform: auto_time}
+      - {name: id, path: id}
+      - {name: duration_s, type: DOUBLE, path: duration}
+      - {name: count_errors, type: BIGINT, path: count_errors}
+      - {name: count_dead_clicks, type: BIGINT, path: count_dead_clicks}
+      - {name: count_rage_clicks, type: BIGINT, path: count_rage_clicks}
+      - {name: urls, type: JSON, path: urls}
+      - {name: env, path: environment}
+      - {name: releases, type: JSON, path: releases}
+      - {name: trace_ids, type: JSON, path: trace_ids}
+      - {name: error_ids, type: JSON, path: error_ids}
+      - {name: browser, expr: "(_.browser.name ~ ' ' ~ (_.browser.version or '')) if _.browser else none"}
+      - {name: os, expr: "(_.os.name ~ ' ' ~ (_.os.version or '')) if _.os else none"}
+      - {name: device, path: "device.name"}
+      - {name: user_id, path: "user.id"}
+      - {name: project_id, path: project_id}
+      - {name: platform, path: platform}
+      - {name: environment, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: sort, filter_only: true}
+      - {name: project, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT ts, duration_s, count_errors, count_rage_clicks, urls FROM sentry_replays
+          WHERE query = 'count_errors:>0' AND project = 'frontend'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY count_errors DESC LIMIT 20
+        description: User sessions that hit errors during the incident.
+    fixtures:
+      - file: replays.json
+        expect_rows: 1
+        expect_columns: {id: 7e07485f-12f9-416b-8b14-26260799b51f, ts: "2022-07-07T14:05:57.909921Z", count_errors: 1, env: production, browser: "Chome 103.0.38"}
+        note: "Official docs example response of GET /api/0/organizations/{org}/replays/ (docs.sentry.io/api/replays/list-an-organizations-replays/)."
+    docs_url: https://docs.sentry.io/api/replays/list-an-organizations-replays/
+
+roles:
+  errors:
+    table: sentry_issues
+    filters:
+      project: "{{ service }}"
+      environment: "{{ env if env is string else none }}"
+      sort: "freq"
+    columns: {ts: last_seen, service: project, title: title, count: count, message: culprit, level: level, url: url, id: issue_id, state: status}
+    query_language: sentry_search
+    notes: "Issues with events in the window; drill down with sentry_issue_event (stack trace) and sentry_issue_tags (release / host distribution)."
+  logs:
+    table: sentry_events
+    filters:
+      dataset: "logs"
+      project: "{{ service }}"
+      environment: "{{ env if env is string else none }}"
+      query: "{{ ((query or '') ~ (' severity:[error,fatal]' if error_only else '')) | trim }}"
+    columns: {ts: ts, service: project, message: message, level: level, trace_id: trace_id}
+    query_language: sentry_search
+    notes: "Sentry Logs (only for projects sending logs: sentry_projects.has_logs)."
+  traces:
+    table: sentry_events
+    filters:
+      dataset: "spans"
+      project: "{{ service }}"
+      environment: "{{ env if env is string else none }}"
+      query: "{{ ('is_transaction:true' ~ (' span.status:internal_error' if error_only else '')) }}"
+      sort: "-span.duration"
+    columns: {ts: ts, service: project, resource: transaction, trace_id: trace_id, span_id: id, duration_ms: duration_ms, status_code: status_code}
+    query_language: sentry_search
+  trace_detail:
+    table: sentry_events
+    filters:
+      dataset: "spans"
+    columns: {ts: ts, service: project, resource: span_op, trace_id: trace_id, span_id: id, duration_ms: duration_ms, message: message}
+    notes: "Filter trace_id = '<id>': every span of the trace (flat)."
+  metrics:
+    table: sentry_events_timeseries
+    filters:
+      dataset: "{{ 'errors' if error_only else 'spans' }}"
+      project: "{{ service }}"
+      environment: "{{ env if env is string else none }}"
+    columns: {ts: ts, value: value, group: group}
+    query_language: sentry_search
+  log_counts:
+    table: sentry_events_timeseries
+    filters:
+      dataset: "logs"
+      project: "{{ service }}"
+      environment: "{{ env if env is string else none }}"
+      query: "{{ ((query or '') ~ (' severity:[error,fatal]' if error_only else '')) | trim }}"
+    columns: {ts: ts, value: value, group: group}
+    query_language: sentry_search
+    notes: "Sentry Logs volume over time (count()); group_by = 'severity' splits by level. Only for projects sending logs."
+  change_events:
+    - table: sentry_releases
+      filters:
+        project: "{{ service }}"
+      columns: {ts: ts, service: service, title: title, version: version, author: author, url: url}
+    - table: sentry_flag_logs
+      columns: {ts: ts, title: title, author: author, env: env}
+  alert_rules:
+    - table: sentry_detectors
+      columns: {id: id, name: name, query: metric_query, threshold: threshold}
+    - table: sentry_workflows
+      columns: {id: id, name: name}
+  services:
+    table: sentry_projects
+    columns: {service: project, team: team}
+  rum:
+    table: sentry_replays
+    filters:
+      project: "{{ service }}"
+      environment: "{{ env if env is string else none }}"
+      query: "{{ 'count_errors:>0' if error_only else none }}"
+    columns: {ts: ts, url: urls, errors: count_errors}
+  dashboards:
+    table: sentry_dashboards
+    columns: {id: id, title: title}

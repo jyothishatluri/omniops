@@ -1,0 +1,780 @@
+# Google Cloud Monitoring API v3 reached directly over HTTPS (OAuth2 bearer from a service account
+# or Application Default Credentials; no MCP, no client library).
+#
+#   base:   https://monitoring.googleapis.com   (all methods are /v3/{name}/<collection>)
+#   auth:   OAuth2 scope https://www.googleapis.com/auth/monitoring.read (roles/monitoring.viewer)
+#   time:   RFC 3339 strings everywhere ("2014-10-02T15:01:23Z"); durations are "<seconds>s" ("600s")
+#   paging: pageSize + pageToken -> nextPageToken (empty = done) on every list method
+#   errors: non-2xx {"error": {"code", "message", "status"}}; timeSeries.list can answer 200 with
+#           executionErrors[] (the returned data may be incomplete) - declared as an error rule.
+#
+# PromQL over Cloud Monitoring / Managed Prometheus lives in google_prometheus.yaml (other source).
+# Research notes: docs/sources/gcp_monitoring.md
+source: gcp_monitoring
+display_name: Google Cloud Monitoring
+vendor: Google Cloud
+description: >-
+  Cloud Monitoring v3: time series (timeSeries.list with filter + aggregation, points exploded to
+  rows), series discovery (view=HEADERS), metric descriptors, alerting policies with their
+  conditions, alerts (open/closed incidents), alert snoozes, uptime check configs, SLOs and the
+  Monitoring service inventory.
+docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest
+categories: [metrics, alerts, slo]
+base_url: "{{ env.GCP_MONITORING_BASE_URL }}"
+env:
+  - {name: GCP_PROJECT_ID, description: "Project id (or number) to query. For time series and alerts use the scoping project of the metrics scope to see every monitored project."}
+  - {name: GCP_CREDENTIALS_FILE, description: "Optional service-account JSON key path; Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS, gcloud, metadata server) otherwise. Needs roles/monitoring.viewer."}
+  - {name: GCP_MONITORING_BASE_URL, default: "https://monitoring.googleapis.com", description: "API endpoint override (Private Service Connect, regional proxy)."}
+required_env: [GCP_PROJECT_ID]
+auth:
+  type: gcp_service_account
+  scope: https://www.googleapis.com/auth/monitoring.read
+  credentials_file: "{{ env.GCP_CREDENTIALS_FILE }}"
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 600
+  notes: >-
+    Read quotas are per project and visible in the console (Quotas: Cloud Monitoring API time series
+    queries). Exceeding them returns HTTP 429 RESOURCE_EXHAUSTED; responses larger than 200 MB fail with
+    RESOURCE_EXHAUSTED too (narrow the filter or align/reduce). Alerting: 2,000 policies per metrics scope
+    by default, 1,000 open alerts per policy.
+retention:
+  timeseries: 730d
+  alerts: 395d
+errors:
+  - {path: "$.error.message", non_empty: true, message: "$.error.message", hint: "Google API error (permission, quota or invalid filter)"}
+ui_base_url: "https://console.cloud.google.com"
+pitfalls:
+  - "Every timeSeries.list filter must name exactly ONE metric type (metric.type = \"...\"): query several metrics with metric IN (...) (one request each), never with OR."
+  - "Monitoring filters use double-quoted strings and UPPERCASE AND/OR; OR binds tighter than AND (a AND b OR c means a AND (b OR c)); there is no NOT in time-series filters."
+  - "An unknown metric type, label key or label value returns 0 series, not an error. Discover first: gcp_monitoring_metric_descriptors (which metrics exist) and gcp_monitoring_time_series_headers (which label values exist)."
+  - "Retention: custom/agent/workload/Prometheus and most Compute Engine, GKE, Cloud SQL, Storage and load-balancer system metrics keep 24 months (down-sampled to 10-minute points after 6 weeks); every other Google Cloud metric and all log-based metrics keep only 6 weeks."
+  - "Raw points come back newest-first at the metric's own sampling period; always set aligner (+ alignment_period) for windows longer than a few hours, and reducer/group_by to collapse thousands of series server-side."
+  - "DELTA and CUMULATIVE metrics (request counts, log_entry_count, usage_time) need ALIGN_RATE (per second) or ALIGN_DELTA/ALIGN_SUM (per period); GAUGE metrics use ALIGN_MEAN/ALIGN_MAX; DISTRIBUTION latencies use ALIGN_PERCENTILE_99/95/50 (or ALIGN_DELTA + REDUCE_PERCENTILE_99). A wrong aligner for the metric kind is an HTTP 400."
+  - "Many system metrics are sampled every 60 s and become visible after an ingest delay of up to a few minutes: the last minutes of a window are often empty, which is not recovery."
+query_languages:
+  gcp_monitoring_filter: >-
+    Cloud Monitoring filter (timeSeries.list). metric.type = "compute.googleapis.com/instance/cpu/utilization"
+    AND resource.type = "gce_instance" AND metric.labels.instance_name = "web-1" AND resource.labels.zone =
+    starts_with("us-central1"). Selectors: metric.type, metric.labels.KEY, resource.type, resource.labels.KEY,
+    project, group.id (needs aligner). Operators = != : (substring) > < >= <=; functions starts_with("..."),
+    ends_with("..."), has_substring("..."), one_of("a","b"), monitoring.regex.full_match("RE2"). Strings in
+    double quotes; AND/OR uppercase; OR binds tighter than AND. SLO data uses selectors instead of metric.type:
+    select_slo_health("projects/P/services/S/serviceLevelObjectives/O"), select_slo_compliance(..),
+    select_slo_budget_fraction(..), select_slo_burn_rate("<slo name>", "3600s").
+    Common metrics: run.googleapis.com/request_count (DELTA, labels response_code_class, resource
+    cloud_run_revision service_name), run.googleapis.com/request_latencies (DISTRIBUTION ms),
+    kubernetes.io/container/restart_count, kubernetes.io/container/cpu/core_usage_time,
+    kubernetes.io/container/memory/used_bytes (resource k8s_container: cluster_name, namespace_name,
+    pod_name, container_name), loadbalancing.googleapis.com/https/request_count (labels response_code_class),
+    loadbalancing.googleapis.com/https/total_latencies, cloudsql.googleapis.com/database/cpu/utilization,
+    compute.googleapis.com/instance/cpu/utilization, logging.googleapis.com/log_entry_count (labels log,
+    severity), logging.googleapis.com/user/<log-based metric>, monitoring.googleapis.com/uptime_check/check_passed.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_time_series
+    title: Time series points (timeSeries.list, view FULL)
+    description: >-
+      Read metric data: one row per (time series, point). Give metric (one metric type; IN fans out one
+      request per type) or a full Cloud Monitoring filter (filter = '...', required for SLO selectors), plus
+      ts bounds. Optional server-side aggregation: aligner (perSeriesAligner, e.g. ALIGN_RATE / ALIGN_MEAN /
+      ALIGN_PERCENTILE_99), alignment_period in seconds (default: auto ~300 points, minimum 60), reducer
+      (crossSeriesReducer, e.g. REDUCE_SUM) and group_by (comma-separated fields kept by the reducer, e.g.
+      'resource.labels.service_name,metric.labels.response_code_class'). value is the point as a number
+      (double, int64, bool as 0/1, distribution mean); distribution holds the full histogram. labels merges
+      resource and metric labels (labels->>'pod_name'); service/host/pod/namespace are derived from common
+      resource labels.
+    kind: timeseries
+    request:
+      method: GET
+      path: "/v3/projects/{{ filters.project or env.GCP_PROJECT_ID }}/timeSeries"
+      query:
+        filter: >-
+          {{ ([
+               ('metric.type = ' ~ (filters.metric | quote)) if filters.metric else none,
+               ('resource.type = ' ~ (filters.resource_type | quote)) if filters.resource_type else none,
+               ('(' ~ filters.filter ~ ')') if filters.filter else none
+             ] | compact | join(' AND ')) }}
+        interval.startTime: "{{ time.start | rfc3339 }}"
+        interval.endTime: "{{ time.end | rfc3339 }}"
+        aggregation.alignmentPeriod: "{{ (((filters.alignment_period or [time.step_s, 60] | max) | int) ~ 's') if (filters.aligner or filters.reducer) else none }}"
+        aggregation.perSeriesAligner: "{{ (filters.aligner | upper) if filters.aligner else none }}"
+        aggregation.crossSeriesReducer: "{{ (filters.reducer | upper) if filters.reducer else none }}"
+        aggregation.groupByFields: "{{ (filters.group_by.split(',') | map('trim') | reject('equalto', '') | list) if filters.group_by else none }}"
+        view: FULL
+        pageSize: 10000
+    filters:
+      - {column: metric, ops: ["=", "in"], description: "Metric type, e.g. run.googleapis.com/request_count (one per request; IN fans out)", examples: ["compute.googleapis.com/instance/cpu/utilization"]}
+      - {column: resource_type, ops: ["=", "in"], description: "Monitored resource type: k8s_container, cloud_run_revision, gce_instance, https_lb_rule, cloudsql_database ...", examples: ["gce_instance"]}
+      - {column: filter, description: "Full or additional Cloud Monitoring filter (AND-ed, parenthesised). Required for select_slo_* selectors.", examples: ['metric.labels.instance_name = starts_with("web-")']}
+      - {column: aligner, description: "perSeriesAligner: ALIGN_RATE, ALIGN_DELTA, ALIGN_SUM, ALIGN_MEAN, ALIGN_MAX, ALIGN_MIN, ALIGN_COUNT, ALIGN_PERCENTILE_99/95/50/05, ALIGN_FRACTION_TRUE, ALIGN_NEXT_OLDER ...", examples: ["ALIGN_MEAN"]}
+      - {column: alignment_period, type: BIGINT, description: "Alignment period in seconds (>= 60). Default: auto (~300 points over the window)."}
+      - {column: reducer, description: "crossSeriesReducer: REDUCE_SUM, REDUCE_MEAN, REDUCE_MAX, REDUCE_COUNT, REDUCE_PERCENTILE_99/95/50 ... (requires aligner)"}
+      - {column: group_by, description: "Comma-separated groupByFields kept by the reducer, e.g. resource.labels.namespace_name,metric.labels.response_code"}
+      - {column: project, description: "Project id/number to query instead of GCP_PROJECT_ID (the metrics-scope scoping project sees all monitored projects)"}
+    require_one_of: [[metric, filter]]
+    time: {column: ts, default_lookback: 1h, max_window: 30d, control_lookback: 6h}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.timeSeries[*]"
+      expand:
+        - {explode: points, as: p}
+      errors:
+        - {path: "$.executionErrors[*].message", non_empty: true, message: "$.executionErrors", hint: "Cloud Monitoring reported executionErrors: the returned series may be incomplete; narrow the filter, shorten the window or aggregate (aligner/reducer)"}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.interval.endTime", transform: auto_time, description: "Point end time (UTC); for GAUGE points start = end"}
+      - {name: start_ts, type: TIMESTAMP, path: "@p.interval.startTime", transform: auto_time, description: "Point start time (DELTA: start of the counted interval; CUMULATIVE: start of the cumulative period)"}
+      - name: value
+        type: DOUBLE
+        expr: "p.value.doubleValue if 'doubleValue' in p.value else (p.value.int64Value if 'int64Value' in p.value else ((1 if p.value.boolValue else 0) if 'boolValue' in p.value else p.value.distributionValue.mean))"
+        description: "Point value: doubleValue, int64Value (sent as a JSON string), boolValue as 0/1, or the distribution mean"
+      - {name: string_value, path: "@p.value.stringValue", description: "STRING-typed points only"}
+      - {name: distribution, type: JSON, path: "@p.value.distributionValue", description: "DISTRIBUTION points: count (string), mean, sumOfSquaredDeviation, bucketOptions, bucketCounts (strings), exemplars"}
+      - {name: metric, path: "metric.type", description: "Metric type (absent when a reducer drops it - then filled from the filter)"}
+      - {name: metric_labels, type: JSON, path: "metric.labels"}
+      - {name: resource_type, path: "resource.type"}
+      - {name: resource_labels, type: JSON, path: "resource.labels"}
+      - {name: labels, type: JSON, expr: "dict(_.resource.labels or {}, **(_.metric.labels or {}))", description: "Resource labels merged with metric labels (metric wins on a clash): labels->>'namespace_name'"}
+      - {name: metadata, type: JSON, path: metadata, description: "system_labels / user_labels when named in group_by (metadata.system_labels.X)"}
+      - {name: service, expr: "_.resource.labels.service_name or _.resource.labels.container_name or _.resource.labels.module_id or _.resource.labels.function_name or _.resource.labels.backend_target_name or _.resource.labels.job or _.metric.labels.service_name", description: "Derived: Cloud Run service_name, GKE container_name, App Engine module_id, function_name, LB backend, Prometheus job"}
+      - {name: host, expr: "_.metric.labels.instance_name or _.resource.labels.instance_id or _.resource.labels.node_name or _.resource.labels.instance or _.resource.labels.database_id", description: "Derived: VM instance_name/instance_id, GKE node_name, Prometheus instance, Cloud SQL database_id"}
+      - {name: pod, path: "resource.labels.pod_name"}
+      - {name: namespace, path: "resource.labels.namespace_name"}
+      - {name: cluster, path: "resource.labels.cluster_name"}
+      - {name: location, expr: "_.resource.labels.location or _.resource.labels.zone or _.resource.labels.region"}
+      - {name: project_id, path: "resource.labels.project_id"}
+      - {name: metric_kind, path: metricKind, description: "GAUGE | DELTA | CUMULATIVE (after alignment: the aligned kind)"}
+      - {name: value_type, path: valueType, description: "BOOL | INT64 | DOUBLE | STRING | DISTRIBUTION"}
+      - {name: unit, expr: "_.unit or root.unit", description: "UCUM unit ('1', 'By', 's', 'ms', '{not_a_unit}' when mixed)"}
+      - {name: filter, filter_only: true}
+      - {name: aligner, filter_only: true}
+      - {name: alignment_period, type: BIGINT, filter_only: true}
+      - {name: reducer, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: project, filter_only: true}
+    max_rows: 20000
+    sort_hint: "points arrive newest-first per series; ORDER BY ts yourself"
+    pitfalls:
+      - "Without aligner you get raw points (newest first, one per sampling period per series): fine for an hour of one VM, far too many for a fleet. Align and reduce server-side."
+      - "reducer requires aligner (crossSeriesReducer needs a perSeriesAligner other than ALIGN_NONE); resource.type is always kept by group_by implicitly."
+      - "ALIGN_RATE returns per-second rates: multiply by 60 for per-minute counts. ALIGN_DELTA/ALIGN_SUM return the total per alignment period."
+      - "Cloud Run / LB request counts carry response_code_class ('2xx', '5xx') - error ratio = REDUCE_SUM 5xx / REDUCE_SUM all, computed in SQL over two aligned queries."
+      - "The interval is (start, end]: a point exactly at the start is excluded."
+      - "The response may list unreachable cloud regions (unreachable[]): data from those regions is missing from the result even though the call succeeded."
+      - "A point's ts is the END of its interval; aligned points are stamped at the end of each alignment period."
+    examples:
+      - sql: >-
+          SELECT service, ts, value * 60 AS errors_per_min
+          FROM gcp_monitoring_time_series
+          WHERE metric = 'run.googleapis.com/request_count'
+            AND filter = 'metric.labels.response_code_class = "5xx"'
+            AND aligner = 'ALIGN_RATE' AND reducer = 'REDUCE_SUM' AND group_by = 'resource.labels.service_name'
+            AND ts BETWEEN TIMESTAMP '2026-10-20 13:00:00' AND TIMESTAMP '2026-10-20 15:00:00'
+          ORDER BY service, ts
+        description: Cloud Run 5xx per minute per service around an incident.
+      - sql: >-
+          SELECT pod, max(value) AS restarts
+          FROM gcp_monitoring_time_series
+          WHERE metric = 'kubernetes.io/container/restart_count'
+            AND filter = 'resource.labels.namespace_name = "checkout"'
+            AND aligner = 'ALIGN_DELTA' AND ts >= TIMESTAMP '2026-10-20 12:00:00'
+          GROUP BY pod HAVING max(value) > 0 ORDER BY restarts DESC
+        description: Pods that restarted in the checkout namespace.
+      - sql: >-
+          SELECT ts, value AS p99_ms FROM gcp_monitoring_time_series
+          WHERE metric = 'loadbalancing.googleapis.com/https/total_latencies'
+            AND aligner = 'ALIGN_PERCENTILE_99' AND reducer = 'REDUCE_MEAN'
+            AND ts >= TIMESTAMP '2026-10-20 13:00:00' AND ts < TIMESTAMP '2026-10-20 15:00:00'
+          ORDER BY ts
+        description: Load-balancer p99 latency (distribution metric aligned to a percentile).
+      - sql: >-
+          SELECT ts, value AS budget_left FROM gcp_monitoring_time_series
+          WHERE filter = 'select_slo_budget_fraction("projects/my-project/services/checkout/serviceLevelObjectives/availability")'
+            AND ts >= TIMESTAMP '2026-10-19 00:00:00'
+          ORDER BY ts
+        description: Remaining error budget of an SLO (selector from gcp_monitoring_slos.budget_filter).
+    tests:
+      - {sql: "SELECT count(*) AS n FROM gcp_monitoring_time_series WHERE metric = 'monitoring.googleapis.com/uptime_check/check_passed' AND aligner = 'ALIGN_FRACTION_TRUE'", min_rows: 0}
+    fixtures:
+      - file: time_series_aligned.json
+        filters: {metric: compute.googleapis.com/instance/cpu/utilization, aligner: ALIGN_MEAN, alignment_period: 600}
+        expect_rows: 6
+        expect_columns: {ts: "2024-03-01T00:20:00Z", value: 0.06688481346044381, metric: compute.googleapis.com/instance/cpu/utilization, host: your-first-instance}
+        note: "Official docs 'Retrieve time-series data' (custom-metrics/reading-metrics) aligned example: ALIGN_MEAN, alignmentPeriod 600s, fields=timeSeries.metric,timeSeries.points - values copied from the documented output (resource/kind fields are absent because the doc's request used a field mask)."
+      - file: time_series_log_entry_count.json
+        filters: {metric: logging.googleapis.com/log_entry_count}
+        expect_rows: 1
+        expect_columns: {ts: "2019-12-20T20:26:38Z", start_ts: "2019-12-20T20:25:38Z", value: 20.0, metric_kind: DELTA, value_type: INT64, resource_type: gce_instance, host: "5106847938295940291", project_id: a-gcp-project, location: us-central1-a}
+        note: "Time series object verbatim from the docs page 'Structure of time series' (monitoring/api/v3/metrics-details), wrapped in the ListTimeSeriesResponse envelope {timeSeries: [...]} per the ListTimeSeriesResponse schema. Proves int64Value strings become numbers."
+      - file: time_series_reduced.json
+        filters: {metric: compute.googleapis.com/instance/cpu/utilization, aligner: ALIGN_MEAN, reducer: REDUCE_MEAN, alignment_period: 600}
+        expect_rows: 2
+        expect_columns: {ts: "2024-03-01T00:20:00Z", value: 0.045992419596619184, metric: compute.googleapis.com/instance/cpu/utilization, host: null, service: null}
+        note: "Official docs 'Retrieve time-series data' (custom-metrics/reading-metrics) reducing example (ALIGN_MEAN + REDUCE_MEAN, alignmentPeriod 600s, fields=timeSeries.metric,timeSeries.points): one series without labels, values copied from the documented output."
+      - file: time_series_distribution.json
+        filters: {metric: run.googleapis.com/request_latencies, aligner: ALIGN_DELTA}
+        expect_rows: 1
+        expect_columns: {ts: "2026-10-20T14:02:00Z", value: 3512.4, value_type: DISTRIBUTION, metric_kind: DELTA, unit: ms, service: checkout, resource_type: cloud_run_revision}
+        note: "Built strictly from the TimeSeries / Point / TypedValue.distributionValue schema (Distribution: count int64 string, mean, sumOfSquaredDeviation, bucketOptions.exponentialBuckets, bucketCounts int64 strings) plus ListTimeSeriesResponse.unit; the docs give no distribution example output. Values illustrative. Proves value = distribution mean and unit falls back to the response-level unit."
+      - file: time_series_execution_error.json
+        filters: {metric: kubernetes.io/container/cpu/core_usage_time}
+        expect_error: "executionErrors"
+        note: "Built strictly from the ListTimeSeriesResponse schema (executionErrors[] of google.rpc.Status {code, message}); message text illustrative. Proves the 2xx partial-data rule fires."
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.timeSeries/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_time_series_headers
+    title: Which time series exist (timeSeries.list, view HEADERS)
+    description: >-
+      Cheap discovery: one row per time series (no points) that had data in the window, with its metric and
+      resource labels. Use it to learn the real label values (service names, namespaces, response codes,
+      instance names) before filtering gcp_monitoring_time_series. Give metric (or filter) and ts bounds.
+    kind: entities
+    request:
+      method: GET
+      path: "/v3/projects/{{ filters.project or env.GCP_PROJECT_ID }}/timeSeries"
+      query:
+        filter: >-
+          {{ ([
+               ('metric.type = ' ~ (filters.metric | quote)) if filters.metric else none,
+               ('resource.type = ' ~ (filters.resource_type | quote)) if filters.resource_type else none,
+               ('(' ~ filters.filter ~ ')') if filters.filter else none
+             ] | compact | join(' AND ')) }}
+        interval.startTime: "{{ time.start | rfc3339 }}"
+        interval.endTime: "{{ time.end | rfc3339 }}"
+        view: HEADERS
+        pageSize: 1000
+    filters:
+      - {column: metric, ops: ["=", "in"], description: "Metric type", examples: ["compute.googleapis.com/instance/cpu/utilization"]}
+      - {column: resource_type, ops: ["=", "in"], description: "Monitored resource type", examples: ["k8s_container"]}
+      - {column: filter, description: "Full or additional Cloud Monitoring filter (AND-ed)"}
+      - {column: project, description: "Project to query instead of GCP_PROJECT_ID"}
+    require_one_of: [[metric, filter]]
+    time: {column: ts, default_lookback: 1h, max_window: 30d}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 5}
+    response:
+      rows_path: "$.timeSeries[*]"
+    columns:
+      - {name: metric, path: "metric.type"}
+      - {name: metric_labels, type: JSON, path: "metric.labels"}
+      - {name: resource_type, path: "resource.type"}
+      - {name: resource_labels, type: JSON, path: "resource.labels"}
+      - {name: labels, type: JSON, expr: "dict(_.resource.labels or {}, **(_.metric.labels or {}))", description: "Resource + metric labels merged"}
+      - {name: service, expr: "_.resource.labels.service_name or _.resource.labels.container_name or _.resource.labels.module_id or _.resource.labels.function_name or _.resource.labels.backend_target_name or _.resource.labels.job or _.metric.labels.service_name"}
+      - {name: host, expr: "_.metric.labels.instance_name or _.resource.labels.instance_id or _.resource.labels.node_name or _.resource.labels.instance or _.resource.labels.database_id"}
+      - {name: namespace, path: "resource.labels.namespace_name"}
+      - {name: metric_kind, path: metricKind}
+      - {name: value_type, path: valueType}
+      - {name: unit, path: unit}
+      - {name: filter, filter_only: true}
+      - {name: project, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window in which the series must have data"}
+    pitfalls:
+      - "Only series with at least one point in the window are returned; a service missing here sent no data (or uses another label)."
+    examples:
+      - sql: >-
+          SELECT DISTINCT service, labels->>'response_code_class' AS code_class
+          FROM gcp_monitoring_time_series_headers
+          WHERE metric = 'run.googleapis.com/request_count' AND ts >= TIMESTAMP '2026-10-20 13:00:00'
+        description: Which Cloud Run services report request counts, and with which response classes.
+      - sql: >-
+          SELECT DISTINCT namespace, labels->>'container_name' AS container FROM gcp_monitoring_time_series_headers
+          WHERE metric = 'kubernetes.io/container/restart_count'
+        description: Namespaces/containers present in GKE metrics.
+    fixtures:
+      - file: time_series_headers.json
+        filters: {metric: compute.googleapis.com/instance/cpu/utilization}
+        expect_rows: 2
+        expect_columns: {metric: compute.googleapis.com/instance/cpu/utilization, host: your-first-instance}
+        note: "Official docs 'Retrieve time-series data' list-time-series example (view=HEADERS, fields=timeSeries.metric) - values copied from the documented output."
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.timeSeries/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_metric_descriptors
+    title: Metric descriptors (which metrics exist)
+    description: >-
+      Metric types available to the project (system, custom, agent, Prometheus, log-based) with kind, value
+      type, unit, labels and the monitored resource types they are written against. Filter with prefix
+      (metric.type starts_with) or a raw descriptor filter; active_only = true keeps metrics with data in the
+      last ~25 hours. Use before querying gcp_monitoring_time_series to get the exact metric type and labels.
+    kind: entities
+    request:
+      method: GET
+      path: "/v3/projects/{{ filters.project or env.GCP_PROJECT_ID }}/metricDescriptors"
+      query:
+        filter: >-
+          {{ ([
+               ('metric.type = starts_with(' ~ (filters.prefix | quote) ~ ')') if filters.prefix else none,
+               ('metric.type = ' ~ (filters.metric | quote)) if filters.metric else none,
+               filters.filter or none
+             ] | compact | join(' AND ')) or none }}
+        activeOnly: "{{ filters.active_only }}"
+        pageSize: 10000
+    filters:
+      - {column: prefix, description: "Metric type prefix: run.googleapis.com/, kubernetes.io/container/, custom.googleapis.com/, logging.googleapis.com/user/, prometheus.googleapis.com/", examples: ["compute.googleapis.com"]}
+      - {column: metric, description: "Exact metric type"}
+      - {column: filter, description: "Raw descriptor filter, e.g. metric.type = ends_with(\"request_count\")"}
+      - {column: active_only, type: BOOLEAN, description: "true = only metrics (and resource types) with data in roughly the last 25 hours"}
+      - {column: project, description: "Project to query instead of GCP_PROJECT_ID"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.metricDescriptors[*]"
+    columns:
+      - {name: metric, path: type, description: "Metric type to use in gcp_monitoring_time_series.metric"}
+      - {name: title, path: displayName}
+      - {name: description, path: description}
+      - {name: metric_kind, path: metricKind, description: "GAUGE | DELTA | CUMULATIVE (decides the aligner)"}
+      - {name: value_type, path: valueType, description: "BOOL | INT64 | DOUBLE | STRING | DISTRIBUTION"}
+      - {name: unit, path: unit}
+      - {name: label_keys, expr: "(_.labels or []) | map(attribute='key') | join(',')", description: "Metric label keys, comma-separated"}
+      - {name: metric_labels, type: JSON, path: labels, description: "LabelDescriptors [{key, valueType, description}]"}
+      - {name: resource_types, type: JSON, path: monitoredResourceTypes}
+      - {name: launch_stage, path: launchStage}
+      - {name: sample_period_s, type: DOUBLE, path: "metadata.samplePeriod", transform: duration_to_s}
+      - {name: ingest_delay_s, type: DOUBLE, path: "metadata.ingestDelay", transform: duration_to_s, description: "Typical delay before points are visible"}
+      - {name: id, path: name}
+      - {name: prefix, filter_only: true}
+      - {name: filter, filter_only: true}
+      - {name: active_only, type: BOOLEAN, filter_only: true}
+      - {name: project, filter_only: true}
+    pitfalls:
+      - "Without a filter the API returns thousands of descriptors (up to 10,000 per page); always give a prefix."
+      - "active_only reflects the last ~25 hours, not the incident window."
+    examples:
+      - sql: >-
+          SELECT metric, metric_kind, value_type, unit, label_keys FROM gcp_monitoring_metric_descriptors
+          WHERE prefix = 'run.googleapis.com/' AND active_only = true
+        description: Cloud Run metrics with recent data and their kinds (to choose an aligner).
+      - sql: >-
+          SELECT metric, description FROM gcp_monitoring_metric_descriptors
+          WHERE prefix = 'logging.googleapis.com/user/'
+        description: Log-based metrics usable in time-series queries and alert policies.
+    fixtures:
+      - file: metric_descriptors.json
+        filters: {prefix: compute.googleapis.com}
+        expect_rows: 2
+        expect_columns: {metric: compute.googleapis.com/firewall/dropped_bytes_count, title: Dropped bytes, id: projects/PROJECT_ID/metricDescriptors/compute.googleapis.com/firewall/dropped_bytes_count}
+        note: "Official docs 'List metric and resource types' (custom-metrics/browsing-metrics) metricDescriptors.list example (filter metric.type = starts_with(\"compute.googleapis.com\")): name/type/displayName/description as documented; the doc elides labels and the other fields, so they are omitted here."
+      - file: metric_descriptor_full.json
+        filters: {prefix: compute.googleapis.com/firewall}
+        expect_rows: 1
+        expect_columns: {metric: compute.googleapis.com/firewall/dropped_packets_count, metric_kind: DELTA, value_type: INT64, unit: "1", label_keys: instance_name}
+        note: "Official docs 'List metric and resource types' (custom-metrics/browsing-metrics) metricDescriptors.get example for dropped_packets_count, wrapped in the list envelope {metricDescriptors: [...]}."
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.metricDescriptors/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_alert_policies
+    title: Alerting policies and their conditions
+    description: >-
+      Alerting policy definitions, one row per (policy, condition): the condition's query (Monitoring filter,
+      PromQL, MQL, log filter or SQL), threshold, comparison, duration and aggregations, plus enabled,
+      severity, documentation, labels and notification channels. Look up the policy that fired by policy_id
+      (the id in the alert's policy link) or by exact title (displayName).
+    kind: entities
+    request:
+      method: GET
+      path: "/v3/projects/{{ filters.project or env.GCP_PROJECT_ID }}/alertPolicies"
+      query:
+        filter: >-
+          {{ ([
+               ('name = ends_with(' ~ (('/alertPolicies/' ~ filters.policy_id) | quote) ~ ')') if filters.policy_id else none,
+               ('display_name = ' ~ (filters.title | quote)) if filters.title else none,
+               ('enabled = ' ~ ('true' if filters.enabled else 'false')) if (filters.enabled is sameas true or filters.enabled is sameas false) else none,
+               filters.filter or none
+             ] | compact | join(' AND ')) or none }}
+        pageSize: 1000
+    filters:
+      - {column: policy_id, description: "Numeric policy id (last segment of projects/P/alertPolicies/ID; the id in the alert's policy link)", examples: ["12345678901234567890"]}
+      - {column: title, description: "Exact policy display name"}
+      - {column: enabled, type: BOOLEAN, description: "Only enabled / disabled policies"}
+      - {column: filter, description: "Raw policy filter (fields: display_name, documentation.content, user_labels.KEY, conditions.size, combiner, enabled, notification_channels), e.g. user_labels.team = \"payments\""}
+      - {column: project, description: "Project to query instead of GCP_PROJECT_ID"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 5}
+    response:
+      rows_path: "$.alertPolicies[*]"
+      expand:
+        - {explode: conditions, as: c, keep_empty: true}
+    columns:
+      - {name: id, path: name, description: "projects/P/alertPolicies/ID"}
+      - {name: policy_id, expr: "(_.name.split('/') | last) if _.name else none"}
+      - {name: title, path: displayName}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: severity, path: severity, description: "CRITICAL | ERROR | WARNING | SEVERITY_UNSPECIFIED"}
+      - {name: combiner, path: combiner, description: "AND | OR | AND_WITH_MATCHING_RESOURCE (how several conditions combine)"}
+      - {name: condition_id, path: "@c.name"}
+      - {name: condition_title, path: "@c.displayName"}
+      - name: condition_type
+        expr: "'threshold' if c.conditionThreshold else ('absent' if c.conditionAbsent else ('log_match' if c.conditionMatchedLog else ('mql' if c.conditionMonitoringQueryLanguage else ('promql' if c.conditionPrometheusQueryLanguage else ('sql' if c.conditionSql else none)))))"
+        description: "threshold | absent | log_match | mql | promql | sql"
+      - name: query
+        expr: "c.conditionThreshold.filter or c.conditionAbsent.filter or c.conditionMatchedLog.filter or c.conditionMonitoringQueryLanguage.query or c.conditionPrometheusQueryLanguage.query or c.conditionSql.query"
+        description: "The condition's expression: Monitoring filter (threshold/absent), Logging filter (log_match), MQL, PromQL or SQL"
+      - {name: denominator_filter, path: "@c.conditionThreshold.denominatorFilter", description: "Ratio conditions: the denominator series"}
+      - {name: threshold, type: DOUBLE, path: "@c.conditionThreshold.thresholdValue"}
+      - {name: comparison, path: "@c.conditionThreshold.comparison", description: "COMPARISON_GT | GE | LT | LE | EQ | NE"}
+      - name: duration_s
+        type: DOUBLE
+        expr: "c.conditionThreshold.duration or c.conditionAbsent.duration or c.conditionMonitoringQueryLanguage.duration or c.conditionPrometheusQueryLanguage.duration"
+        transform: duration_to_s
+        description: "How long the condition must hold before the alert opens (seconds)"
+      - {name: aggregations, type: JSON, expr: "c.conditionThreshold.aggregations or c.conditionAbsent.aggregations", description: "[{alignmentPeriod, perSeriesAligner, crossSeriesReducer, groupByFields}]"}
+      - {name: trigger, type: JSON, expr: "c.conditionThreshold.trigger or c.conditionAbsent.trigger or c.conditionMonitoringQueryLanguage.trigger", description: "{count} or {percent} of series that must violate"}
+      - {name: condition, type: JSON, path: "@c", description: "The whole condition object"}
+      - {name: documentation, path: "documentation.content", description: "Runbook text (markdown)"}
+      - {name: labels, type: JSON, path: userLabels}
+      - {name: notification_channels, type: JSON, path: notificationChannels}
+      - {name: alert_strategy, type: JSON, path: alertStrategy, description: "autoClose, notificationRateLimit, notificationPrompts"}
+      - {name: created_at, type: TIMESTAMP, path: "creationRecord.mutateTime", transform: auto_time}
+      - {name: updated_at, type: TIMESTAMP, path: "mutationRecord.mutateTime", transform: auto_time}
+      - {name: author, path: "mutationRecord.mutatedBy", description: "Who last changed the policy"}
+      - {name: url, expr: "('https://console.cloud.google.com/monitoring/alerting/policies/' ~ (_.name.split('/') | last) ~ '?project=' ~ _.name.split('/')[1]) if _.name else none"}
+      - {name: filter, filter_only: true}
+      - {name: project, filter_only: true}
+    pitfalls:
+      - "A policy with N conditions yields N rows (combiner says whether ANY or ALL must fire); a policy without conditions yields one row with null condition columns."
+      - "The threshold for PromQL/MQL/SQL conditions is inside query, not in threshold."
+      - "updated_at after the alert opened means someone edited the policy during the incident."
+    examples:
+      - sql: >-
+          SELECT title, condition_title, condition_type, query, comparison, threshold, duration_s, aggregations
+          FROM gcp_monitoring_alert_policies WHERE policy_id = '12345678901234567890'
+        description: The definition of the policy that fired (id from the alert's policy link).
+      - sql: >-
+          SELECT title, severity, enabled, updated_at, author FROM gcp_monitoring_alert_policies
+          WHERE updated_at >= TIMESTAMP '2026-10-19 00:00:00' ORDER BY updated_at DESC
+        description: Alert policies changed recently (and by whom).
+    fixtures:
+      - file: alert_policies.json
+        expect_rows: 2
+        expect_columns: {title: Very high CPU usage, condition_title: CPU usage is extremely high, condition_type: threshold, threshold: 0.9, comparison: COMPARISON_GT, duration_s: 900.0, combiner: OR, query: 'metric.type="compute.googleapis.com/instance/cpu/utilization" AND resource.type="gce_instance"', policy_id: "4721338519483937810"}
+        note: "Conditions, filters, thresholds, durations and aggregations are the docs 'Sample policies in JSON' examples (Very high CPU usage, Data ingestion functioning); output-only fields (name, enabled, creationRecord, mutationRecord) added per the AlertPolicy/MutationRecord schema."
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.alertPolicies/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_alerts
+    title: Alerts (incidents) - open and closed
+    description: >-
+      Alerts (a.k.a. incidents) raised by alerting policies for the project's metrics scope, newest opened
+      first: state OPEN/CLOSED, open/close time, the policy snapshot (title, severity, labels), and the metric
+      and monitored resource (with labels) that violated the condition. state = 'OPEN' gives what is firing
+      now; ts (open time) ranges give alert history. Filtering on state/title/ts happens in SQL after the
+      fetch (up to 5,000 most recently opened alerts).
+    kind: alerts
+    request:
+      method: GET
+      path: "/v3/projects/{{ filters.project or env.GCP_PROJECT_ID }}/alerts"
+      query:
+        filter: "{{ filters.filter }}"
+        pageSize: 1000
+    filters:
+      - {column: state, ops: ["=", "in"], fan_out: false, description: "OPEN | CLOSED (applied in SQL; the request is not changed)", examples: ["OPEN"]}
+      - {column: filter, description: "Optional server-side Alert filter (documented only as 'match on any fields of the alert or its subfields', e.g. policy.display_name=\"Checkout 5xx\"); prefer SQL predicates"}
+      - {column: project, description: "Project to query instead of GCP_PROJECT_ID"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 5}
+    response:
+      rows_path: "$.alerts[*]"
+    columns:
+      - {name: id, path: name, description: "projects/P/alerts/ALERT_ID"}
+      - {name: alert_id, expr: "(_.name.split('/') | last) if _.name else none"}
+      - {name: state, path: state, description: "OPEN | CLOSED"}
+      - {name: ts, type: TIMESTAMP, path: openTime, transform: auto_time, description: "When the alert opened"}
+      - {name: close_ts, type: TIMESTAMP, path: closeTime, transform: auto_time}
+      - {name: title, path: "policy.displayName", description: "Policy display name"}
+      - {name: severity, path: "policy.severity"}
+      - {name: policy, path: "policy.name", description: "projects/P/alertPolicies/ID"}
+      - {name: policy_id, expr: "(_.policy.name.split('/') | last) if _.policy.name else none", description: "Join to gcp_monitoring_alert_policies.policy_id"}
+      - {name: policy_labels, type: JSON, path: "policy.userLabels"}
+      - {name: metric, path: "metric.type"}
+      - {name: metric_labels, type: JSON, path: "metric.labels"}
+      - {name: resource_type, path: "resource.type"}
+      - {name: resource_labels, type: JSON, path: "resource.labels"}
+      - {name: labels, type: JSON, expr: "dict(dict(_.resource.labels or {}, **(_.metric.labels or {})), **(_.log.extractedLabels or {}))", description: "Resource + metric + log-extracted labels merged"}
+      - {name: log_labels, type: JSON, path: "log.extractedLabels", description: "Log-based alerts only"}
+      - {name: metadata, type: JSON, path: metadata, description: "Resource system_labels / user_labels"}
+      - {name: service, expr: "_.resource.labels.service_name or _.resource.labels.container_name or _.resource.labels.module_id or _.resource.labels.function_name or _.metric.labels.service_name or _.policy.userLabels.service"}
+      - {name: host, expr: "_.metric.labels.instance_name or _.resource.labels.instance_id or _.resource.labels.node_name or _.resource.labels.pod_name"}
+      - {name: namespace, path: "resource.labels.namespace_name"}
+      - {name: url, expr: "('https://console.cloud.google.com/monitoring/alerting/incidents/' ~ (_.name.split('/') | last) ~ '?project=' ~ _.name.split('/')[1]) if _.name else none"}
+      - {name: filter, filter_only: true}
+      - {name: project, filter_only: true}
+    sort_hint: "newest opened first (server default open_time desc)"
+    pitfalls:
+      - "Closed alerts are kept 13 months; metric alerts with no new data auto-close after 7 days, log-based alerts after at most 7 days."
+      - "One policy opens one alert per violating time series (per resource/label set): count distinct alert_id per policy for blast radius."
+      - "The alert's metric/resource labels are what to filter the time-series and log tables by (namespace_name, pod_name, service_name, instance_id)."
+    examples:
+      - sql: >-
+          SELECT ts, title, severity, resource_type, labels FROM gcp_monitoring_alerts
+          WHERE state = 'OPEN' ORDER BY ts DESC
+        description: What is firing right now.
+      - sql: >-
+          SELECT title, count(*) AS alerts, min(ts) AS first_open, max(close_ts) AS last_close
+          FROM gcp_monitoring_alerts
+          WHERE ts BETWEEN TIMESTAMP '2026-10-13 00:00:00' AND TIMESTAMP '2026-10-20 15:00:00'
+          GROUP BY title ORDER BY alerts DESC
+        description: Alert history - which policies fired most in the last week (chronic vs new).
+    fixtures:
+      - file: alerts.json
+        expect_rows: 2
+        expect_columns: {state: OPEN, title: Checkout container restarts, severity: CRITICAL, ts: "2026-10-20T14:02:11Z", policy_id: "4721338519483937810", namespace: checkout, service: checkout, resource_type: k8s_container}
+        note: "Built strictly from the documented Alert schema (projects.alerts: name, state, openTime, closeTime, resource, metadata, metric, log, policy PolicySnapshot); the docs give no example response. Values illustrative."
+      - file: google_error.json
+        expect_error: "Permission monitoring.alerts.list denied"
+        note: "Google API error envelope {error: {code, message, status}} (AIP-193 / google.rpc.Status) served with 200 by a proxy; proves the source-level error rule fires. Message text illustrative."
+    ui_link: "https://console.cloud.google.com/monitoring/alerting?project={{ filters.project or env.GCP_PROJECT_ID }}"
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.alerts/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_uptime_checks
+    title: Uptime check configurations
+    description: >-
+      Uptime check configs (HTTP/HTTPS/TCP probes and synthetic monitors): target host/resource, path, port,
+      period, timeout, regions and content matchers. Pass/fail results are metrics, not part of this table:
+      query gcp_monitoring_time_series with metric = 'monitoring.googleapis.com/uptime_check/check_passed'
+      (label check_id = uptime_id) and aligner ALIGN_FRACTION_TRUE.
+    kind: entities
+    request:
+      method: GET
+      path: "/v3/projects/{{ filters.project or env.GCP_PROJECT_ID }}/uptimeCheckConfigs"
+      query:
+        filter: "{{ filters.filter }}"
+        pageSize: 100
+    filters:
+      - {column: filter, description: "Uptime filter (fields: display_name, user_labels, selected_regions, http_check.path, http_check.port, tcp_check.port, monitored_resource.type, monitored_resource.labels), e.g. display_name = has_substring(\"checkout\")"}
+      - {column: project, description: "Project to query instead of GCP_PROJECT_ID"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.uptimeCheckConfigs[*]"
+    columns:
+      - {name: id, path: name, description: "projects/P/uptimeCheckConfigs/ID"}
+      - {name: uptime_id, expr: "(_.name.split('/') | last) if _.name else none", description: "check_id label of the uptime_check metrics"}
+      - {name: title, path: displayName}
+      - {name: check_type, expr: "'http' if _.httpCheck else ('tcp' if _.tcpCheck else ('synthetic' if _.syntheticMonitor else none))"}
+      - {name: host, path: "monitoredResource.labels.host"}
+      - {name: resource_type, path: "monitoredResource.type", description: "uptime_url, gce_instance, k8s_service, cloud_run_revision ..."}
+      - {name: resource_labels, type: JSON, path: "monitoredResource.labels"}
+      - {name: path, path: "httpCheck.path"}
+      - {name: port, type: BIGINT, expr: "_.httpCheck.port or _.tcpCheck.port"}
+      - {name: use_ssl, type: BOOLEAN, path: "httpCheck.useSsl"}
+      - {name: method, path: "httpCheck.requestMethod"}
+      - {name: accepted_status_codes, type: JSON, path: "httpCheck.acceptedResponseStatusCodes"}
+      - {name: url, expr: "(('https' if _.httpCheck.useSsl else 'http') ~ '://' ~ _.monitoredResource.labels.host ~ ((':' ~ _.httpCheck.port) if _.httpCheck.port else '') ~ (_.httpCheck.path or '/')) if (_.httpCheck and _.monitoredResource.labels.host) else none", description: "Probed URL (HTTP checks on uptime_url)"}
+      - {name: period_s, type: DOUBLE, path: period, transform: duration_to_s, description: "60 | 300 | 600 | 900"}
+      - {name: timeout_s, type: DOUBLE, path: timeout, transform: duration_to_s}
+      - {name: content_matchers, type: JSON, path: contentMatchers}
+      - {name: selected_regions, type: JSON, path: selectedRegions}
+      - {name: checker_type, path: checkerType, description: "STATIC_IP_CHECKERS | VPC_CHECKERS (private)"}
+      - {name: synthetic_target, type: JSON, path: syntheticMonitor}
+      - {name: labels, type: JSON, path: userLabels}
+      - {name: filter, filter_only: true}
+      - {name: project, filter_only: true}
+    pitfalls:
+      - "Only valid configs are listed. Up to 100 uptime checks per metrics scope."
+      - "Uptime results: monitoring.googleapis.com/uptime_check/check_passed (BOOL; resource uptime_url; labels check_id, checker_location) and uptime_check/request_latency (ms)."
+    examples:
+      - sql: "SELECT uptime_id, title, url, period_s, timeout_s FROM gcp_monitoring_uptime_checks ORDER BY title"
+        description: Which endpoints are probed, and how often.
+      - sql: "SELECT title, host, path FROM gcp_monitoring_uptime_checks WHERE host LIKE '%checkout%'"
+        description: Find the uptime check for a service before reading its check_passed metric.
+    fixtures:
+      - file: uptime_checks.json
+        expect_rows: 2
+        expect_columns: {uptime_id: checkout-https-a1b2c3, title: checkout https, check_type: http, host: shop.example.com, port: 443, period_s: 60.0, timeout_s: 10.0, url: "https://shop.example.com:443/healthz"}
+        note: "Built strictly from the documented UptimeCheckConfig schema (projects.uptimeCheckConfigs: name, displayName, monitoredResource, httpCheck path/port/useSsl/requestMethod, tcpCheck, period '60s', timeout, contentMatchers, checkerType, selectedRegions); the docs give no list example. Values illustrative."
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.uptimeCheckConfigs/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_slos
+    title: Service level objectives
+    description: >-
+      SLO definitions across all Monitoring services of the metrics scope (or of one service_id): goal,
+      rolling or calendar period and the SLI definition. Each row carries ready-made time-series selectors
+      (health_filter, budget_filter, burn_rate_filter) to pass as gcp_monitoring_time_series.filter for SLO
+      health, remaining error budget and burn rate.
+    kind: entities
+    request:
+      method: GET
+      path: "/v3/{{ ('projects/' ~ env.GCP_PROJECT_ID ~ '/services/' ~ filters.service_id) if filters.service_id else ('workspaces/' ~ env.GCP_PROJECT_ID ~ '/services/-') }}/serviceLevelObjectives"
+      query:
+        filter: "{{ filters.filter }}"
+        view: EXPLICIT
+        pageSize: 1000
+    filters:
+      - {column: service_id, description: "Monitoring service id (projects/P/services/<service_id>); omitted = every service of the metrics scope (workspaces/P/services/-)", examples: ["checkout"]}
+      - {column: filter, description: "Raw SLO filter"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.serviceLevelObjectives[*]"
+    columns:
+      - {name: id, path: name, description: "projects/P/services/S/serviceLevelObjectives/O"}
+      - {name: slo_id, expr: "(_.name.split('/') | last) if _.name else none"}
+      - {name: service_id, expr: "_.name.split('/')[3] if _.name else none"}
+      - {name: service, expr: "_.name.split('/')[3] if _.name else none", description: "Same as service_id (canonical name)"}
+      - {name: title, path: displayName}
+      - {name: goal, type: DOUBLE, path: goal, description: "Target good fraction, e.g. 0.999"}
+      - {name: rolling_period_s, type: DOUBLE, path: rollingPeriod, transform: duration_to_s}
+      - {name: calendar_period, path: calendarPeriod, description: "DAY | WEEK | FORTNIGHT | MONTH"}
+      - {name: sli_type, expr: "'basic' if _.serviceLevelIndicator.basicSli else ('request_based' if _.serviceLevelIndicator.requestBased else ('windows_based' if _.serviceLevelIndicator.windowsBased else none))"}
+      - {name: sli, type: JSON, path: serviceLevelIndicator}
+      - {name: labels, type: JSON, path: userLabels}
+      - {name: health_filter, expr: "('select_slo_health(\"' ~ _.name ~ '\")') if _.name else none"}
+      - {name: budget_filter, expr: "('select_slo_budget_fraction(\"' ~ _.name ~ '\")') if _.name else none"}
+      - {name: burn_rate_filter, expr: "('select_slo_burn_rate(\"' ~ _.name ~ '\", \"3600s\")') if _.name else none", description: "1h-lookback burn rate selector"}
+      - {name: filter, filter_only: true}
+    pitfalls:
+      - "SLO values are not in this table: query gcp_monitoring_time_series with filter = budget_filter / health_filter / burn_rate_filter (no metric.type)."
+      - "view EXPLICIT expands basic SLIs into request-based good/total filters (sli JSON)."
+    examples:
+      - sql: "SELECT service, title, goal, rolling_period_s / 86400 AS days, budget_filter FROM gcp_monitoring_slos ORDER BY service"
+        description: SLOs per service with the selector for their remaining budget.
+    fixtures:
+      - file: slos.json
+        expect_rows: 2
+        expect_columns: {service_id: checkout, slo_id: availability, title: "99.9% of checkout requests succeed", goal: 0.999, rolling_period_s: 2419200.0, sli_type: request_based, budget_filter: 'select_slo_budget_fraction("projects/my-project/services/checkout/serviceLevelObjectives/availability")'}
+        note: "Built strictly from the documented ServiceLevelObjective schema (name, displayName, serviceLevelIndicator basicSli/requestBased/windowsBased, goal, rollingPeriod, calendarPeriod, userLabels); the docs give no list example. Values illustrative."
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/services.serviceLevelObjectives/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_services
+    title: Monitoring services (service inventory)
+    description: >-
+      Services known to Cloud Monitoring (projects.services.list): auto-detected Cloud Run services, GKE
+      services/workloads/namespaces, App Engine modules, Istio / Cloud Service Mesh services and custom
+      services. One row per service with its type, the workload name (service), namespace, cluster and
+      location. service_id is the id to pass to gcp_monitoring_slos.service_id. Optional server-side filter
+      (identifier_case = "CLOUD_RUN", cloud_run.service_name = "checkout" ...).
+    kind: entities
+    request:
+      method: GET
+      path: "/v3/projects/{{ filters.project or env.GCP_PROJECT_ID }}/services"
+      query:
+        filter: "{{ filters.filter }}"
+        pageSize: 1000
+    filters:
+      - {column: filter, description: "Service filter: identifier_case = \"CUSTOM\" | \"APP_ENGINE\" | \"MESH_ISTIO\" | \"CLUSTER_ISTIO\" | \"ISTIO_CANONICAL_SERVICE\" | \"CLOUD_RUN\" | \"GKE_NAMESPACE\" | \"GKE_WORKLOAD\" | \"GKE_SERVICE\", or an attribute such as cloud_run.service_name = \"checkout\"", examples: ['identifier_case = "CLOUD_RUN"']}
+      - {column: project, description: "Project to query instead of GCP_PROJECT_ID"}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.services[*]"
+    columns:
+      - {name: id, path: name, description: "projects/P/services/SERVICE_ID"}
+      - {name: service_id, expr: "(_.name.split('/') | last) if _.name else none", description: "Pass to gcp_monitoring_slos.service_id"}
+      - {name: title, path: displayName}
+      - name: service_type
+        expr: "'cloud_run' if _.cloudRun else ('gke_service' if _.gkeService else ('gke_workload' if _.gkeWorkload else ('gke_namespace' if _.gkeNamespace else ('app_engine' if _.appEngine else ('istio_canonical_service' if _.istioCanonicalService else ('mesh_istio' if _.meshIstio else ('cluster_istio' if _.clusterIstio else ('custom' if _.custom is mapping else (_.basicService.serviceType or none)))))))))"
+        description: "cloud_run | gke_service | gke_workload | gke_namespace | app_engine | istio_canonical_service | mesh_istio | cluster_istio | custom | basicService.serviceType"
+      - name: service
+        expr: "_.cloudRun.serviceName or _.gkeService.serviceName or _.gkeWorkload.topLevelControllerName or _.appEngine.moduleId or _.istioCanonicalService.canonicalService or _.meshIstio.serviceName or _.clusterIstio.serviceName or _.gkeNamespace.namespaceName or _.basicService.serviceLabels.service_name or _.basicService.serviceLabels.module_id or _.displayName"
+        description: "Workload name: Cloud Run service, GKE service / top-level controller, App Engine module, Istio service (display name for custom services)"
+      - {name: namespace, expr: "_.gkeService.namespaceName or _.gkeWorkload.namespaceName or _.gkeNamespace.namespaceName or _.meshIstio.serviceNamespace or _.clusterIstio.serviceNamespace or _.istioCanonicalService.canonicalServiceNamespace"}
+      - {name: cluster, expr: "_.gkeService.clusterName or _.gkeWorkload.clusterName or _.gkeNamespace.clusterName or _.clusterIstio.clusterName"}
+      - {name: location, expr: "_.cloudRun.location or _.gkeService.location or _.gkeWorkload.location or _.gkeNamespace.location or _.clusterIstio.location or _.basicService.serviceLabels.location"}
+      - {name: controller_type, path: "gkeWorkload.topLevelControllerType", description: "GKE workloads: Deployment, StatefulSet ..."}
+      - {name: basic_service, type: JSON, path: basicService, description: "{serviceType, serviceLabels} for basic (auto-SLI) services"}
+      - {name: telemetry_resource, path: "telemetry.resourceName", description: "Full resource name that defines the service, e.g. //container.googleapis.com/projects/P/zones/Z/clusters/C"}
+      - {name: labels, type: JSON, path: userLabels}
+      - {name: filter, filter_only: true}
+      - {name: project, filter_only: true}
+    pitfalls:
+      - "Only services that Monitoring knows about (auto-detected or defined for SLOs) are listed: this is not a full workload inventory."
+      - "Exactly one identifier (cloudRun, gkeService, gkeWorkload, appEngine, meshIstio ...) is set per service; service/namespace/cluster are derived from whichever it is."
+    examples:
+      - sql: "SELECT service_type, service, namespace, cluster, location, service_id FROM gcp_monitoring_services ORDER BY service_type, service"
+        description: Inventory of the services Monitoring tracks (and their SLO service ids).
+      - sql: "SELECT s.service, o.title, o.goal, o.budget_filter FROM gcp_monitoring_services s JOIN gcp_monitoring_slos o ON o.service_id = s.service_id WHERE s.service = 'checkout'"
+        description: SLOs defined for one workload.
+    fixtures:
+      - file: services.json
+        expect_rows: 3
+        expect_columns: {service_id: "canonical-ist:proj-123-default-checkout", service_type: cloud_run, service: checkout, location: us-central1, title: checkout, telemetry_resource: "//run.googleapis.com/projects/my-project/locations/us-central1/services/checkout"}
+        note: "Built strictly from the documented Service schema (projects.services: name, displayName, basicService {serviceType, serviceLabels}, telemetry.resourceName, userLabels and the oneof identifiers cloudRun {serviceName, location}, gkeWorkload {projectId, location, clusterName, namespaceName, topLevelControllerType, topLevelControllerName}, custom {}) in the ListServicesResponse envelope; the docs give no example response. Values illustrative."
+      - file: services_gke_workload.json
+        expect_rows: 1
+        expect_columns: {service_id: gke-workload-payments, service_type: gke_workload, service: payments-api, namespace: payments, cluster: prod-gke, location: us-central1, controller_type: Deployment}
+        note: "Same schema-built Service (gkeWorkload identifier) - proves the GKE workload derivations. Values illustrative."
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/services/list
+
+  # ------------------------------------------------------------------------------------------
+  - name: gcp_monitoring_snoozes
+    title: Alert snoozes (muted alerting policies)
+    description: >-
+      Snoozes that overlap the window (projects.snoozes.list): which alerting policies were muted, from ts to
+      end_ts, and with which label filter. Use it when an expected alert did not fire or notify: a snooze
+      overlapping the incident explains the silence. policy_ids join gcp_monitoring_alert_policies.policy_id.
+    kind: events
+    request:
+      method: GET
+      path: "/v3/projects/{{ filters.project or env.GCP_PROJECT_ID }}/snoozes"
+      query:
+        filter: "interval.start_time < {{ time.end | rfc3339 | quote }} AND interval.end_time > {{ time.start | rfc3339 | quote }}"
+        pageSize: 1000
+    filters:
+      - {column: project, description: "Project to query instead of GCP_PROJECT_ID"}
+    time: {column: ts, default_lookback: 24h, max_window: 400d, reapply: false}
+    pagination: {type: cursor, cursor_path: "$.nextPageToken", cursor_param: query.pageToken, max_pages: 3}
+    response:
+      rows_path: "$.snoozes[*]"
+    columns:
+      - {name: id, path: name, description: "projects/P/snoozes/SNOOZE_ID"}
+      - {name: snooze_id, expr: "(_.name.split('/') | last) if _.name else none"}
+      - {name: title, path: displayName}
+      - {name: ts, type: TIMESTAMP, path: "interval.startTime", transform: auto_time, description: "Snooze start"}
+      - {name: end_ts, type: TIMESTAMP, path: "interval.endTime", transform: auto_time, description: "Snooze end"}
+      - {name: policies, type: JSON, path: "criteria.policies", description: "Snoozed policy names (projects/P/alertPolicies/ID, up to 16)"}
+      - {name: policy_ids, expr: "((_.criteria.policies | join(',')) | replace('projects/' ~ _.name.split('/')[1] ~ '/alertPolicies/', '')) if (_.criteria.policies and _.name) else none", description: "Comma-separated snoozed policy ids (full name kept when the policy lives in another project): policy_ids LIKE '%<policy_id>%'"}
+      - {name: criteria_filter, path: "criteria.filter", description: "Optional label filter limiting the snooze (single-policy snoozes only), e.g. resource.labels.instance_id=\"123\""}
+      - {name: project, filter_only: true}
+    sort_hint: "API order; ORDER BY ts yourself"
+    pitfalls:
+      - "The window is pushed as an OVERLAP filter (snooze start < window end AND snooze end > window start); the ts predicate is not re-applied, so snoozes that began before the window are kept."
+      - "A snooze stops notifications and new alerts for the listed policies; it does not stop the metric from violating."
+    examples:
+      - sql: >-
+          SELECT title, ts, end_ts, policies, criteria_filter FROM gcp_monitoring_snoozes
+          WHERE ts BETWEEN TIMESTAMP '2026-10-20 12:00:00' AND TIMESTAMP '2026-10-20 15:00:00'
+        description: Snoozes active at any time during the incident window.
+      - sql: >-
+          SELECT title, ts, end_ts FROM gcp_monitoring_snoozes
+          WHERE policy_ids LIKE '%4721338519483937810%' AND ts >= TIMESTAMP '2026-10-13 00:00:00'
+        description: Was the policy that should have fired snoozed?
+    fixtures:
+      - file: snoozes.json
+        expect_rows: 2
+        expect_columns: {snooze_id: "7816254109321", title: "Checkout maintenance window", ts: "2026-10-20T13:00:00Z", end_ts: "2026-10-20T15:00:00Z", policy_ids: "4721338519483937810", criteria_filter: 'resource.labels.namespace_name="checkout"'}
+        note: "Built strictly from the documented Snooze schema (projects.snoozes: name, displayName, criteria {policies[], filter (AIP-160, e.g. resource.labels.instance_id=\"1234567890\")}, interval TimeInterval {startTime, endTime} RFC 3339) in the ListSnoozesResponse envelope {snoozes, nextPageToken}; the docs give no example response. Values illustrative."
+    docs_url: https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.snoozes/list
+
+roles:
+  metrics:
+    table: gcp_monitoring_time_series
+    columns: {ts: ts, value: value, query: filter, metric: metric, labels: labels, service: service, host: host}
+    query_language: gcp_monitoring_filter
+    notes: "query = a full Monitoring filter (metric.type = \"...\" AND ...); add aligner/reducer/group_by for fleets."
+  log_counts:
+    table: gcp_monitoring_time_series
+    filters:
+      metric: logging.googleapis.com/log_entry_count
+      filter: "{{ 'metric.labels.severity = one_of(\"ERROR\", \"CRITICAL\", \"ALERT\", \"EMERGENCY\")' if error_only else '' }}"
+      aligner: ALIGN_SUM
+      reducer: REDUCE_SUM
+      group_by: "metric.labels.severity"
+    columns: {ts: ts, value: value, group: labels}
+    notes: "System metric counting stored log entries per severity (6 weeks retention); for one service add resource labels to filter."
+  alert_rules:
+    table: gcp_monitoring_alert_policies
+    columns: {id: policy_id, name: title, query: query, threshold: threshold, severity: severity, url: url}
+  active_alerts:
+    table: gcp_monitoring_alerts
+    filters: {state: OPEN}
+    columns: {ts: ts, name: title, state: state, severity: severity, service: service, labels: labels, url: url}
+  alert_history:
+    table: gcp_monitoring_alerts
+    columns: {ts: ts, end: close_ts, name: title, title: title, state: state, id: alert_id, severity: severity}
+  slo:
+    table: gcp_monitoring_slos
+    columns: {id: id, title: title, service: service, target: goal}
+  services:
+    table: gcp_monitoring_services
+    columns: {id: service_id, name: service, service: service, type: service_type, namespace: namespace, cluster: cluster, location: location}
+    notes: "Services Monitoring knows about (auto-detected Cloud Run / GKE / App Engine / Istio, plus custom SLO services)."
+

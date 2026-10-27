@@ -1,0 +1,111 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "AppRoleName",
+          "type": "string"
+        },
+        {
+          "name": "AppRoleInstance",
+          "type": "string"
+        },
+        {
+          "name": "Name",
+          "type": "string"
+        },
+        {
+          "name": "Target",
+          "type": "string"
+        },
+        {
+          "name": "DependencyType",
+          "type": "string"
+        },
+        {
+          "name": "Data",
+          "type": "string"
+        },
+        {
+          "name": "ResultCode",
+          "type": "string"
+        },
+        {
+          "name": "Success",
+          "type": "bool"
+        },
+        {
+          "name": "DurationMs",
+          "type": "real"
+        },
+        {
+          "name": "OperationId",
+          "type": "string"
+        },
+        {
+          "name": "Id",
+          "type": "string"
+        },
+        {
+          "name": "ParentId",
+          "type": "string"
+        },
+        {
+          "name": "ItemCount",
+          "type": "int"
+        },
+        {
+          "name": "Properties",
+          "type": "dynamic"
+        },
+        {
+          "name": "_ResourceId",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:42:07.0910000Z",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "POST /v1/charges",
+          "payments.internal.contoso.com",
+          "HTTP",
+          "https://payments.internal.contoso.com/v1/charges",
+          "503",
+          false,
+          30012.0,
+          "0af7651916cd43dd8448eb211c80319c",
+          "b7ad6b7169203331",
+          "a4c2b3d1e5f60718",
+          1,
+          "{}",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"
+        ],
+        [
+          "2026-10-01T11:41:31.4410000Z",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-m9q2z",
+          "POST /v1/charges",
+          "payments.internal.contoso.com",
+          "HTTP",
+          "https://payments.internal.contoso.com/v1/charges",
+          "503",
+          false,
+          29987.2,
+          "3d1f0c2a9b8e47d6a5c4b3a2918f7e6d",
+          "c9e0f1a2b3c4d5e6",
+          "f0e1d2c3b4a59687",
+          1,
+          "{}",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"
+        ]
+      ]
+    }
+  ]
+}

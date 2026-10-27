@@ -1,0 +1,1336 @@
+# IBM Instana Observability REST API, direct REST, no MCP.
+#
+# Reference: IBM API Hub "Instana REST API" (OpenAPI 1.328.1128, checked 2026-10-27)
+#   https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation
+#   (operation anchors: ...-documentation#<operationId>); developer guides
+#   https://developer.ibm.com/apis/catalog/instana--instana-rest-api/Applications and /Infrastructure;
+#   auth / rate limits: https://www.ibm.com/docs/en/SSO4JPD/src/pages/api/instana_rest_api/getting_started/
+# The old https://instana.github.io/openapi/ site is gone (404). Fixtures are the OpenAPI
+# examples verbatim unless the fixture note says otherwise.
+# Research notes and doc links: docs/sources/instana.md
+source: instana
+display_name: IBM Instana Observability
+vendor: IBM
+description: >-
+  IBM Instana REST API: application perspectives, services and endpoints with their metrics
+  (calls, errors, latency percentiles, HTTP status classes), grouped call/trace analytics,
+  trace search and trace detail, service topology, events (incidents, issues, changes),
+  infrastructure snapshots and metrics, releases (deployment markers), logs and Smart Alert
+  configurations.
+docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation
+categories: [metrics, traces, logs, alerts, events, incidents, changes, topology, infrastructure, apm]
+base_url: "{{ env.INSTANA_BASE_URL }}"
+ui_base_url: "{{ env.INSTANA_BASE_URL }}"
+env:
+  - name: INSTANA_BASE_URL
+    description: >-
+      Tenant-unit base URL without /api, the same host as the Instana UI:
+      https://<unit>-<tenant>.instana.io (SaaS, e.g. https://prod-acme.instana.io) or the
+      self-hosted backend URL.
+  - name: INSTANA_API_TOKEN
+    description: >-
+      API token (Settings > Security & access > API tokens), sent as 'Authorization: apiToken <token>'.
+      Needs the application, infrastructure, events and logs read permissions used here.
+    secret: true
+required_env: [INSTANA_BASE_URL, INSTANA_API_TOKEN]
+auth:
+  type: headers
+  headers:
+    Authorization: "apiToken {{ env.INSTANA_API_TOKEN }}"
+headers:
+  Accept: application/json
+  Content-Type: application/json
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 150
+  notes: >-
+    REST API: 10,000 calls per hour per API token (X-RateLimit-Limit / -Remaining / -Reset
+    headers; HTTP 429 when exceeded). Infrastructure search and snapshot/metric queries are
+    limited to 1,000 calls per hour. The engine enforces 150 requests/min for the source.
+retention:
+  traces: "7 days for all calls and traces (a subset of calls/traces is kept for 1 year)"
+  metrics: "accurate application/service/endpoint metrics 31 days, approximate metrics 1 year; infrastructure 1-second rollups ~24 h, 1-minute ~1 month, 1-hour ~13 months"
+  events: "events and incidents are kept with the tenant's event retention"
+pitfalls:
+  - "All times are epoch MILLISECONDS; POST bodies use timeFrame {to, windowSize (ms)}; windowSize is capped at 31 days (2678400000 ms)."
+  - "Metric granularity is in SECONDS and must give at most 600 points per series (granularity >= windowSize/600); without granularity the API returns ONE aggregated value for the whole window. The tables send ~300-point granularity by default."
+  - "The API adjusts the window to whole granularity buckets (e.g. 08:02-09:02 at 5 min becomes 08:05-09:00); the adjusted window is in adjusted_* columns."
+  - "Names are matched with 'contains' semantics server-side (nameFilter) and exactly in SQL: service = 'shop' still needs the exact label."
+  - "Tag names in tag filters must exist in the application tag catalog (service.name, endpoint.name, application.name, call.type, ...); an unknown tag or value silently matches nothing."
+  - "Service and endpoint ids are stable hashes; application perspective ids are short strings: resolve names with instana_services / instana_applications."
+query_languages:
+  instana_metric: >-
+    Application metrics are '<metricId>.<aggregation>' (lower case), e.g. calls.sum,
+    calls.per_second, erroneousCalls.sum, errors.mean (error rate 0..1), latency.mean,
+    latency.p50/p90/p95/p99, http.5xx.sum, http.4xx.sum, services.distinct_count. Allowed
+    aggregations: calls/erroneousCalls/http.Nxx: PER_SECOND, SUM; latency: P25..P99, SUM, MEAN,
+    MAX, MIN (ms); errors: MEAN. See instana_metric_catalog.
+  instana_dfq: >-
+    Dynamic Focus Query for infrastructure: entity.type:host, entity.zone:"eu-west-1",
+    entity.kubernetes.namespace:shop, entity.application.name:"Java Applications",
+    entity.host.name:ip-10-0-1-17, entity.selfType:java; combine with AND/OR/NOT and quotes.
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: instana_applications
+    title: Application perspectives
+    description: >-
+      Application perspectives (Instana's user-defined groupings of services/endpoints) with
+      their ids. One row per perspective. Filter on application (contains match server-side).
+    kind: entities
+    request:
+      method: GET
+      path: /api/application-monitoring/applications
+      query:
+        nameFilter: "{{ filters.application }}"
+        windowSize: "{{ time.range_s * 1000 }}"
+        to: "{{ time.end | epoch_ms }}"
+        applicationBoundaryScope: "{{ filters.boundary_scope }}"
+    filters:
+      - {column: application, description: "Perspective name (server-side contains match)", examples: [Robot Shop]}
+      - {column: boundary_scope, description: "ALL | INBOUND"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    pagination: {type: page, page_param: query.page, limit_param: query.pageSize, page_size: 200, start: 1, max_pages: 5}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: id, path: id, description: "Application perspective id (application_id filter elsewhere)"}
+      - {name: application, path: label}
+      - {name: boundary_scope, path: boundaryScope, description: "ALL | INBOUND"}
+      - {name: entity_type, path: entityType}
+      - {name: business_criticality, type: BIGINT, path: businessCriticality}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT id, application, boundary_scope FROM instana_applications ORDER BY application"
+        description: List application perspectives and their ids.
+    fixtures:
+      - file: applications.json
+        note: "Verbatim 200 example of getApplications (GET /api/application-monitoring/applications) from the Instana OpenAPI spec 1.328.1128."
+        expect_rows: 1
+        expect_columns: {id: e8krH1wNRV6daAo-NEmG8g, application: Robot Shop, boundary_scope: INBOUND}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getApplications
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_services
+    title: Services
+    description: >-
+      Services seen in the window with technologies and endpoint types. One row per service.
+      Filter on service (contains match server-side, exact in SQL). Use to resolve a service name
+      to its id and snapshot ids.
+    kind: entities
+    request:
+      method: GET
+      path: /api/application-monitoring/services
+      query:
+        nameFilter: "{{ filters.service }}"
+        windowSize: "{{ time.range_s * 1000 }}"
+        to: "{{ time.end | epoch_ms }}"
+        includeSnapshotIds: "true"
+    filters:
+      - {column: service, description: "Service name (server-side contains match)", examples: [payment]}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    pagination: {type: page, page_param: query.page, limit_param: query.pageSize, page_size: 200, start: 1, max_pages: 5}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: id, path: id, description: "Service id (service_id filter elsewhere)"}
+      - {name: service, path: label}
+      - {name: types, type: JSON, path: types, description: "Endpoint types, e.g. HTTP, DATABASE, MESSAGING"}
+      - {name: technologies, type: JSON, path: technologies}
+      - {name: snapshot_ids, type: JSON, path: snapshotIds, description: "Infrastructure snapshots (processes/containers) backing the service"}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT id, service, types, technologies FROM instana_services WHERE service = 'payment'"
+        description: Resolve a service name to its id.
+      - sql: "SELECT service, technologies FROM instana_services ORDER BY service"
+        description: Service inventory in the window.
+    fixtures:
+      - file: services.json
+        note: "Verbatim 200 example of getServices (GET /api/application-monitoring/services) from the Instana OpenAPI spec."
+        expect_rows: 1
+        expect_columns: {id: 79f1430f4a42a707a97621ca00617e40bd51c31d, service: Robot Shop}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getServices
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_service_metrics
+    title: Service metrics (calls, errors, latency)
+    description: >-
+      Time series of one application metric per service: one row per (service, metric,
+      timestamp). Filter on metric (required, '<metricId>.<aggregation>' e.g. errors.mean,
+      calls.sum, latency.p95, http.5xx.sum; IN fans out one request per metric), service
+      (contains match server-side, exact in SQL) or service_id, application_id, and ts.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/application-monitoring/metrics/services
+      query: {fillTimeSeries: "true", includeSnapshotIds: "false"}
+      body:
+        metrics:
+          - metric: "{{ filters.metric.rsplit('.', 1)[0] }}"
+            aggregation: "{{ filters.metric.rsplit('.', 1)[1] | upper }}"
+            granularity: "{{ filters.granularity or time.step_s }}"
+        nameFilter: "{{ filters.service }}"
+        serviceId: "{{ filters.service_id }}"
+        applicationId: "{{ filters.application_id }}"
+        applicationBoundaryScope: "{{ filters.boundary_scope or 'ALL' }}"
+        pagination: {page: 1, pageSize: 200}
+        timeFrame:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], max_fan_out: 6, description: "'<metricId>.<aggregation>' in lower case (see query language instana_metric)", examples: [errors.mean]}
+      - {column: service, description: "Service name (server-side contains match)", examples: [payment]}
+      - {column: service_id, description: "Service id (exact)"}
+      - {column: application_id, description: "Restrict to calls of one application perspective"}
+      - {column: boundary_scope, description: "ALL (default) | INBOUND"}
+      - {column: granularity, type: BIGINT, description: "Bucket size in SECONDS (default ~300 points over the window; max 600 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 365d}
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {entries: metrics, as: m}
+        - {explode: "@m.value", as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ms, description: "Bucket timestamp (UTC)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "latency in ms; errors as a 0..1 rate; calls as count (SUM) or per second"}
+      - {name: metric, expr: "filters.metric or m.key", description: "Requested '<metricId>.<aggregation>'"}
+      - {name: metric_key, path: "@m.key", description: "Metric key as returned, e.g. errors.mean"}
+      - {name: service, path: "service.label"}
+      - {name: service_id, path: "service.id"}
+      - {name: types, type: JSON, path: "service.types"}
+      - {name: technologies, type: JSON, path: "service.technologies"}
+      - {name: adjusted_to, type: TIMESTAMP, path: "$.adjustedTimeframe.to", transform: epoch_ms, description: "End of the window as adjusted to whole buckets"}
+      - {name: total_hits, type: BIGINT, path: "$.totalHits", description: "Services matching; only the first 200 are returned (narrow service/application when larger)"}
+      - {name: application_id, filter_only: true}
+      - {name: boundary_scope, filter_only: true}
+      - {name: granularity, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "The metric must use an aggregation allowed for it (calls: SUM/PER_SECOND; errors: MEAN; latency: MEAN/P50..P99/MAX/MIN): a wrong pair is an HTTP 400."
+      - "service filters with 'contains': 'shop' also returns 'shop-db'; the SQL predicate keeps only the exact label."
+      - "Rows are only produced for services that had calls in the window; fillTimeSeries=true fills missing buckets with 0."
+    examples:
+      - sql: >-
+          SELECT service, max(value) AS peak_error_rate, arg_max(ts, value) AS peak_at
+          FROM instana_service_metrics
+          WHERE metric = 'errors.mean' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY service ORDER BY peak_error_rate DESC LIMIT 10
+        description: Services with the highest error rate in the incident hour and when they peaked.
+      - sql: >-
+          SELECT ts, metric, value FROM instana_service_metrics
+          WHERE service = 'payment' AND metric IN ('latency.p95', 'calls.sum', 'errors.mean')
+          ORDER BY metric, ts
+        description: Latency, throughput and error-rate curves of one service.
+    fixtures:
+      - file: service_metrics.json
+        note: "Verbatim 200 example of getServicesMetrics (POST /api/application-monitoring/metrics/services) from the Instana OpenAPI spec."
+        filters: {metric: endpoints.distinct_count}
+        expect_rows: 1
+        expect_columns: {ts: "2022-11-23T08:03:00Z", value: 4.0, metric: endpoints.distinct_count, service: discount, service_id: c467ca0fa21477fee3cde75a140b2963307388a7}
+      - file: service_metrics_error_rate.json
+        note: "Verbatim sample response of 'Tutorial: Retrieving the error rate for a service' (Applications developer guide on the IBM API Hub)."
+        filters: {metric: errors.mean}
+        expect_rows: 1
+        expect_columns: {ts: "2024-07-10T16:40:50Z", value: 0.0, metric_key: errors.mean, service: service_label_1}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getServicesMetrics
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_application_metrics
+    title: Application perspective metrics
+    description: >-
+      Time series of one metric per application perspective: one row per (application,
+      metric, timestamp). Filter on metric (required, e.g. calls.sum, errors.mean, latency.p95),
+      application (contains) or application_id, and ts.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/application-monitoring/metrics/applications
+      query: {fillTimeSeries: "true"}
+      body:
+        metrics:
+          - metric: "{{ filters.metric.rsplit('.', 1)[0] }}"
+            aggregation: "{{ filters.metric.rsplit('.', 1)[1] | upper }}"
+            granularity: "{{ filters.granularity or time.step_s }}"
+        nameFilter: "{{ filters.application }}"
+        applicationId: "{{ filters.application_id }}"
+        applicationBoundaryScope: "{{ filters.boundary_scope or 'INBOUND' }}"
+        pagination: {page: 1, pageSize: 200}
+        timeFrame:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], max_fan_out: 6, description: "'<metricId>.<aggregation>' in lower case", examples: [calls.sum]}
+      - {column: application, description: "Application perspective name (contains)", examples: [demoApp]}
+      - {column: application_id, description: "Application perspective id (exact)"}
+      - {column: boundary_scope, description: "INBOUND (default: calls into the application) | ALL (inbound + internal)"}
+      - {column: granularity, type: BIGINT, description: "Bucket size in SECONDS (default ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 365d}
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {entries: metrics, as: m}
+        - {explode: "@m.value", as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ms}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: metric, expr: "filters.metric or m.key"}
+      - {name: metric_key, path: "@m.key"}
+      - {name: application, path: "application.label"}
+      - {name: application_id, path: "application.id"}
+      - {name: boundary_scope, path: "application.boundaryScope"}
+      - {name: adjusted_to, type: TIMESTAMP, path: "$.adjustedTimeframe.to", transform: epoch_ms}
+      - {name: total_hits, type: BIGINT, path: "$.totalHits", description: "Perspectives matching; only the first 200 are returned"}
+      - {name: granularity, type: BIGINT, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT ts, value AS calls FROM instana_application_metrics
+          WHERE application = 'Robot Shop' AND metric = 'calls.sum'
+          ORDER BY ts
+        description: Throughput of one application perspective over the window.
+    fixtures:
+      - file: application_metrics.json
+        note: "Verbatim 200 example of getApplicationMetrics (POST /api/application-monitoring/metrics/applications) from the Instana OpenAPI spec."
+        filters: {metric: latency.mean}
+        expect_rows: 1
+        expect_columns: {ts: "2022-11-23T08:03:00Z", value: 4.0, metric: latency.mean, application: demoApp, application_id: Jv83WpUmSKiiCWIpi-reSQ, boundary_scope: ALL}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getApplicationMetrics
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_endpoint_metrics
+    title: Endpoint metrics
+    description: >-
+      Time series of one metric per endpoint (HTTP route, RPC, DB statement group, topic): one
+      row per (endpoint, metric, timestamp). Filter on metric (required), endpoint (contains),
+      endpoint_id, service_id, application_id and ts. Use to find which endpoint of a service
+      broke.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/application-monitoring/metrics/endpoints
+      query: {fillTimeSeries: "true"}
+      body:
+        metrics:
+          - metric: "{{ filters.metric.rsplit('.', 1)[0] }}"
+            aggregation: "{{ filters.metric.rsplit('.', 1)[1] | upper }}"
+            granularity: "{{ filters.granularity or time.step_s }}"
+        nameFilter: "{{ filters.endpoint }}"
+        endpointId: "{{ filters.endpoint_id }}"
+        serviceId: "{{ filters.service_id }}"
+        applicationId: "{{ filters.application_id }}"
+        endpointTypes: "{{ filters.endpoint_type | as_list if filters.endpoint_type else None }}"
+        excludeSynthetic: true
+        applicationBoundaryScope: ALL
+        pagination: {page: 1, pageSize: 200}
+        timeFrame:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], max_fan_out: 6, description: "'<metricId>.<aggregation>' in lower case", examples: [errors.mean]}
+      - {column: endpoint, description: "Endpoint name (contains), e.g. 'GET /api/'", examples: ['GET /api/']}
+      - {column: endpoint_id, description: "Endpoint id (exact)"}
+      - {column: service_id, description: "Only endpoints of this service id (from instana_services)", examples: ['05b145cfb6fbc24d08a8e01155c0aa2bf8460c87']}
+      - {column: application_id, description: "Only endpoints of this application perspective"}
+      - {column: endpoint_type, ops: ["=", "in"], fan_out: false, description: "HTTP, RPC, DATABASE, MESSAGING, BATCH, GRAPHQL, ..."}
+      - {column: granularity, type: BIGINT, description: "Bucket size in SECONDS (default ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 365d}
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {entries: metrics, as: m}
+        - {explode: "@m.value", as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ms}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: metric, expr: "filters.metric or m.key"}
+      - {name: metric_key, path: "@m.key"}
+      - {name: endpoint, path: "endpoint.label"}
+      - {name: resource, path: "endpoint.label", description: "Canonical alias of endpoint"}
+      - {name: endpoint_id, path: "endpoint.id"}
+      - {name: endpoint_type, path: "endpoint.type"}
+      - {name: service_id, path: "endpoint.serviceId"}
+      - {name: technologies, type: JSON, path: "endpoint.technologies"}
+      - {name: synthetic_type, path: "endpoint.syntheticType"}
+      - {name: total_hits, type: BIGINT, path: "$.totalHits", description: "Endpoints matching; only the first 200 are returned"}
+      - {name: application_id, filter_only: true}
+      - {name: granularity, type: BIGINT, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT endpoint, max(value) AS peak_error_rate FROM instana_endpoint_metrics
+          WHERE service_id = '05b145cfb6fbc24d08a8e01155c0aa2bf8460c87' AND metric = 'errors.mean'
+          GROUP BY endpoint ORDER BY peak_error_rate DESC LIMIT 10
+        description: Endpoints of one service ranked by error rate.
+    fixtures:
+      - file: endpoint_metrics.json
+        note: "Verbatim 200 example of getEndpointsMetrics (POST /api/application-monitoring/metrics/endpoints) from the Instana OpenAPI spec."
+        filters: {metric: latency.mean}
+        expect_rows: 1
+        expect_columns: {value: 2434.5625, endpoint: robot-shop, endpoint_type: MESSAGING, service_id: 05b145cfb6fbc24d08a8e01155c0aa2bf8460c87, synthetic_type: NON_SYNTHETIC}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getEndpointsMetrics
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_metrics
+    title: Application data metrics (tag-filtered, v2)
+    description: >-
+      One series per metric over calls matching exact tag filters (the upgraded 'Get
+      Application Data Metrics' endpoint): filter on metric (required), service (exact
+      service.name), endpoint (exact endpoint.name), application (exact application.name), or any
+      tag via tag + tag_value (+ tag_operator, tag_entity). One row per (metric, timestamp).
+      Best for 'the error rate of service X' with exact names.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/application-monitoring/v2/metrics
+      body:
+        metrics:
+          - metric: "{{ filters.metric.rsplit('.', 1)[0] }}"
+            aggregation: "{{ filters.metric.rsplit('.', 1)[1] | upper }}"
+            granularity: "{{ filters.granularity or time.step_s }}"
+        includeInternal: false
+        includeSynthetic: false
+        tagFilterExpression:
+          type: EXPRESSION
+          logicalOperator: AND
+          elements:
+            - "{{ {'type': 'TAG_FILTER', 'name': 'service.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.service} if filters.service else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'endpoint.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.endpoint} if filters.endpoint else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'application.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.application} if filters.application else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': filters.tag, 'operator': (filters.tag_operator or 'EQUALS'), 'entity': (filters.tag_entity or 'DESTINATION'), 'value': filters.tag_value} if filters.tag else None }}"
+        timeFrame:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], max_fan_out: 6, description: "'<metricId>.<aggregation>' in lower case", examples: [latency.mean]}
+      - {column: service, description: "Exact service name (tag service.name, DESTINATION)", examples: [warehouse]}
+      - {column: endpoint, description: "Exact endpoint name (tag endpoint.name)"}
+      - {column: application, description: "Exact application perspective name (tag application.name)"}
+      - {column: tag, description: "Any tag from the application tag catalog, e.g. call.http.status, kubernetes.namespace.name, call.type"}
+      - {column: tag_value, description: "Value for tag"}
+      - {column: tag_operator, description: "EQUALS (default), CONTAINS, NOT_EQUAL, GREATER_THAN, STARTS_WITH, REGEX_MATCH, ..."}
+      - {column: tag_entity, description: "DESTINATION (default), SOURCE, NOT_APPLICABLE"}
+      - {column: granularity, type: BIGINT, description: "Bucket size in SECONDS (default ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 365d}
+    response:
+      rows_path: "$.metrics"
+      expand:
+        - {entries: ".", as: m}
+        - {explode: "@m.value", as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ms}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: metric, expr: "filters.metric or m.key"}
+      - {name: metric_key, path: "@m.key"}
+      - {name: adjusted_to, type: TIMESTAMP, path: "$.adjustedTimeframe.to", transform: epoch_ms}
+      - {name: service, filter_only: true}
+      - {name: endpoint, filter_only: true}
+      - {name: application, filter_only: true}
+      - {name: tag, filter_only: true}
+      - {name: tag_value, filter_only: true}
+      - {name: tag_operator, filter_only: true}
+      - {name: tag_entity, filter_only: true}
+      - {name: granularity, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Returns one series for all matching calls (no group-by): use instana_service_metrics / instana_call_groups to compare services."
+      - "An exact name that does not exist returns an empty/zero series, not an error."
+    examples:
+      - sql: >-
+          SELECT ts, value AS p95_ms FROM instana_metrics
+          WHERE service = 'warehouse' AND metric = 'latency.p95'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts
+        description: p95 latency of one service (exact name) in the incident hour.
+      - sql: "SELECT ts, value FROM instana_metrics WHERE service = 'checkout' AND tag = 'call.http.status' AND tag_value = '503' AND metric = 'calls.sum' ORDER BY ts"
+        description: Rate of HTTP 503 responses served by one service.
+    fixtures:
+      - file: metrics_v2.json
+        note: "Verbatim 200 example of getApplicationDataMetricsV2 (POST /api/application-monitoring/v2/metrics) from the Instana OpenAPI spec."
+        filters: {metric: latency.mean, service: warehouse}
+        expect_rows: 1
+        expect_columns: {ts: "2022-11-23T08:03:00Z", value: 106.85055708882756, metric: latency.mean, service: warehouse}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getApplicationDataMetricsV2
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_metric_catalog
+    title: Application metric catalog
+    description: Application metrics available for aggregation, with allowed and default aggregations. One row per metric.
+    kind: entities
+    request:
+      method: GET
+      path: /api/application-monitoring/catalog/metrics
+    response:
+      rows_path: "$"
+    columns:
+      - {name: metric_id, path: metricId}
+      - {name: label, path: label}
+      - {name: description, path: description}
+      - {name: formatter, path: formatter, description: "NUMBER, MILLIS, PERCENTAGE (0..1), BYTES, ..."}
+      - {name: aggregations, type: JSON, path: aggregations}
+      - {name: default_aggregation, path: defaultAggregation}
+    examples:
+      - sql: "SELECT metric_id, label, aggregations, formatter FROM instana_metric_catalog ORDER BY metric_id"
+        description: Which metric ids and aggregations the metrics tables accept.
+    fixtures:
+      - file: catalog_metrics.json
+        note: "Verbatim 200 example of getApplicationCatalogMetrics from the Instana OpenAPI spec."
+        expect_rows: 1
+        expect_columns: {metric_id: calls, label: Call count, formatter: NUMBER, default_aggregation: null}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getApplicationCatalogMetrics
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_call_groups
+    title: Grouped call metrics (unbounded analytics)
+    description: >-
+      Calls grouped by a tag (default service.name of the DESTINATION) with one metric per
+      request: one row per (group, metric, timestamp). Filter on metric (required, e.g.
+      calls.sum, errors.mean, latency.p95; IN fans out), group_by (tag, default service.name),
+      group_entity (DESTINATION | SOURCE), service / endpoint / application (exact tag filters),
+      call_type (HTTP, DATABASE, MESSAGING, ...), tag + tag_value, granularity (default: one value
+      for the whole window) and ts. The workhorse for 'which service/endpoint/status code is
+      responsible'.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/application-monitoring/analyze/call-groups
+      body:
+        group:
+          groupbyTag: "{{ filters.group_by or 'service.name' }}"
+          groupbyTagEntity: "{{ filters.group_entity or 'DESTINATION' }}"
+          groupbyTagSecondLevelKey: "{{ filters.group_key }}"
+        metrics:
+          - metric: "{{ filters.metric.rsplit('.', 1)[0] }}"
+            aggregation: "{{ filters.metric.rsplit('.', 1)[1] | upper }}"
+            granularity: "{{ filters.granularity }}"
+        includeInternal: false
+        includeSynthetic: false
+        pagination: {retrievalSize: 200}
+        tagFilterExpression:
+          type: EXPRESSION
+          logicalOperator: AND
+          elements:
+            - "{{ {'type': 'TAG_FILTER', 'name': 'service.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.service} if filters.service else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'endpoint.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.endpoint} if filters.endpoint else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'application.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.application} if filters.application else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'call.type', 'operator': 'EQUALS', 'entity': 'NOT_APPLICABLE', 'value': filters.call_type} if filters.call_type else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': filters.tag, 'operator': (filters.tag_operator or 'EQUALS'), 'entity': (filters.tag_entity or 'DESTINATION'), 'value': filters.tag_value} if filters.tag else None }}"
+        timeFrame:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], max_fan_out: 6, description: "'<metricId>.<aggregation>' in lower case: calls.sum, errors.mean, latency.mean, latency.p95", examples: [calls.sum]}
+      - {column: group_by, description: "Group tag: service.name (default), endpoint.name, call.http.status, kubernetes.namespace.name, host.name, ...", examples: [service.name]}
+      - {column: group_entity, description: "DESTINATION (default, the callee) | SOURCE (the caller) | NOT_APPLICABLE"}
+      - {column: group_key, description: "Second-level key for KEY_VALUE_PAIR tags (e.g. a docker/k8s label name)"}
+      - {column: service, description: "Exact destination service.name filter", examples: [ratings]}
+      - {column: endpoint, description: "Exact destination endpoint.name filter"}
+      - {column: application, description: "Exact application.name filter"}
+      - {column: call_type, description: "HTTP, DATABASE, MESSAGING, RPC, SDK, ... (tag call.type)", examples: [DATABASE]}
+      - {column: tag, description: "Any tag from the application tag catalog"}
+      - {column: tag_value, description: "Value for tag"}
+      - {column: tag_operator, description: "EQUALS (default), CONTAINS, NOT_EQUAL, GREATER_THAN, ..."}
+      - {column: tag_entity, description: "DESTINATION (default), SOURCE, NOT_APPLICABLE"}
+      - {column: granularity, type: BIGINT, description: "Bucket size in SECONDS; default none = one aggregated value per group for the whole window"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 7d}
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {entries: metrics, as: m}
+        - {explode: "@m.value", as: p}
+    columns:
+      - {name: group_value, path: name, description: "Value of the group tag (e.g. the service name)"}
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ms, description: "Bucket timestamp (start of the window when no granularity)"}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: metric, expr: "filters.metric or m.key"}
+      - {name: metric_key, path: "@m.key", description: "Returned key '<metric>.<aggregation>[.<granularity>]'"}
+      - {name: first_call_ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms, description: "Earliest call of the group"}
+      - {name: total_hits, type: BIGINT, path: "$.totalHits"}
+      - {name: can_load_more, type: BOOLEAN, path: "$.canLoadMore", description: "true = more than 200 groups exist (only the first page is fetched)"}
+      - {name: group_by, filter_only: true}
+      - {name: group_entity, filter_only: true}
+      - {name: group_key, filter_only: true}
+      - {name: service, filter_only: true}
+      - {name: endpoint, filter_only: true}
+      - {name: application, filter_only: true}
+      - {name: call_type, filter_only: true}
+      - {name: tag, filter_only: true}
+      - {name: tag_value, filter_only: true}
+      - {name: tag_operator, filter_only: true}
+      - {name: tag_entity, filter_only: true}
+      - {name: granularity, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Only the first 200 groups are fetched (cursor pagination needs ingestionTime+offset together, which the engine cannot send): check can_load_more and narrow the filters."
+      - "Call data is retained 7 days; older windows return nothing."
+      - "group_entity matters: DESTINATION groups by the callee, SOURCE by the caller (use SOURCE + a destination service filter to find who calls a failing service)."
+    examples:
+      - sql: >-
+          SELECT group_value AS service, value AS error_rate FROM instana_call_groups
+          WHERE metric = 'errors.mean' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY error_rate DESC LIMIT 10
+        description: Services ranked by error rate over the incident window (one value per service).
+      - sql: >-
+          SELECT group_value AS caller, value AS calls FROM instana_call_groups
+          WHERE metric = 'calls.sum' AND service = 'ratings' AND group_entity = 'SOURCE'
+          ORDER BY calls DESC
+        description: Which services call the failing service, and how much.
+      - sql: >-
+          SELECT group_value AS http_status, value AS calls FROM instana_call_groups
+          WHERE metric = 'calls.sum' AND service = 'checkout' AND group_by = 'call.http.status'
+          ORDER BY calls DESC
+        description: HTTP status code breakdown of one service.
+    fixtures:
+      - file: call_groups.json
+        note: "Verbatim 200 example of getCallGroup (POST /api/application-monitoring/analyze/call-groups) from the Instana OpenAPI spec."
+        filters: {metric: latency.p75, service: ratings}
+        expect_rows: 1
+        expect_columns: {group_value: ratings, ts: "2023-07-03T06:42:00Z", value: 1.0, metric: latency.p75, metric_key: latency.p75.360, can_load_more: false}
+      - file: call_groups_services.json
+        note: "Verbatim sample response of 'Tutorial: Retrieving the services that have trace data' (Applications developer guide, IBM API Hub); '// More services...' comment removed."
+        filters: {metric: errors.mean}
+        expect_rows: 6
+        expect_columns: {group_value: Service A, value: 0.0, metric_key: errors.mean, total_hits: 2}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getCallGroup
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_traces
+    title: Trace search (analyze traces)
+    description: >-
+      Traces matching tag filters in the window: one row per trace with entry service and
+      endpoint, start time, duration and erroneous flag. Filter on service / endpoint (exact
+      destination tags), error_only (call.erroneous = true), tag + tag_value, and ts. One page of
+      up to 200 traces; use instana_trace_calls for the calls of one trace.
+    kind: traces
+    request:
+      method: POST
+      path: /api/application-monitoring/analyze/traces
+      body:
+        includeInternal: false
+        includeSynthetic: false
+        pagination:
+          retrievalSize: "{{ [limit or 200, 200] | min }}"
+        tagFilterExpression:
+          type: EXPRESSION
+          logicalOperator: AND
+          elements:
+            - "{{ {'type': 'TAG_FILTER', 'name': 'service.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.service} if filters.service else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'endpoint.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.endpoint} if filters.endpoint else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'application.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.application} if filters.application else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'call.erroneous', 'operator': 'EQUALS', 'entity': 'NOT_APPLICABLE', 'value': true} if filters.error_only else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': filters.tag, 'operator': (filters.tag_operator or 'EQUALS'), 'entity': (filters.tag_entity or 'DESTINATION'), 'value': filters.tag_value} if filters.tag else None }}"
+        timeFrame:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+    filters:
+      - {column: service, description: "Exact service.name of calls in the trace (DESTINATION)", examples: [groundskeeper]}
+      - {column: endpoint, description: "Exact endpoint.name (DESTINATION)", examples: ['GET /']}
+      - {column: application, description: "Exact application.name"}
+      - {column: error_only, type: BOOLEAN, description: "true = only traces with erroneous calls (tag call.erroneous)"}
+      - {column: tag, description: "Any tag from the application tag catalog, e.g. call.http.status, call.duration"}
+      - {column: tag_value, description: "Value for tag"}
+      - {column: tag_operator, description: "EQUALS (default), GREATER_THAN, CONTAINS, ..."}
+      - {column: tag_entity, description: "DESTINATION (default), SOURCE, NOT_APPLICABLE"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, retention: 7d}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: trace_id, path: "trace.id"}
+      - {name: title, path: "trace.label", description: "Trace name (usually the entry endpoint)"}
+      - {name: ts, type: TIMESTAMP, path: "trace.startTime", transform: epoch_ms}
+      - {name: duration_ms, type: DOUBLE, path: "trace.duration"}
+      - {name: error, type: BOOLEAN, path: "trace.erroneous"}
+      - {name: entry_service, path: "trace.service.label", description: "Entry (root) service of the trace"}
+      - {name: entry_service_id, path: "trace.service.id"}
+      - {name: entry_endpoint, path: "trace.endpoint.label", description: "Entry endpoint of the trace"}
+      - {name: resource, path: "trace.endpoint.label"}
+      - {name: endpoint_type, path: "trace.endpoint.type"}
+      - {name: total_hits, type: BIGINT, path: "$.totalHits"}
+      - {name: can_load_more, type: BOOLEAN, path: "$.canLoadMore"}
+      - {name: service, filter_only: true, description: "Service filter: traces containing a call to this service"}
+      - {name: endpoint, filter_only: true, description: "Endpoint filter: traces containing a call to this endpoint"}
+      - {name: application, filter_only: true}
+      - {name: error_only, type: BOOLEAN, filter_only: true}
+      - {name: tag, filter_only: true}
+      - {name: tag_value, filter_only: true}
+      - {name: tag_operator, filter_only: true}
+      - {name: tag_entity, filter_only: true}
+    pitfalls:
+      - "service/endpoint filters select traces CONTAINING a call to that service/endpoint; entry_service/entry_endpoint are the trace's root, which can differ."
+      - "One page of at most 200 traces (total_hits says how many matched): narrow with error_only, endpoint or a shorter window."
+      - "Trace data is retained 7 days."
+    examples:
+      - sql: >-
+          SELECT ts, trace_id, title, duration_ms, error FROM instana_traces
+          WHERE service = 'groundskeeper' AND error_only = true
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY ts DESC LIMIT 50
+        description: Erroneous traces through a service in the incident window.
+      - sql: "SELECT entry_service, title, count(*) AS traces, max(duration_ms) AS slowest_ms FROM instana_traces WHERE endpoint = 'GET /' GROUP BY 1, 2 ORDER BY slowest_ms DESC"
+        description: Slowest traces through one endpoint.
+    fixtures:
+      - file: traces.json
+        note: "Verbatim 200 example of getTraces (POST /api/application-monitoring/analyze/traces) from the Instana OpenAPI spec."
+        expect_rows: 1
+        expect_columns: {trace_id: 506aef767d8ec147, title: sdk.reloading-config-cache, ts: "2024-09-06T05:49:23.937Z", duration_ms: 0.0, error: false, entry_service: appdata-processor, entry_endpoint: null, total_hits: 154, can_load_more: true}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getTraces
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_trace_groups
+    title: Grouped trace metrics
+    description: >-
+      Traces grouped by their entry endpoint (trace.endpoint.name, default) or entry service
+      (trace.service.name) with one metric per request (traces.sum, latency.mean, errors.mean...):
+      one row per (group, metric, timestamp). Filter on metric, group_by, service / endpoint
+      (exact destination tags) and ts.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/application-monitoring/analyze/trace-groups
+      body:
+        group:
+          groupbyTag: "{{ filters.group_by or 'trace.endpoint.name' }}"
+          groupbyTagEntity: NOT_APPLICABLE
+        metrics:
+          - metric: "{{ filters.metric.rsplit('.', 1)[0] }}"
+            aggregation: "{{ filters.metric.rsplit('.', 1)[1] | upper }}"
+            granularity: "{{ filters.granularity }}"
+        pagination: {retrievalSize: 200}
+        tagFilterExpression:
+          type: EXPRESSION
+          logicalOperator: AND
+          elements:
+            - "{{ {'type': 'TAG_FILTER', 'name': 'service.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.service} if filters.service else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'endpoint.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.endpoint} if filters.endpoint else None }}"
+        timeFrame:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], max_fan_out: 4, description: "traces.sum, latency.mean, latency.p95, errors.mean", examples: [latency.sum]}
+      - {column: group_by, description: "trace.endpoint.name (default) | trace.service.name (only these two work)"}
+      - {column: service, description: "Exact service.name of calls in the traces", examples: [ratings]}
+      - {column: endpoint, description: "Exact endpoint.name"}
+      - {column: granularity, type: BIGINT, description: "Bucket size in SECONDS (default: one value per group)"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d, retention: 7d}
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {entries: metrics, as: m}
+        - {explode: "@m.value", as: p}
+    columns:
+      - {name: group_value, path: name}
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ms}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: metric, expr: "filters.metric or m.key"}
+      - {name: metric_key, path: "@m.key"}
+      - {name: total_hits, type: BIGINT, path: "$.totalHits"}
+      - {name: can_load_more, type: BOOLEAN, path: "$.canLoadMore"}
+      - {name: group_by, filter_only: true}
+      - {name: service, filter_only: true}
+      - {name: endpoint, filter_only: true}
+      - {name: granularity, type: BIGINT, filter_only: true}
+    examples:
+      - sql: "SELECT group_value AS entry_endpoint, value AS mean_ms FROM instana_trace_groups WHERE metric = 'latency.mean' AND service = 'ratings' ORDER BY mean_ms DESC LIMIT 10"
+        description: Entry endpoints whose traces touching a service are slowest.
+    fixtures:
+      - file: trace_groups.json
+        note: "Verbatim 200 example of getTraceGroups (POST /api/application-monitoring/analyze/trace-groups) from the Instana OpenAPI spec."
+        filters: {metric: latency.sum}
+        expect_rows: 1
+        expect_columns: {group_value: GET /api/cart-total, value: 31.0, metric_key: latency.sum, total_hits: 2595}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getTraceGroups
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_trace_calls
+    title: Trace detail (calls of one trace)
+    description: >-
+      All calls (spans) of one trace: one row per call with parent, name, destination service
+      and endpoint, timestamp, duration, self/network time and error count. Filter on trace_id
+      (required).
+    kind: spans
+    request:
+      method: GET
+      path: "/api/application-monitoring/v2/analyze/traces/{{ filters.trace_id | urlencode }}"
+      query:
+        retrievalSize: 200
+    filters:
+      - {column: trace_id, required: true, description: "Trace id (instana_traces.trace_id)", examples: [daa9141549aea210]}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: span_id, path: id, description: "Call id"}
+      - {name: parent_id, path: parentId}
+      - {name: foreign_parent_id, path: foreignParentId}
+      - {name: name, path: name, description: "Call name, e.g. GET /api/shipping/cities/dk"}
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms}
+      - {name: duration_ms, type: DOUBLE, path: duration}
+      - {name: self_time_ms, type: DOUBLE, path: minSelfTime}
+      - {name: network_time_ms, type: DOUBLE, path: networkTime}
+      - {name: error_count, type: BIGINT, path: errorCount}
+      - {name: call_count, type: BIGINT, path: callCount, description: "Calls batched into this row"}
+      - {name: service, path: "destination.service.label"}
+      - {name: service_id, path: "destination.service.id"}
+      - {name: endpoint, path: "destination.endpoint.label"}
+      - {name: resource, path: "destination.endpoint.label"}
+      - {name: endpoint_type, path: "destination.endpoint.type"}
+      - {name: technologies, type: JSON, path: "destination.technologies"}
+      - {name: can_load_more, type: BOOLEAN, path: "$.canLoadMore"}
+      - {name: trace_id, filter_only: true, description: "Trace id requested (the call rows do not repeat it)"}
+    pitfalls:
+      - "Only the first 200 calls are fetched; can_load_more = true means the trace is larger."
+    examples:
+      - sql: "SELECT ts, service, name, duration_ms, self_time_ms, error_count, span_id, parent_id FROM instana_trace_calls WHERE trace_id = 'daa9141549aea210' ORDER BY ts"
+        description: Walk one trace call by call to find the failing or slow hop.
+    fixtures:
+      - file: trace_download.json
+        note: "Verbatim 200 example of getTraceDownload (GET /api/application-monitoring/v2/analyze/traces/{id}) from the Instana OpenAPI spec."
+        filters: {trace_id: daa9141549aea210}
+        expect_rows: 1
+        expect_columns: {span_id: daa9141549aea210, name: GET /api/shipping/cities/dk, ts: "2023-07-05T08:09:59.223Z", duration_ms: 30.0, error_count: 0, service: nginx-web, endpoint: upstream shipping, endpoint_type: HTTP}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getTraceDownload
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_service_map
+    title: Service topology (call paths)
+    description: >-
+      Service-to-service connections in the window with calls, mean latency and error rate:
+      one row per (caller, callee). Filter on application_id (+ boundary_scope) and ts. Names are
+      resolved from the response's service list.
+    kind: entities
+    request:
+      method: GET
+      path: /api/application-monitoring/topology/services
+      query:
+        windowSize: "{{ time.range_s * 1000 }}"
+        to: "{{ time.end | epoch_ms }}"
+        applicationId: "{{ filters.application_id }}"
+        applicationBoundaryScope: "{{ filters.boundary_scope }}"
+    filters:
+      - {column: application_id, description: "Only connections in this application perspective"}
+      - {column: boundary_scope, description: "INBOUND (default with application_id) | ALL"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 7d}
+    response:
+      rows_path: "$.connections[*]"
+    columns:
+      - {name: source_id, path: from, description: "Calling service id"}
+      - {name: source, expr: "(root.services | selectattr('id', 'equalto', _['from']) | map(attribute='label') | first) or _['from']", description: "Calling service name"}
+      - {name: target_id, path: to}
+      - {name: target, expr: "(root.services | selectattr('id', 'equalto', _['to']) | map(attribute='label') | first) or _['to']", description: "Called service name"}
+      - {name: calls, type: BIGINT, path: calls}
+      - {name: latency_ms, type: DOUBLE, path: latency, description: "Mean latency of the calls (ms)"}
+      - {name: error_rate, type: DOUBLE, path: errorRate, description: "0..1"}
+      - {name: application_id, filter_only: true}
+      - {name: boundary_scope, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT source, target, calls, error_rate, latency_ms FROM instana_service_map WHERE target = 'payment' OR source = 'payment' ORDER BY error_rate DESC"
+        description: Upstream callers and downstream dependencies of one service with their health.
+    fixtures:
+      - file: services_map.json
+        note: "Verbatim 200 example of getServicesMap (GET /api/application-monitoring/topology/services) from the Instana OpenAPI spec (the caller id is not in its services list, so source falls back to the id)."
+        expect_rows: 1
+        expect_columns: {source_id: 8bfb4e1aa590eab8f08f837b97acf5803a5737ed, source: 8bfb4e1aa590eab8f08f837b97acf5803a5737ed, target: robot-shop, calls: 2179, latency_ms: 1.6103717301514455, error_rate: 0.0}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getServicesMap
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_events
+    title: Events (incidents, issues, changes)
+    description: >-
+      Events in the window: incidents (correlated, with probable cause), issues (alerts on one
+      entity) and changes (deployments, config changes, restarts, k8s events). One row per event.
+      Filter on type (incident | issue | change; IN allowed), ts, and only_new = true to exclude
+      events triggered before the window.
+    kind: events
+    request:
+      method: GET
+      path: /api/events
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        eventTypeFilters: "{{ filters.type | as_list | map('upper') | list if filters.type else None }}"
+        excludeTriggeredBefore: "{{ 'true' if filters.only_new else None }}"
+        includeAgentMonitoringIssues: "{{ 'true' if filters.include_agent_issues else None }}"
+        includeKubernetesInfoEvents: "{{ 'true' if filters.include_k8s_info else None }}"
+    filters:
+      - {column: type, ops: ["=", "in"], fan_out: false, description: "incident | issue | change (lower case in results)", examples: [incident]}
+      - {column: only_new, type: BOOLEAN, description: "true = exclude events that started before the window"}
+      - {column: include_agent_issues, type: BOOLEAN, description: "true = include agent monitoring issues"}
+      - {column: include_k8s_info, type: BOOLEAN, description: "true = include Kubernetes info events"}
+    time: {column: ts, default_lookback: 6h, max_window: 31d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: eventId}
+      - {name: type, path: type, description: "incident | issue | change"}
+      - {name: state, path: state, description: "open | closed"}
+      - {name: title, path: problem}
+      - {name: message, path: detail}
+      - {name: ts, type: TIMESTAMP, path: start, transform: epoch_ms, description: "Event start"}
+      - {name: end_ts, type: TIMESTAMP, path: end, transform: epoch_ms}
+      - {name: severity_code, type: BIGINT, path: severity, description: "10 critical, 5 warning, negative for changes/info"}
+      - {name: severity, expr: "('critical' if _.severity >= 10 else ('warning' if _.severity >= 5 else 'info')) if _.severity is number else None", description: "critical | warning | info (derived from severity_code)"}
+      - {name: entity_name, path: entityName, description: "Entity type name, e.g. Kubernetes Pod, Service, Host, .NET App"}
+      - {name: entity_label, path: entityLabel, description: "Affected entity label, e.g. the service or pod name"}
+      - {name: service, expr: "_.entityLabel if (_.entityName or '') | lower == 'service' else None", description: "entity_label when the affected entity is a service"}
+      - {name: entity_type, path: entityType, description: "APPLICATION, SERVICE, ENDPOINT, INFRASTRUCTURE, ..."}
+      - {name: short_code, path: shortCode}
+      - {name: event_specification_id, path: eventSpecificationId, description: "Built-in/custom event or Smart Alert config that created it"}
+      - {name: triggering_event_id, path: triggeringEventId}
+      - {name: probable_cause, type: JSON, path: probableCause, description: "Incidents only: probable root cause"}
+      - {name: recent_events, type: JSON, path: recentEvents, description: "Incidents only: related event ids"}
+      - {name: metrics, type: JSON, path: metrics, description: "Metrics behind the event [{metricName, snapshotId, entityId}]"}
+      - {name: snapshot_id, path: snapshotId}
+      - {name: only_new, type: BOOLEAN, filter_only: true}
+      - {name: include_agent_issues, type: BOOLEAN, filter_only: true}
+      - {name: include_k8s_info, type: BOOLEAN, filter_only: true}
+    pitfalls:
+      - "Events active in the window are returned even if they started earlier: filter state = 'open' for what is still firing, or only_new = true."
+      - "Change events include very chatty Kubernetes events (pulled, scheduled); filter title/entity_name in SQL."
+    examples:
+      - sql: >-
+          SELECT ts, type, severity, state, title, entity_name, entity_label FROM instana_events
+          WHERE type IN ('incident', 'issue') AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY ts DESC
+        description: Incidents and issues around the incident window.
+      - sql: "SELECT ts, title, message, entity_label FROM instana_events WHERE type = 'change' AND ts >= TIMESTAMP '2026-10-01 08:00:00' ORDER BY ts DESC LIMIT 100"
+        description: Changes (deploys, restarts, config changes) before the incident.
+    fixtures:
+      - file: events.json
+        note: "Verbatim 200 example of getEvents (GET /api/events) from the Instana OpenAPI spec."
+        expect_rows: 1
+        expect_columns: {id: gM73SycATrOFMcL5qspByQ, type: incident, state: open, title: New Event-test-01, ts: "2024-02-01T08:00:19Z", severity_code: 5, severity: warning, entity_label: powershell.exe, entity_type: INFRASTRUCTURE}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getEvents
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_event_detail
+    title: One event (incident detail)
+    description: >-
+      One event by id with its metadata, probable cause and related events. Filter on event_id
+      (required). Use after instana_events to read an incident's probable cause.
+    kind: incidents
+    request:
+      method: GET
+      path: "/api/events/{{ filters.event_id | urlencode }}"
+      query: {includeMetadata: "true"}
+      accept_status: [404]
+    filters:
+      - {column: event_id, required: true, description: "Event id (instana_events.id)", examples: [LZOGo1lXR4WeCB2ftgtGGQ]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: event_id, path: eventId}
+      - {name: type, path: type}
+      - {name: state, path: state}
+      - {name: title, path: problem}
+      - {name: message, path: detail}
+      - {name: ts, type: TIMESTAMP, path: start, transform: epoch_ms}
+      - {name: end_ts, type: TIMESTAMP, path: end, transform: epoch_ms}
+      - {name: severity_code, type: BIGINT, path: severity}
+      - {name: entity_name, path: entityName}
+      - {name: entity_label, path: entityLabel}
+      - {name: entity_type, path: entityType}
+      - {name: probable_cause, type: JSON, path: probableCause}
+      - {name: recent_events, type: JSON, path: recentEvents}
+      - {name: metadata, type: JSON, path: metadata}
+      - {name: metrics, type: JSON, path: metrics}
+      - {name: snapshot_id, path: snapshotId}
+    examples:
+      - sql: "SELECT title, message, entity_label, probable_cause, recent_events FROM instana_event_detail WHERE event_id = 'LZOGo1lXR4WeCB2ftgtGGQ'"
+        description: Read one incident's probable cause and related events.
+    fixtures:
+      - file: event.json
+        note: "Verbatim 200 example of getEvent (GET /api/events/{eventId}) from the Instana OpenAPI spec."
+        filters: {event_id: LZOGo1lXR4WeCB2ftgtGGQ}
+        expect_rows: 1
+        expect_columns: {event_id: LZOGo1lXR4WeCB2ftgtGGQ, type: change, state: closed, title: Pulled, severity_code: -2, entity_name: Kubernetes Pod}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getEvent
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_snapshots
+    title: Infrastructure snapshots (hosts, containers, processes, pods...)
+    description: >-
+      Infrastructure entities (snapshots) of one plugin type matching a Dynamic Focus query:
+      one row per snapshot with label, host and tags. Filter on plugin (host, docker,
+      kubernetesPod, jvmRuntimePlatform, ...), query (DFQ, e.g. entity.kubernetes.namespace:shop),
+      offline = true (also entities that went away during the window) and ts.
+    kind: entities
+    request:
+      method: GET
+      path: /api/infrastructure-monitoring/snapshots
+      query:
+        plugin: "{{ filters.plugin }}"
+        query: "{{ filters.query }}"
+        to: "{{ time.end | epoch_ms }}"
+        windowSize: "{{ time.range_s * 1000 }}"
+        size: "{{ [limit or 1000, 1000] | min }}"
+        offline: "{{ 'true' if filters.offline else None }}"
+    filters:
+      - {column: plugin, description: "Entity type plugin: host, docker, kubernetesPod, kubernetesNode, process, jvmRuntimePlatform, ...", examples: [host]}
+      - {column: query, description: "Dynamic Focus Query (query language instana_dfq)", examples: ['entity.zone:"eu-west-1"']}
+      - {column: offline, type: BOOLEAN, description: "true = include snapshots that were online at any time in the window (default: online at the end)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: snapshot_id, path: snapshotId}
+      - {name: plugin, path: plugin}
+      - {name: label, path: label, description: "Friendly entity label"}
+      - {name: host, path: host, description: "Host id the entity runs on"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: from_ts, type: TIMESTAMP, path: from, transform: epoch_ms, description: "First seen in the window"}
+      - {name: to_ts, type: TIMESTAMP, path: to, transform: epoch_ms, description: "Gone at (NULL = still online)"}
+      - {name: data, type: JSON, path: data}
+      - {name: query, filter_only: true}
+      - {name: offline, type: BOOLEAN, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Snapshot queries count against the 1,000 calls/hour infrastructure limit."
+      - "host is the agent's host id (e.g. EC2-i-...), label the friendly name; filter in SQL on either."
+    examples:
+      - sql: "SELECT label, host, snapshot_id, to_ts FROM instana_snapshots WHERE plugin = 'host' ORDER BY label"
+        description: Host inventory (hosts role).
+      - sql: "SELECT label, to_ts FROM instana_snapshots WHERE plugin = 'kubernetesPod' AND query = 'entity.kubernetes.namespace:shop' AND offline = true AND to_ts IS NOT NULL"
+        description: Pods of a namespace that went away during the window.
+    fixtures:
+      - file: snapshots.json
+        note: "Verbatim 200 example of getSnapshots (GET /api/infrastructure-monitoring/snapshots) from the Instana OpenAPI spec."
+        filters: {plugin: host}
+        expect_rows: 3
+        expect_columns: {snapshot_id: ZoKkksp277FMLSXIghPKdjZcvfE, plugin: host, label: ip-10-255-200-30.instana.io, host: EC2-i-03afb0ac5188f57f3, to_ts: null}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getSnapshots
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_infrastructure_metrics
+    title: Infrastructure metrics
+    description: >-
+      Time series of infrastructure metrics (cpu.user, memory.used, load.1min, ...) for entities of
+      one plugin selected by a Dynamic Focus query or snapshot ids: one row per (entity, metric,
+      timestamp). Filter on plugin (required), metric (required; IN sends up to 5 metrics in one
+      call), query (DFQ) or snapshot_id, rollup (seconds) and ts.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/infrastructure-monitoring/metrics
+      body:
+        plugin: "{{ filters.plugin }}"
+        metrics: "{{ filters.metric | as_list }}"
+        query: "{{ filters.query }}"
+        snapshotIds: "{{ filters.snapshot_id | as_list if filters.snapshot_id else None }}"
+        rollup: "{{ filters.rollup or (([1, 5, 60, 300, 3600] | select('ge', [time.range_s / 600, 60 if ((now_utc() - time.end).total_seconds() > 86400) else 1] | max) | first) or 3600) }}"
+        timeFrame:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+    filters:
+      - {column: plugin, required: true, description: "Entity type plugin: host, docker, kubernetesPod, jvmRuntimePlatform, ...", examples: [host]}
+      - {column: metric, required: true, ops: ["=", "in"], fan_out: false, description: "Metric id(s) of the plugin (max 5 per call), e.g. cpu.user, cpu.used, memory.used, load.1min", examples: [cpu.user]}
+      - {column: query, description: "Dynamic Focus Query; required unless snapshot_id is given", examples: ['entity.host.name:ip-10-255-200-30.instana.io']}
+      - {column: snapshot_id, ops: ["=", "in"], fan_out: false, description: "Snapshot id(s) from instana_snapshots (max 30 entities per call)"}
+      - {column: rollup, type: BIGINT, description: "1, 5, 60, 300 or 3600 seconds (default: smallest giving <= 600 points; >= 60 for windows older than a day)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d, retention: 396d}
+    response:
+      rows_path: "$.items[*]"
+      expand:
+        - {entries: metrics, as: m}
+        - {explode: "@m.value", as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_ms}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Metric value (cpu.* as 0..1 fractions on host)"}
+      - {name: metric, path: "@m.key"}
+      - {name: snapshot_id, path: snapshotId}
+      - {name: label, path: label}
+      - {name: host, path: host}
+      - {name: plugin, path: plugin}
+      - {name: tags, type: JSON, path: tags}
+      - {name: query, filter_only: true}
+      - {name: rollup, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "At most 600 points per metric, 30 entities per call and 1,000 calls/hour: query a few entities, not 'all hosts'."
+      - "The DFQ must select entities AT or ABOVE the plugin's level (query entity.selfType:java with plugin host returns nothing)."
+      - "An empty or '*' query without snapshot ids is rejected (HTTP 400)."
+    examples:
+      - sql: >-
+          SELECT label, metric, max(value) AS peak FROM instana_infrastructure_metrics
+          WHERE plugin = 'host' AND metric IN ('cpu.user', 'memory.used') AND query = 'entity.zone:"eu-west-1"'
+          GROUP BY label, metric ORDER BY peak DESC
+        description: Peak CPU and memory of hosts in a zone.
+    fixtures:
+      - file: infrastructure_metrics_schema.json
+        note: "Built strictly from the InfrastructureMetricResult schema (items[] of MetricItem: snapshotId, plugin, from, to, tags, label, host, metrics) - the spec has no 200 example; metric values use the [[epoch_ms, value]] pairs of the documented application-metric examples, entity values reused from the getSnapshots example."
+        filters: {plugin: host, metric: [cpu.user, memory.used]}
+        expect_rows: 3
+        expect_columns: {ts: "2024-02-01T11:00:00Z", value: 0.12, metric: cpu.user, label: ip-10-255-200-30.instana.io, snapshot_id: ZoKkksp277FMLSXIghPKdjZcvfE}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getInfrastructureMetrics
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_releases
+    title: Releases (deployment markers)
+    description: >-
+      Release markers (deployments sent to Instana by pipelines) in the window with the
+      applications and services they are scoped to. One row per release. Filter on ts.
+    kind: changes
+    request:
+      method: GET
+      path: /api/releases
+      query:
+        from: "{{ time.start | epoch_ms }}"
+        to: "{{ time.end | epoch_ms }}"
+        maxResults: "{{ [limit or 1000, 1000] | min }}"
+    time: {column: ts, default_lookback: 24h, max_window: 90d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: title, path: name, description: "Release name, e.g. frontend/release-2000"}
+      - {name: version, path: name}
+      - {name: ts, type: TIMESTAMP, path: start, transform: epoch_ms, description: "Release time"}
+      - {name: last_updated, type: TIMESTAMP, path: lastUpdated, transform: epoch_ms}
+      - {name: service, expr: "((_.services or []) | map(attribute='name') | select | join(', ')) or ((_.scopes or []) | map(attribute='serviceName') | select | join(', ')) or None", description: "Scoped service names (comma-separated)"}
+      - {name: application, expr: "((_.applications or []) | map(attribute='name') | select | join(', ')) or ((_.scopes or []) | map(attribute='applicationName') | select | join(', ')) or None"}
+      - {name: services, type: JSON, path: services}
+      - {name: applications, type: JSON, path: applications}
+      - {name: scopes, type: JSON, path: scopes}
+    pitfalls:
+      - "Releases exist only when a pipeline posts them (POST /api/releases); none in the window is not proof nothing was deployed: also check instana_events type = 'change'."
+    examples:
+      - sql: "SELECT ts, title, service, application FROM instana_releases WHERE ts >= TIMESTAMP '2026-10-01 00:00:00' ORDER BY ts DESC"
+        description: Deployments before the incident.
+    fixtures:
+      - file: releases.json
+        note: "Verbatim 200 example of getAllReleases (GET /api/releases) from the Instana OpenAPI spec."
+        expect_rows: 1
+        expect_columns: {id: Tiu16hLCTniHDtHb_uDV1w, title: "demo-app/main-**", ts: "2024-02-28T03:43:02Z", service: null}
+      - file: releases_scoped.json
+        note: "Built strictly from the ReleaseWithMetadata schema (applications[], services[] with scopedTo) using the field examples given in the schema descriptions."
+        expect_rows: 1
+        expect_columns: {title: frontend/release-2000, service: payment, application: app1, ts: "2025-03-19T02:06:16Z"}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getAllReleases
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_logs
+    title: Logs
+    description: >-
+      Log records in the window (newest first): one row per log line with level, message,
+      trace id, host, container and pod. Filter on service (exact service.name), level
+      (log.level, e.g. ERROR), message (contains, log.message), host (host.name), pod
+      (kubernetes.pod.name), namespace (kubernetes.namespace.name), stream (log.streamName) and ts.
+      Up to 1,000 lines (5 pages of 200; the API allows offsets up to 2,000).
+    kind: logs
+    request:
+      method: POST
+      path: /api/logging/logs/getLogs/v1
+      body:
+        timeConfig:
+          to: "{{ time.end | epoch_ms }}"
+          windowSize: "{{ time.range_s * 1000 }}"
+          autoRefresh: false
+        requestedTags: [log.traceId, log.applications, process.id, host.name, docker.containerName, kubernetes.pod.name, kubernetes.namespace.name, kubernetes.container.name, log.level, log.exception.message]
+        tagFilterExpression:
+          type: EXPRESSION
+          logicalOperator: AND
+          elements:
+            - "{{ {'type': 'TAG_FILTER', 'name': 'service.name', 'operator': 'EQUALS', 'entity': 'DESTINATION', 'value': filters.service} if filters.service else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'log.level', 'operator': 'EQUALS', 'entity': 'NOT_APPLICABLE', 'value': filters.level} if filters.level else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'log.message', 'operator': 'CONTAINS', 'entity': 'NOT_APPLICABLE', 'value': filters.query} if filters.query else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'host.name', 'operator': 'EQUALS', 'entity': 'NOT_APPLICABLE', 'value': filters.host} if filters.host else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'kubernetes.pod.name', 'operator': 'EQUALS', 'entity': 'NOT_APPLICABLE', 'value': filters.pod} if filters.pod else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'kubernetes.namespace.name', 'operator': 'EQUALS', 'entity': 'NOT_APPLICABLE', 'value': filters.namespace} if filters.namespace else None }}"
+            - "{{ {'type': 'TAG_FILTER', 'name': 'log.streamName', 'operator': 'EQUALS', 'entity': 'NOT_APPLICABLE', 'value': filters.stream} if filters.stream else None }}"
+        retrievalSize: 200
+        offset: 0
+        orderDirection: DESC
+    filters:
+      - {column: service, description: "Exact service.name (DESTINATION)", examples: [dispatch]}
+      - {column: level, description: "log.level value, e.g. ERROR, WARN, INFO", examples: [ERROR]}
+      - {column: query, description: "Substring of the log message (log.message CONTAINS)", examples: [timeout]}
+      - {column: host, description: "Exact host.name", variants: hostname}
+      - {column: pod, description: "Exact kubernetes.pod.name"}
+      - {column: namespace, description: "Exact kubernetes.namespace.name"}
+      - {column: stream, description: "log.streamName, e.g. log.go, stdout"}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    pagination: {type: offset, offset_param: body.offset, limit_param: body.retrievalSize, page_size: 200, max_pages: 5, has_more_path: "$.canLoadMore"}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: epoch_ms, description: "Log timestamp (the API sends epoch ms as a string)"}
+      - {name: level, path: logLevel}
+      - {name: message, path: message}
+      - {name: trace_id, path: traceId}
+      - {name: host, path: hostName}
+      - {name: pod, path: kubernetesPodName}
+      - {name: container, path: dockerContainerName}
+      - {name: process_id, path: processId}
+      - {name: application_ids, type: JSON, path: applicationIds}
+      - {name: tags, type: JSON, path: tags, description: "Other requested tags [{name, key, value}] (namespace, container, exception message, custom fields)"}
+      - {name: total_hits, type: BIGINT, path: "$.totalHits"}
+      - {name: service, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: namespace, filter_only: true}
+      - {name: stream, filter_only: true}
+    pitfalls:
+      - "Only logs ingested by Instana Log Management (or collected by the agent) are searchable; an empty result can mean logs live elsewhere."
+      - "Offsets stop at 2,000: narrow by level/service/time instead of paging; total_hits shows the full match count."
+      - "A tag unknown to log management (e.g. a service.name never attached to logs) matches nothing; try host or pod."
+    examples:
+      - sql: >-
+          SELECT ts, level, host, pod, message FROM instana_logs
+          WHERE service = 'dispatch' AND level = 'ERROR'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY ts DESC LIMIT 100
+        description: Error logs of a service in the incident window.
+      - sql: "SELECT ts, message, trace_id FROM instana_logs WHERE query = 'connection refused' ORDER BY ts DESC LIMIT 50"
+        description: Logs containing an error string, with trace ids to pivot to instana_trace_calls.
+    fixtures:
+      - file: logs.json
+        note: "Verbatim '200 Logs' example of getLogs (POST /api/logging/logs/getLogs/v1) from the Instana OpenAPI spec."
+        expect_rows: 1
+        expect_columns: {ts: "2009-02-13T23:31:30Z", level: INFO, message: Test Message, trace_id: 000000000000000043500e1469c2f17a, host: test_host_name, pod: test_kubernetes_pod_name, total_hits: 225}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#getLogs
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_smart_alert_configs
+    title: Application Smart Alert configurations
+    description: >-
+      Smart Alert configurations (alert rules) of one application perspective: one row per
+      config with rule (metric, aggregation), threshold, time threshold, severity and scope.
+      Filter on application_id (required) and optionally alert_id.
+    kind: entities
+    request:
+      method: GET
+      path: /api/events/settings/application-alert-configs
+      query:
+        applicationId: "{{ filters.application_id }}"
+        alertIds: "{{ filters.alert_id | as_list if filters.alert_id else None }}"
+    filters:
+      - {column: application_id, required: true, description: "Application perspective id (instana_applications.id)", examples: [IYS1XOEcTNiT1eOD8pxgXg]}
+      - {column: alert_id, ops: ["=", "in"], fan_out: false, description: "Smart Alert config id(s)"}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: alert_id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: severity_code, type: BIGINT, path: severity, description: "5 warning, 10 critical (deprecated field; see rules for per-threshold severities)"}
+      - {name: alert_type, path: "rule.alertType"}
+      - {name: metric, path: "rule.metricName"}
+      - {name: aggregation, path: "rule.aggregation"}
+      - {name: threshold_operator, path: "threshold.operator"}
+      - {name: threshold_value, type: DOUBLE, path: "threshold.value"}
+      - {name: threshold, type: JSON, path: threshold}
+      - {name: time_threshold, type: JSON, path: timeThreshold}
+      - {name: rules, type: JSON, path: rules, description: "Rules with multiple thresholds/severities (newer configs)"}
+      - {name: granularity_ms, type: BIGINT, path: granularity}
+      - {name: evaluation_type, path: evaluationType, description: "PER_AP, PER_AP_SERVICE, PER_AP_ENDPOINT, CUSTOM"}
+      - {name: boundary_scope, path: boundaryScope}
+      - {name: triggering, type: BOOLEAN, path: triggering, description: "Also opens an incident"}
+      - {name: tag_filter_expression, type: JSON, path: tagFilterExpression}
+      - {name: url, path: displayUrl}
+      - {name: created, type: TIMESTAMP, path: created, transform: epoch_ms}
+      - {name: application_id, path: applicationId}
+    examples:
+      - sql: "SELECT name, metric, aggregation, threshold_operator, threshold_value, time_threshold, enabled FROM instana_smart_alert_configs WHERE application_id = 'IYS1XOEcTNiT1eOD8pxgXg'"
+        description: Alert rules (with thresholds) defined on an application perspective.
+    fixtures:
+      - file: smart_alert_configs.json
+        note: "Verbatim 200 example of findAllActiveApplicationAlertConfigs (GET /api/events/settings/application-alert-configs) from the Instana OpenAPI spec."
+        filters: {application_id: IYS1XOEcTNiT1eOD8pxgXg}
+        expect_rows: 1
+        expect_columns: {alert_id: A5VvSXR_SVG6z7YbnIHiHQ, name: Erroneous call rate is higher than normal, metric: errors, aggregation: MEAN, threshold_operator: ">=", threshold_value: 0.04, granularity_ms: 600000, evaluation_type: PER_AP, enabled: true}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#findAllActiveApplicationAlertConfigs
+
+  # ------------------------------------------------------------------------------------------
+  - name: instana_smart_alert_config
+    title: One application Smart Alert configuration (by id)
+    description: >-
+      One application Smart Alert configuration by its id (no application id needed): rule
+      (metric, aggregation), threshold, time threshold, severity, scope and tag filter. Filter on
+      alert_id (required; the alert/event specification id carried by an Instana alert). Use to
+      read the rule behind an incident.
+    kind: entities
+    request:
+      method: GET
+      path: "/api/events/settings/application-alert-configs/{{ filters.alert_id | urlencode }}"
+      accept_status: [404]
+    filters:
+      - {column: alert_id, required: true, description: "Smart Alert config id (instana_smart_alert_configs.alert_id / event_specification_id of an event)", examples: [A5VvSXR_SVG6z7YbnIHiHQ]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: alert_id, path: id}
+      - {name: name, path: name}
+      - {name: description, path: description}
+      - {name: enabled, type: BOOLEAN, path: enabled}
+      - {name: severity_code, type: BIGINT, path: severity, description: "5 warning, 10 critical (deprecated field; see rules for per-threshold severities)"}
+      - {name: alert_type, path: "rule.alertType"}
+      - {name: metric, path: "rule.metricName"}
+      - {name: aggregation, path: "rule.aggregation"}
+      - {name: threshold_operator, path: "threshold.operator"}
+      - {name: threshold_value, type: DOUBLE, path: "threshold.value"}
+      - {name: threshold, type: JSON, path: threshold}
+      - {name: time_threshold, type: JSON, path: timeThreshold}
+      - {name: rules, type: JSON, path: rules}
+      - {name: granularity_ms, type: BIGINT, path: granularity}
+      - {name: evaluation_type, path: evaluationType}
+      - {name: boundary_scope, path: boundaryScope}
+      - {name: application_id, path: applicationId}
+      - {name: tag_filter_expression, type: JSON, path: tagFilterExpression}
+      - {name: url, path: displayUrl}
+    pitfalls:
+      - "Only application Smart Alerts live here; infrastructure, website, mobile and synthetic Smart Alerts and built-in events have their own settings endpoints (a 404 then means 'not an application alert', not 'deleted')."
+    examples:
+      - sql: "SELECT name, metric, aggregation, threshold_operator, threshold_value, time_threshold, evaluation_type FROM instana_smart_alert_config WHERE alert_id = 'A5VvSXR_SVG6z7YbnIHiHQ'"
+        description: The threshold and evaluation window of the Smart Alert that fired.
+    fixtures:
+      - file: smart_alert_config.json
+        note: "The by-id response is the same ApplicationAlertConfigWithMetadata object as the list items: fixture = the object of the verbatim 200 example of findAllActiveApplicationAlertConfigs (Instana OpenAPI spec)."
+        filters: {alert_id: A5VvSXR_SVG6z7YbnIHiHQ}
+        expect_rows: 1
+        expect_columns: {alert_id: A5VvSXR_SVG6z7YbnIHiHQ, metric: errors, aggregation: MEAN, threshold_operator: ">=", threshold_value: 0.04, application_id: IYS1XOEcTNiT1eOD8pxgXg}
+    docs_url: https://developer.ibm.com/apis/catalog/instana--instana-rest-api/api/API--instana--instana-rest-api-documentation#findApplicationAlertConfig
+
+roles:
+  metrics:
+    - table: instana_service_metrics
+      filters: {service: "{{ service or '' }}", metric: "{{ ['errors.mean', 'latency.p95', 'calls.sum'] }}"}
+      columns: {ts: ts, value: value, metric: metric, service: service}
+      query_language: instana_metric
+    - table: instana_infrastructure_metrics
+      columns: {ts: ts, value: value, metric: metric, host: label}
+      query_language: instana_dfq
+  services:
+    table: instana_services
+    columns: {id: id, service: service}
+  hosts:
+    table: instana_snapshots
+    filters: {plugin: host}
+    columns: {id: snapshot_id, host: label}
+  service_map:
+    table: instana_service_map
+    columns: {source: source, target: target, calls: calls, error_rate: error_rate}
+  traces:
+    table: instana_traces
+    filters: {service: "{{ service or '' }}", error_only: "{{ true if error_only else '' }}"}
+    columns: {ts: ts, trace_id: trace_id, service: entry_service, duration_ms: duration_ms, title: title}
+  trace_detail:
+    table: instana_trace_calls
+    columns: {ts: ts, span_id: span_id, service: service, duration_ms: duration_ms, resource: name}
+  logs:
+    table: instana_logs
+    filters: {service: "{{ service or '' }}", level: "{{ 'ERROR' if error_only else '' }}", host: "{{ host or '' }}", query: "{{ query or '' }}"}
+    columns: {ts: ts, message: message, level: level, host: host, trace_id: trace_id}
+  active_alerts:
+    table: instana_events
+    filters: {type: "{{ ['incident', 'issue'] }}", state: open}
+    columns: {id: id, ts: ts, title: title, state: state, severity: severity, service: entity_label}
+  alert_history:
+    table: instana_events
+    filters: {type: "{{ ['incident', 'issue'] }}"}
+    columns: {id: id, ts: ts, title: title, state: state, severity: severity, service: entity_label}
+  incidents:
+    table: instana_events
+    filters: {type: incident}
+    columns: {id: id, ts: ts, title: title, state: state, severity: severity, service: entity_label}
+  change_events:
+    - table: instana_releases
+      columns: {ts: ts, title: title, service: service, version: version}
+    - table: instana_events
+      filters: {type: change}
+      columns: {ts: ts, title: title, service: entity_label}
+  alert_rules:
+    table: instana_smart_alert_config
+    filters: {alert_id: "{{ rule_id or '' }}"}
+    columns: {id: alert_id, name: name, threshold: threshold_value, query: metric}
+    notes: "Application Smart Alerts only; the alert's event specification id is the config id."

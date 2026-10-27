@@ -1,0 +1,93 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "ClusterName",
+          "type": "string"
+        },
+        {
+          "name": "Namespace",
+          "type": "string"
+        },
+        {
+          "name": "Name",
+          "type": "string"
+        },
+        {
+          "name": "ObjectKind",
+          "type": "string"
+        },
+        {
+          "name": "Reason",
+          "type": "string"
+        },
+        {
+          "name": "Message",
+          "type": "string"
+        },
+        {
+          "name": "KubeEventType",
+          "type": "string"
+        },
+        {
+          "name": "Count",
+          "type": "real"
+        },
+        {
+          "name": "FirstSeen",
+          "type": "datetime"
+        },
+        {
+          "name": "LastSeen",
+          "type": "datetime"
+        },
+        {
+          "name": "Computer",
+          "type": "string"
+        },
+        {
+          "name": "SourceComponent",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:43:00.0000000Z",
+          "aks-shop-prod",
+          "checkout",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "Pod",
+          "BackOff",
+          "Back-off restarting failed container checkout-api in pod checkout-api-7d9c6b5f4-x2k8p_checkout(5b0c1f6e-1d2a-4c3b-9e8f-7a6b5c4d3e2f)",
+          "Warning",
+          14,
+          "2026-10-01T11:31:12Z",
+          "2026-10-01T11:42:40Z",
+          "aks-nodepool1-12345678-vmss000002",
+          "kubelet"
+        ],
+        [
+          "2026-10-01T11:43:00.0000000Z",
+          "aks-shop-prod",
+          "checkout",
+          "checkout-api-7d9c6b5f4-m9q2z",
+          "Pod",
+          "Unhealthy",
+          "Readiness probe failed: HTTP probe failed with statuscode: 503",
+          "Warning",
+          37,
+          "2026-10-01T11:39:02Z",
+          "2026-10-01T11:42:55Z",
+          "aks-nodepool1-12345678-vmss000001",
+          "kubelet"
+        ]
+      ]
+    }
+  ]
+}

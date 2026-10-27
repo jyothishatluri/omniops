@@ -1,0 +1,58 @@
+{
+  "summaries": [
+    {
+      "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "rootServiceName": "webapp",
+      "rootOperationName": "POST /api/orders",
+      "minStartTimeUnixNano": "1792478178000000000",
+      "maxEndTimeUnixNano": "1792478179000000000",
+      "spanCount": 5,
+      "errorSpanCount": 3,
+      "services": [
+        {
+          "name": "api-gateway",
+          "spanCount": 1
+        },
+        {
+          "name": "order-service",
+          "spanCount": 2,
+          "errorSpanCount": 2
+        },
+        {
+          "name": "payment-service",
+          "spanCount": 1,
+          "errorSpanCount": 1
+        },
+        {
+          "name": "webapp",
+          "spanCount": 1
+        }
+      ]
+    },
+    {
+      "traceId": "00000000000000000b7ad6b716920333",
+      "rootServiceName": "webapp",
+      "rootOperationName": "POST /api/orders",
+      "minStartTimeUnixNano": "1792478238000000000",
+      "maxEndTimeUnixNano": "1792478238950000000",
+      "spanCount": 4,
+      "errorSpanCount": 1,
+      "orphanSpanCount": 1,
+      "services": [
+        {
+          "name": "api-gateway",
+          "spanCount": 1
+        },
+        {
+          "name": "order-service",
+          "spanCount": 2,
+          "errorSpanCount": 1
+        },
+        {
+          "name": "webapp",
+          "spanCount": 1
+        }
+      ]
+    }
+  ]
+}

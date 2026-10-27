@@ -1,0 +1,533 @@
+# Grafana Pyroscope (continuous profiling): self-hosted Pyroscope 1.x/2.x and Grafana Cloud
+# Profiles. Query API = Connect RPCs on the query frontend: POST /querier.v1.QuerierService/<Method>
+# with a JSON body; times are MILLISECONDS since epoch; responses are protojson (camelCase,
+# int64 as strings, zero values omitted).
+# Docs: https://grafana.com/docs/pyroscope/latest/reference-server-api/ (Connect API) - request
+# fields there; response shapes from the protobuf the docs link to:
+#   api/querier/v1/querier.proto (ProfileTypesResponse, SeriesResponse, SelectSeriesResponse,
+#   SelectMergeStacktracesResponse/FlameGraph, DiffResponse/FlameGraphDiff) and
+#   api/types/v1/types.proto (ProfileType, Labels, LabelPair, Series, Point, Exemplar,
+#   LabelNames/LabelValues responses), grafana/pyroscope main, October 2026.
+# Flame graphs (top functions, diff) need the python escape hatch: see sources/python/pyroscope.py.
+source: pyroscope
+display_name: Grafana Pyroscope
+vendor: Grafana Labs
+description: Continuous profiling - profile types, label discovery, profile time series per group (with exemplars linking to traces), top functions of a merged flame graph, and before/after flame graph diffs.
+docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/
+categories: [profiles]
+base_url: "{{ env.PYROSCOPE_URL }}"
+env:
+  - {name: PYROSCOPE_URL, description: "Pyroscope query frontend base URL, e.g. http://pyroscope:4040, or the Grafana Cloud Profiles URL https://profiles-prod-NNN.grafana.net (no trailing slash)"}
+  - {name: PYROSCOPE_TENANT_ID, description: "Optional X-Scope-OrgID for multi-tenant Pyroscope (not used by Grafana Cloud)"}
+  - {name: PYROSCOPE_USERNAME, description: "Optional basic-auth user: Grafana Cloud Profiles instance ID (numeric)"}
+  - {name: PYROSCOPE_PASSWORD, description: "Optional basic-auth password: Grafana Cloud access policy token with profiles:read", secret: true}
+  - {name: PYROSCOPE_TOKEN, description: "Optional bearer token for an authenticating reverse proxy (ignored when PYROSCOPE_USERNAME is set)", secret: true}
+required_env: [PYROSCOPE_URL]
+auth:
+  type: headers
+  headers:
+    Authorization: >-
+      {{ ('Basic ' ~ ((env.PYROSCOPE_USERNAME ~ ':' ~ (env.PYROSCOPE_PASSWORD or '')) | b64)) if env.PYROSCOPE_USERNAME
+         else (('Bearer ' ~ env.PYROSCOPE_TOKEN) if env.PYROSCOPE_TOKEN else None) }}
+headers:
+  X-Scope-OrgID: "{{ env.PYROSCOPE_TENANT_ID }}"
+rate_limit:
+  concurrency: 4
+  notes: >-
+    No request-rate limit on reads by default. Per-query limits (limits block): max_query_length
+    1d, max_query_lookback 1w, max_flamegraph_nodes_default 8192, max_flamegraph_nodes_max
+    1048576; HTTP server read/write timeout 30s.
+retention: {}
+query_languages:
+  pyroscope_selector: >-
+    Label selector in Prometheus syntax: {service_name="order-service", namespace="shop"};
+    =, !=, =~, !~ are supported; {} selects everything. The profile type is NOT part of the
+    selector here - set profile_type to an ID from pyroscope_profile_types, e.g.
+    process_cpu:cpu:nanoseconds:cpu:nanoseconds (CPU), memory:alloc_space:bytes:space:bytes
+    (allocations), memory:inuse_space:bytes:space:bytes (heap in use),
+    goroutines:goroutine:count:goroutine:count, mutex:delay:nanoseconds:contentions:count,
+    block:delay:nanoseconds:contentions:count. Profile type IDs are
+    <name>:<sample_type>:<sample_unit>:<period_type>:<period_unit>.
+pitfalls:
+  - "Profiles are keyed by the service_name label (set by the SDK / Grafana Alloy). An unknown service or label value returns 0 rows, not an error: list services with pyroscope_label_values (label = 'service_name') and profile types with pyroscope_profile_types first."
+  - "Profile types differ per language and SDK (Go has goroutines/mutex/block, Java has wall/alloc/lock via async-profiler, eBPF has CPU only). Requesting a type the service does not emit returns nothing."
+  - "Values are in the profile type's sample unit: CPU types are NANOSECONDS of CPU time summed over the window or step (divide by 1e9 and by the step/window seconds to get cores), memory types are bytes, goroutines/contentions are counts."
+  - "Every query window is capped at 24h (limits.max_query_length 1d) and cannot reach further back than limits.max_query_lookback (1 week by default); retention_period defaults to 31d. Older windows are refused or empty - not evidence of absence."
+  - "A flame graph is truncated to max_nodes (default 8192) nodes; tiny functions are folded into 'other'. Compare shares (self_pct), not absolute values, across windows of different length."
+  - "Span/trace selectors (span_id, trace_id) only work for SDKs with span profiles (Go, Java, .NET, Ruby, Python with OpenTelemetry span-profile integration)."
+tables:
+  - name: pyroscope_profile_types
+    title: Profile types available
+    description: >-
+      Every profile type ingested in the window, from POST
+      /querier.v1.QuerierService/ProfileTypes: the ID to pass as profile_type to the other
+      tables, plus its sample type and unit. Use first to see what kind of profiling exists
+      (CPU, memory, goroutines, locks ...).
+    kind: entities
+    request:
+      method: POST
+      path: /querier.v1.QuerierService/ProfileTypes
+      body:
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+    time: {column: ts, default_lookback: 24h, max_window: 24h}
+    response:
+      rows_path: "$.profileTypes[*]"
+    columns:
+      - {name: profile_type, path: ID, description: "Profile type ID, e.g. process_cpu:cpu:nanoseconds:cpu:nanoseconds"}
+      - {name: name, path: name, description: "Profile name (process_cpu, memory, goroutines, mutex, block, wall ...)"}
+      - {name: sample_type, path: sampleType, description: "cpu, alloc_space, inuse_space, alloc_objects, goroutine, delay, contentions ..."}
+      - {name: sample_unit, path: sampleUnit, description: "nanoseconds | bytes | count"}
+      - {name: period_type, path: periodType}
+      - {name: period_unit, path: periodUnit}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window (predicate only)"}
+    pitfalls:
+      - "Without a time window Pyroscope only asks the ingesters (recent data); the engine always sends start/end."
+    examples:
+      - sql: "SELECT profile_type, sample_unit FROM pyroscope_profile_types ORDER BY profile_type"
+        description: Which profile types exist (and their units) in the last day.
+        verified: false
+    fixtures:
+      - file: profile_types.json
+        note: "The docs show only the request; built strictly from querier.proto ProfileTypesResponse {profile_types: [types.v1.ProfileType {ID, name, sample_type, sample_unit, period_type, period_unit}]} in protojson (camelCase) encoding."
+        expect_rows: 5
+        expect_columns: {profile_type: "process_cpu:cpu:nanoseconds:cpu:nanoseconds", name: process_cpu, sample_type: cpu, sample_unit: nanoseconds, period_type: cpu}
+    docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierserviceprofiletypes
+
+  - name: pyroscope_label_names
+    title: Profile label names
+    description: >-
+      Label names seen on profiles in the window (service_name, namespace, pod, version ...),
+      from POST /querier.v1.QuerierService/LabelNames. Optionally only on profiles matching
+      service / label_selector. Names starting with __ are internal (__profile_type__, __name__).
+    kind: entities
+    request:
+      method: POST
+      path: /querier.v1.QuerierService/LabelNames
+      body:
+        matchers: >-
+          {{ [filters.label_selector] if filters.label_selector
+             else (['{service_name="' ~ (filters.service | label_escape) ~ '"}'] if filters.service else []) }}
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+    filters:
+      - {column: service, description: "Only labels on profiles of this service_name", examples: [order-service]}
+      - {column: label_selector, description: "Label selector, e.g. {namespace=\"shop\"} (wins over service)"}
+    time: {column: ts, default_lookback: 24h, max_window: 24h}
+    response:
+      rows_path: "$.names[*]"
+    columns:
+      - {name: label, path: ".", description: "Label name"}
+      - {name: service, filter_only: true}
+      - {name: label_selector, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT label FROM pyroscope_label_names WHERE service = 'order-service' AND label NOT LIKE '\\_\\_%' ESCAPE '\\' ORDER BY label"
+        description: Which labels (pod, version, region ...) a service's profiles can be grouped by.
+        verified: false
+    fixtures:
+      - file: label_names.json
+        filters: {service: order-service}
+        note: "Built from types.proto LabelNamesResponse {names: [string]} (the docs show only the request)."
+        expect_rows: 10
+        expect_columns: {label: __name__, service: order-service}
+    docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierservicelabelnames
+
+  - name: pyroscope_label_values
+    title: Values of one profile label
+    description: >-
+      Values of one label in the window, from POST /querier.v1.QuerierService/LabelValues.
+      label = 'service_name' lists every profiled service; 'pod' / 'service_version' / 'namespace'
+      list instances, versions and namespaces (optionally only for one service).
+    kind: entities
+    request:
+      method: POST
+      path: /querier.v1.QuerierService/LabelValues
+      body:
+        name: "{{ filters.label | trim }}"
+        matchers: >-
+          {{ [filters.label_selector] if filters.label_selector
+             else (['{service_name="' ~ (filters.service | label_escape) ~ '"}'] if filters.service else []) }}
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+    filters:
+      - {column: label, required: true, ops: ["=", "in"], description: "Label name, e.g. service_name, pod, service_version, namespace", examples: [service_name]}
+      - {column: service, description: "Only values on profiles of this service_name", examples: [order-service]}
+      - {column: label_selector, description: "Label selector (wins over service)"}
+    time: {column: ts, default_lookback: 24h, max_window: 24h}
+    response:
+      rows_path: "$.names[*]"
+    columns:
+      - {name: value, path: ".", description: "Label value"}
+      - {name: label, filter_only: true}
+      - {name: service, filter_only: true}
+      - {name: label_selector, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value AS service FROM pyroscope_label_values WHERE label = 'service_name' ORDER BY 1"
+        description: Every service that sends profiles.
+        verified: false
+      - sql: "SELECT value AS version FROM pyroscope_label_values WHERE label = 'service_version' AND service = 'order-service'"
+        description: Which versions of a service were profiled in the window (deploy overlap).
+        verified: false
+    fixtures:
+      - file: label_values.json
+        filters: {label: service_name}
+        note: "Built from types.proto LabelValuesResponse {names: [string]} (the docs show only the request)."
+        expect_rows: 3
+        expect_columns: {value: api-gateway, label: service_name}
+    docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierservicelabelvalues
+
+  - name: pyroscope_series
+    title: Profile series (label sets)
+    description: >-
+      Distinct label sets (series) of the profiles in the window, from POST
+      /querier.v1.QuerierService/Series: one row per series with its service, profile type,
+      pod, namespace and version, plus all labels as JSON. Use to see which pods / versions
+      of a service are profiled. Filter on service or label_selector; label_names limits the
+      labels returned (comma-separated).
+    kind: entities
+    request:
+      method: POST
+      path: /querier.v1.QuerierService/Series
+      body:
+        matchers: >-
+          {{ [filters.label_selector] if filters.label_selector
+             else (['{service_name="' ~ (filters.service | label_escape) ~ '"}'] if filters.service else []) }}
+        labelNames: "{{ ((filters.label_names | string).split(',') | map('trim') | list) if filters.label_names else [] }}"
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+    filters:
+      - {column: service, ops: ["=", "in"], description: "service_name", examples: [order-service]}
+      - {column: label_selector, description: "Label selector (wins over service)"}
+      - {column: label_names, description: "Comma-separated label names to return (default all)"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h}
+    response:
+      rows_path: "$.labelsSet[*]"
+    columns:
+      - {name: service, expr: "(_.labels or []) | selectattr('name', 'equalto', 'service_name') | map(attribute='value') | first", description: "service_name label"}
+      - {name: profile_type, expr: "(_.labels or []) | selectattr('name', 'equalto', '__profile_type__') | map(attribute='value') | first"}
+      - {name: pod, expr: "(_.labels or []) | selectattr('name', 'in', ['pod', 'k8s_pod_name', 'instance']) | map(attribute='value') | first"}
+      - {name: namespace, expr: "(_.labels or []) | selectattr('name', 'in', ['namespace', 'k8s_namespace_name']) | map(attribute='value') | first"}
+      - {name: version, expr: "(_.labels or []) | selectattr('name', 'in', ['service_version', 'version']) | map(attribute='value') | first"}
+      - {name: labels, type: JSON, expr: "dict((_.labels or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "All labels {name: value}; labels->>'pod'"}
+      - {name: label_selector, filter_only: true}
+      - {name: label_names, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT version, count(DISTINCT pod) AS pods
+          FROM pyroscope_series WHERE service = 'order-service' AND profile_type = 'process_cpu:cpu:nanoseconds:cpu:nanoseconds'
+          GROUP BY version
+        description: How many pods of each version were sending CPU profiles (mid-rollout check).
+        verified: false
+    fixtures:
+      - file: series.json
+        filters: {service: order-service}
+        note: "Built from querier.proto SeriesResponse {labels_set: [types.v1.Labels {labels: [LabelPair {name, value}]}]} in protojson encoding (the docs show only the request)."
+        expect_rows: 2
+        expect_columns: {service: order-service, profile_type: "process_cpu:cpu:nanoseconds:cpu:nanoseconds", pod: order-service-7d9f8c6b5-x2x9q, namespace: shop, version: "1.4.2"}
+    docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierserviceseries
+
+  - name: pyroscope_select_series
+    title: Profile value over time (per group)
+    description: >-
+      Time series of a profile type's total value, from POST
+      /querier.v1.QuerierService/SelectSeries: one row per (group, timestamp). Default groups
+      by service_name; set group_by (comma-separated labels, e.g. 'pod' or 'service_version')
+      to compare instances or versions. CPU values are nanoseconds of CPU per step
+      (value / 1e9 / step = cores), memory in bytes. Use it to see WHEN CPU or allocations
+      changed and which pod/version drives it, then pyroscope_top_functions /
+      pyroscope_diff_functions for WHY.
+    kind: timeseries
+    request:
+      method: POST
+      path: /querier.v1.QuerierService/SelectSeries
+      body:
+        profileTypeID: "{{ filters.profile_type or 'process_cpu:cpu:nanoseconds:cpu:nanoseconds' }}"
+        labelSelector: "{{ filters.label_selector or (('{service_name=\"' ~ (filters.service | label_escape) ~ '\"}') if filters.service else '{}') }}"
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        groupBy: "{{ ((filters.group_by | string).split(',') | map('trim') | list) if filters.group_by else ['service_name'] }}"
+        step: "{{ ((filters.step or time.step_s) | float) }}"
+        aggregation: "{{ 'TIME_SERIES_AGGREGATION_TYPE_AVERAGE' if (filters.aggregation or '') | lower in ['avg', 'average'] else 'TIME_SERIES_AGGREGATION_TYPE_SUM' }}"
+        limit: "{{ filters.series_limit }}"
+    filters:
+      - {column: service, ops: ["=", "in"], description: "service_name (pushed into labelSelector)", examples: [order-service]}
+      - {column: profile_type, description: "Profile type ID (default process_cpu:cpu:nanoseconds:cpu:nanoseconds)", examples: ["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]}
+      - {column: label_selector, description: "Full label selector, e.g. {service_name=\"order-service\", namespace=\"shop\"} (wins over service)"}
+      - {column: group_by, description: "Comma-separated labels to group by (default service_name), e.g. pod or service_version", examples: [pod]}
+      - {column: step, type: DOUBLE, description: "Step in seconds (default: ~300 points over the window)"}
+      - {column: aggregation, description: "sum (default) | average - how profiles within a step combine"}
+      - {column: series_limit, type: BIGINT, description: "Keep only the top N series by total value"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h}
+    response:
+      rows_path: "$.series[*]"
+      expand:
+        - {explode: points, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p.timestamp", transform: epoch_ms, description: "Step timestamp (UTC)"}
+      - {name: value, type: DOUBLE, expr: "p.value if p.value is defined else 0", description: "Total in the sample unit for this step (protojson omits 0)"}
+      - {name: service, expr: "(_.labels or []) | selectattr('name', 'equalto', 'service_name') | map(attribute='value') | first", description: "service_name of the group (if grouped by it)"}
+      - {name: series, expr: "(_.labels or []) | map(attribute='value') | join(', ')", description: "Group-by label values joined (series identity)"}
+      - {name: labels, type: JSON, expr: "dict((_.labels or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Group labels {name: value}; labels->>'pod'"}
+      - {name: profile_type, filter_only: true}
+      - {name: label_selector, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: step, type: DOUBLE, filter_only: true}
+      - {name: aggregation, filter_only: true}
+      - {name: series_limit, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "value is per step, so it scales with the step: set step explicitly (e.g. step = 60) when you convert CPU nanoseconds to cores (value / 1e9 / 60)."
+      - "Steps without profiles are missing or 0; a service that stopped sending profiles is a data gap, not zero load."
+    examples:
+      - sql: >-
+          SELECT service, ts, round(value / 1e9 / 60, 2) AS cpu_cores
+          FROM pyroscope_select_series
+          WHERE service IN ('order-service', 'payment-service') AND step = 60
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          ORDER BY service, ts
+        description: CPU cores used per minute by two services around an incident.
+        verified: false
+      - sql: >-
+          SELECT labels->>'service_version' AS version, round(avg(value) / 1e9 / 60, 2) AS avg_cores
+          FROM pyroscope_select_series
+          WHERE service = 'order-service' AND group_by = 'service_version' AND step = 60 AND ts >= now() - INTERVAL 6 HOUR
+          GROUP BY 1 ORDER BY avg_cores DESC
+        description: CPU per version of a service (did the new release burn more CPU?).
+        verified: false
+      - sql: >-
+          SELECT labels->>'pod' AS pod, max(value) AS peak_bytes
+          FROM pyroscope_select_series
+          WHERE service = 'order-service' AND profile_type = 'memory:inuse_space:bytes:space:bytes' AND group_by = 'pod'
+            AND aggregation = 'average' AND ts >= now() - INTERVAL 3 HOUR
+          GROUP BY 1 ORDER BY peak_bytes DESC
+        description: Heap in use per pod (memory leak / OOM suspect).
+        verified: false
+    fixtures:
+      - file: select_series.json
+        filters: {service: order-service}
+        note: "The docs show only the request; built strictly from querier.proto SelectSeriesResponse {series: [types.v1.Series {labels: [LabelPair], points: [Point {value double, timestamp int64}]}]} in protojson (int64 timestamps as strings; the third point has value 0, which protojson omits)."
+        expect_rows: 5
+        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 4200000000.0, service: order-service, series: order-service}
+    docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierserviceselectseries
+
+  - name: pyroscope_exemplars
+    title: Profile exemplars (individual profiles behind a series, with trace/span ids)
+    description: >-
+      Individual profiles behind a profile time series, from POST
+      /querier.v1.QuerierService/SelectSeries with exemplarType: one row per exemplar with its
+      time, value, profile id and - for span profiles - the trace id and span id. Use to jump
+      from a CPU spike to the concrete request (tempo_trace / jaeger_trace by trace_id) or to
+      the pod that produced the hottest profile.
+    kind: profiles
+    request:
+      method: POST
+      path: /querier.v1.QuerierService/SelectSeries
+      body:
+        profileTypeID: "{{ filters.profile_type or 'process_cpu:cpu:nanoseconds:cpu:nanoseconds' }}"
+        labelSelector: "{{ filters.label_selector or (('{service_name=\"' ~ (filters.service | label_escape) ~ '\"}') if filters.service else '{}') }}"
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        groupBy: "{{ ((filters.group_by | string).split(',') | map('trim') | list) if filters.group_by else ['service_name'] }}"
+        step: "{{ ((filters.step or time.step_s) | float) }}"
+        exemplarType: "{{ 'EXEMPLAR_TYPE_SPAN' if (filters.exemplar_type or '') | lower == 'span' else 'EXEMPLAR_TYPE_INDIVIDUAL' }}"
+    filters:
+      - {column: service, ops: ["=", "in"], description: "service_name (pushed into labelSelector)", examples: [order-service]}
+      - {column: profile_type, description: "Profile type ID (default CPU)"}
+      - {column: label_selector, description: "Full label selector (wins over service)"}
+      - {column: group_by, description: "Comma-separated labels to group by (default service_name)"}
+      - {column: step, type: DOUBLE, description: "Step in seconds (default auto)"}
+      - {column: exemplar_type, description: "individual (default: one exemplar per profile) | span (aggregated per span)"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h}
+    response:
+      rows_path: "$.series[*]"
+      expand:
+        - {explode: points, as: p}
+        - {explode: "@p.exemplars", as: e}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@e.timestamp", transform: epoch_ms, description: "When the profile was taken (UTC)"}
+      - {name: value, type: DOUBLE, path: "@e.value", description: "Profile total in the sample unit (CPU nanoseconds, bytes ...)"}
+      - {name: profile_id, path: "@e.profileId"}
+      - {name: trace_id, path: "@e.traceId", description: "Trace id of a span profile (32 hex), else NULL"}
+      - {name: span_id, path: "@e.spanId", description: "Span id of a span profile (16 hex), else NULL"}
+      - {name: service, expr: "(_.labels or []) | selectattr('name', 'equalto', 'service_name') | map(attribute='value') | first"}
+      - {name: pod, expr: "(e.labels or []) | selectattr('name', 'in', ['pod', 'k8s_pod_name', 'instance']) | map(attribute='value') | first", description: "pod label of the exemplar, if any"}
+      - {name: point_ts, type: TIMESTAMP, path: "@p.timestamp", transform: epoch_ms, description: "Step the exemplar belongs to"}
+      - {name: point_value, type: DOUBLE, expr: "p.value if p.value is defined else 0", description: "Series value of that step"}
+      - {name: exemplar_labels, type: JSON, expr: "dict((e.labels or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Labels that differ from the series labels"}
+      - {name: labels, type: JSON, expr: "dict((_.labels or []) | map('dictsort') | map('map', attribute='1') | map('list'))", description: "Series group labels"}
+      - {name: profile_type, filter_only: true}
+      - {name: label_selector, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: step, type: DOUBLE, filter_only: true}
+      - {name: exemplar_type, filter_only: true}
+    pitfalls:
+      - "Exemplars need a Pyroscope version that supports exemplarType (recent 1.x / 2.x); older servers return series without exemplars (0 rows here)."
+      - "trace_id / span_id are set only for span profiles (OpenTelemetry span-profile integration); otherwise use profile_id and pod."
+    examples:
+      - sql: >-
+          SELECT ts, value / 1e9 AS cpu_s, pod, trace_id, span_id
+          FROM pyroscope_exemplars
+          WHERE service = 'order-service' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY value DESC LIMIT 10
+        description: The heaviest individual CPU profiles in a spike, with the trace/span to open.
+        verified: false
+    fixtures:
+      - file: select_series_exemplars.json
+        filters: {service: order-service}
+        note: "Built strictly from querier.proto SelectSeriesResponse with types.v1.Point.exemplars (types.v1.Exemplar {timestamp, profile_id, span_id, value int64, labels, trace_id}) in protojson encoding; field values follow the proto's documented examples."
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:01:03Z", value: 2450000000.0, profile_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: order-service, pod: order-service-7d9f8c6b5-x2x9q, point_value: 4650000000.0}
+    docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierserviceselectseries
+
+  - name: pyroscope_top_functions
+    title: Top functions of a merged profile (flame graph as rows)
+    description: >-
+      The merged flame graph of a service over the window as one row per function, from POST
+      /querier.v1.QuerierService/SelectMergeStacktraces (format PROFILE_FORMAT_FLAMEGRAPH):
+      self (time/bytes spent in the function itself), total (including callees, recursion
+      counted once), their share of the whole profile (self_pct, total_pct), how often the
+      function appears and its shallowest depth. Filter on service or label_selector,
+      profile_type (default CPU), ts; optionally span_id / trace_id (span profiles only) to see
+      what one slow request burned. Python fetcher: decodes the delta-encoded flame graph
+      levels [x, total, self, name_index] and walks parents (omniops.sources.python.pyroscope:top_functions).
+    kind: profiles
+    python: "omniops.sources.python.pyroscope:top_functions"
+    filters:
+      - {column: service, ops: ["=", "in"], description: "service_name (builds {service_name=\"...\"})", examples: [order-service]}
+      - {column: label_selector, description: "Full label selector (wins over service), e.g. {service_name=\"order-service\", pod=\"order-service-7d9f8c6b5-x2x9q\"}"}
+      - {column: profile_type, description: "Profile type ID (default process_cpu:cpu:nanoseconds:cpu:nanoseconds)", examples: ["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]}
+      - {column: span_id, ops: ["=", "in"], fan_out: false, description: "Span id(s), 16 hex chars (spanSelector)"}
+      - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "Trace id(s), 32 hex chars (traceIdSelector)"}
+      - {column: max_nodes, type: BIGINT, description: "Flame graph node budget (default 8192, server max 1048576)"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h}
+    columns:
+      - {name: function, description: "Function / frame name"}
+      - {name: self, type: BIGINT, description: "Value spent in the function itself (sample unit: ns for CPU, bytes for memory)"}
+      - {name: total, type: BIGINT, description: "Value including callees (recursive frames counted once)"}
+      - {name: self_pct, type: DOUBLE, description: "self as % of the whole profile"}
+      - {name: total_pct, type: DOUBLE, description: "total as % of the whole profile"}
+      - {name: occurrences, type: BIGINT, description: "Flame graph nodes (distinct call paths) of this function"}
+      - {name: depth, type: BIGINT, description: "Shallowest stack depth (1 = top-level frame)"}
+      - {name: grand_total, type: BIGINT, description: "Total of the whole merged profile"}
+      - {name: unit, description: "Sample unit from the profile type (nanoseconds, bytes, count)"}
+      - {name: profile_type, description: "Profile type queried"}
+      - {name: label_selector, description: "Selector sent"}
+      - {name: service}
+      - {name: span_id, filter_only: true, description: "Span selector (predicate only; IN lists are sent as one spanSelector)"}
+      - {name: trace_id, filter_only: true, description: "Trace selector (predicate only)"}
+      - {name: max_nodes, type: BIGINT}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window (predicate only)"}
+    max_rows: 10000
+    sort_hint: "Rows come sorted by self descending."
+    pitfalls:
+      - "self finds the hot function; total finds the expensive code path (a handler with small self but large total calls something slow)."
+      - "Nodes beyond max_nodes are folded into a synthetic 'other' function."
+      - "Runtime frames (runtime.mallocgc, GC workers, syscalls) high in self usually mean allocation or I/O pressure caused by the callers with high total."
+    examples:
+      - sql: >-
+          SELECT function, round(self_pct, 1) AS self_pct, round(total_pct, 1) AS total_pct
+          FROM pyroscope_top_functions
+          WHERE service = 'order-service' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY self DESC LIMIT 15
+        description: Hottest functions (CPU) of a service during the incident window.
+        verified: false
+      - sql: >-
+          SELECT function, round(total_pct, 1) AS total_pct, round(self_pct, 1) AS self_pct
+          FROM pyroscope_top_functions
+          WHERE service = 'order-service' AND profile_type = 'memory:alloc_space:bytes:space:bytes' AND ts >= now() - INTERVAL 1 HOUR
+          ORDER BY total DESC LIMIT 15
+        description: Which code paths allocate the most memory.
+        verified: false
+      - sql: >-
+          SELECT function, round(self / 1e6, 1) AS self_ms, round(self_pct, 1) AS self_pct
+          FROM pyroscope_top_functions
+          WHERE service = 'order-service' AND span_id = '00f067aa0ba902b7' AND ts >= now() - INTERVAL 1 HOUR
+          ORDER BY self DESC LIMIT 10
+        description: What CPU one slow span (from tempo_trace) spent its time on.
+        verified: false
+    docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierserviceselectmergestacktraces
+
+  - name: pyroscope_diff_functions
+    title: Flame graph diff - which functions changed vs a baseline
+    description: >-
+      Per-function comparison of the window's merged profile (current) with a baseline, from
+      POST /querier.v1.QuerierService/Diff: baseline/current self and total, their shares of
+      each side's total (pct) and the change in percentage points, sorted by the biggest
+      change. Baseline = same selector over the same-length window ending baseline_offset
+      earlier (default: the window right before), or another selector (baseline_selector, e.g.
+      the previous version) with baseline_offset = '0s'. Answers "what got slower after the
+      deploy". Python fetcher (decodes FlameGraphDiff levels [xl, tl, sl, xr, tr, sr, name]):
+      omniops.sources.python.pyroscope:diff_functions.
+    kind: profiles
+    python: "omniops.sources.python.pyroscope:diff_functions"
+    filters:
+      - {column: service, ops: ["=", "in"], description: "service_name for both sides (unless label_selector / baseline_selector are given)", examples: [order-service]}
+      - {column: label_selector, description: "Current-side label selector (wins over service)"}
+      - {column: baseline_selector, description: "Baseline-side selector (default: same as current), e.g. {service_name=\"order-service\", service_version=\"1.4.2\"}"}
+      - {column: baseline_offset, description: "How far back the baseline window is shifted: '1h', '24h', '7d', '0s' (default = window length)", examples: [24h]}
+      - {column: profile_type, description: "Profile type ID (default CPU)"}
+      - {column: max_nodes, type: BIGINT, description: "Node budget per side (default 8192)"}
+    time: {column: ts, default_lookback: 1h, max_window: 24h}
+    columns:
+      - {name: function}
+      - {name: baseline_self, type: BIGINT}
+      - {name: current_self, type: BIGINT}
+      - {name: baseline_total, type: BIGINT}
+      - {name: current_total, type: BIGINT}
+      - {name: baseline_self_pct, type: DOUBLE, description: "Baseline self as % of the baseline profile"}
+      - {name: current_self_pct, type: DOUBLE, description: "Current self as % of the current profile"}
+      - {name: self_pct_change, type: DOUBLE, description: "current_self_pct - baseline_self_pct (percentage points); > 0 = got hotter"}
+      - {name: baseline_total_pct, type: DOUBLE}
+      - {name: current_total_pct, type: DOUBLE}
+      - {name: total_pct_change, type: DOUBLE, description: "current_total_pct - baseline_total_pct (percentage points)"}
+      - {name: depth, type: BIGINT}
+      - {name: baseline_ticks, type: BIGINT, description: "Total of the baseline profile"}
+      - {name: current_ticks, type: BIGINT, description: "Total of the current profile"}
+      - {name: unit}
+      - {name: profile_type}
+      - {name: label_selector}
+      - {name: baseline_selector}
+      - {name: baseline_offset}
+      - {name: baseline_start, type: TIMESTAMP}
+      - {name: baseline_end, type: TIMESTAMP}
+      - {name: service}
+      - {name: max_nodes, type: BIGINT}
+      - {name: ts, type: TIMESTAMP, filter_only: true, description: "Current window (predicate only)"}
+    max_rows: 10000
+    sort_hint: "Rows come sorted by |self_pct_change| descending."
+    pitfalls:
+      - "Compare shares (pct) - absolute values depend on traffic and window length. A function whose share grew while traffic was flat is a regression; if everything grew, it is load."
+      - "If current_ticks is far below baseline_ticks the service may have been down or not profiled for part of the window."
+    examples:
+      - sql: >-
+          SELECT function, baseline_self_pct, current_self_pct, self_pct_change
+          FROM pyroscope_diff_functions
+          WHERE service = 'order-service' AND baseline_offset = '24h'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY abs(self_pct_change) DESC LIMIT 15
+        description: Which functions got hotter during the incident compared with the same time yesterday.
+        verified: false
+      - sql: >-
+          SELECT function, baseline_total_pct, current_total_pct, total_pct_change
+          FROM pyroscope_diff_functions
+          WHERE label_selector = '{service_name="order-service", service_version="1.4.3"}'
+            AND baseline_selector = '{service_name="order-service", service_version="1.4.2"}'
+            AND baseline_offset = '0s' AND ts >= now() - INTERVAL 1 HOUR
+          ORDER BY total_pct_change DESC LIMIT 15
+        description: New release vs previous release over the same hour (canary comparison).
+        verified: false
+    docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierservicediff
+
+roles:
+  profiles:
+    table: pyroscope_top_functions
+    filters: {service: "{{ service }}"}
+    columns: {ts: ts, service: service, function: function, value: self, pct: self_pct, total: total}
+    query_language: pyroscope_selector
+    notes: "Use pyroscope_diff_functions to compare with a baseline and pyroscope_select_series for when CPU/memory changed."
+  services:
+    table: pyroscope_label_values
+    filters: {label: service_name}
+    columns: {service: value}

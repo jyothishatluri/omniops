@@ -1,0 +1,35 @@
+{
+ "Messages": [],
+ "MetricDataResults": [
+  {
+   "Id": "m1",
+   "Label": "Unhealthy Behind Load Balancer",
+   "StatusCode": "Complete",
+   "Timestamps": [
+    1637074200,
+    1637073900,
+    1637073600
+   ],
+   "Values": [
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "Id": "q1",
+   "Label": "Cluster CpuUtilization",
+   "StatusCode": "Complete",
+   "Timestamps": [
+    1637074245,
+    1637073945,
+    1637073645
+   ],
+   "Values": [
+    1.2158469945359334,
+    0.8678863271635757,
+    0.7201860957623283
+   ]
+  }
+ ]
+}

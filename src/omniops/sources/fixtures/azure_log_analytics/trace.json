@@ -1,0 +1,147 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "Kind",
+          "type": "string"
+        },
+        {
+          "name": "AppRoleName",
+          "type": "string"
+        },
+        {
+          "name": "AppRoleInstance",
+          "type": "string"
+        },
+        {
+          "name": "Name",
+          "type": "string"
+        },
+        {
+          "name": "Detail",
+          "type": "string"
+        },
+        {
+          "name": "DurationMs",
+          "type": "real"
+        },
+        {
+          "name": "Success",
+          "type": "bool"
+        },
+        {
+          "name": "ResultCode",
+          "type": "string"
+        },
+        {
+          "name": "Target",
+          "type": "string"
+        },
+        {
+          "name": "DependencyType",
+          "type": "string"
+        },
+        {
+          "name": "SeverityLevel",
+          "type": "int"
+        },
+        {
+          "name": "OperationId",
+          "type": "string"
+        },
+        {
+          "name": "Id",
+          "type": "string"
+        },
+        {
+          "name": "ParentId",
+          "type": "string"
+        },
+        {
+          "name": "OperationName",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:42:05.2770000Z",
+          "request",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "POST /api/orders",
+          "POST /api/orders -> 500",
+          1834.5,
+          false,
+          "500",
+          "",
+          "",
+          null,
+          "0af7651916cd43dd8448eb211c80319c",
+          "a4c2b3d1e5f60718",
+          "0af7651916cd43dd8448eb211c80319c",
+          "POST /api/orders"
+        ],
+        [
+          "2026-10-01T11:42:05.3010000Z",
+          "dependency",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "POST /v1/charges",
+          "HTTP payments.internal.contoso.com POST /v1/charges -> 503",
+          1790.1,
+          false,
+          "503",
+          "payments.internal.contoso.com",
+          "HTTP",
+          null,
+          "0af7651916cd43dd8448eb211c80319c",
+          "b7ad6b7169203331",
+          "a4c2b3d1e5f60718",
+          "POST /api/orders"
+        ],
+        [
+          "2026-10-01T11:42:07.1050000Z",
+          "trace",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          null,
+          "Payment provider call failed after 3 retries: 503 Service Unavailable",
+          null,
+          null,
+          "",
+          "",
+          "",
+          3,
+          "0af7651916cd43dd8448eb211c80319c",
+          "",
+          "a4c2b3d1e5f60718",
+          "POST /api/orders"
+        ],
+        [
+          "2026-10-01T11:42:07.1100000Z",
+          "exception",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "System.Net.Http.HttpRequestException",
+          "Response status code does not indicate success: 503 (Service Unavailable).",
+          null,
+          null,
+          "",
+          "",
+          "",
+          3,
+          "0af7651916cd43dd8448eb211c80319c",
+          "",
+          "a4c2b3d1e5f60718",
+          "POST /api/orders"
+        ]
+      ]
+    }
+  ]
+}

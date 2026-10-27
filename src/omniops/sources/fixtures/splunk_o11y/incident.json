@@ -1,0 +1,31 @@
+{
+ "active": true,
+ "anomalyState": "ANOMALOUS",
+ "detectLabel": "string",
+ "detectorId": "string",
+ "duration": 0,
+ "events": [
+  {
+   "anomalyState": "ANOMALOUS",
+   "detectLabel": "string",
+   "detectorId": "string",
+   "detectorName": "string",
+   "id": "string",
+   "incidentId": "string",
+   "inputs": [
+    {
+     "fragment": "string",
+     "value": 0
+    }
+   ],
+   "severity": "Critical",
+   "timestamp": 1557484230000
+  }
+ ],
+ "incidentId": "string",
+ "linkedTeams": [
+  "AbcdEf1ABCD",
+  "FO1Vq3ABXYZ"
+ ],
+ "severity": "Critical"
+}

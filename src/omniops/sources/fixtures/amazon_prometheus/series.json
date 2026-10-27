@@ -1,0 +1,39 @@
+{
+ "status": "success",
+ "data": [
+  {
+   "__name__": "node_cpu_seconds_total",
+   "app": "prometheus",
+   "app_kubernetes_io_managed_by": "Helm",
+   "chart": "prometheus-11.12.1",
+   "cluster": "cluster-1",
+   "component": "node-exporter",
+   "cpu": "0",
+   "heritage": "Helm",
+   "instance": "10.0.100.36:9100",
+   "job": "kubernetes-service-endpoints",
+   "kubernetes_name": "servicesstackprometheuscf14a6d7-node-exporter",
+   "kubernetes_namespace": "default",
+   "kubernetes_node": "ip-10-0-100-36.us-west-2.compute.internal",
+   "mode": "idle",
+   "release": "servicesstackprometheuscf14a6d7"
+  },
+  {
+   "__name__": "node_cpu_seconds_total",
+   "app": "prometheus",
+   "app_kubernetes_io_managed_by": "Helm",
+   "chart": "prometheus-11.12.1",
+   "cluster": "cluster-1",
+   "component": "node-exporter",
+   "cpu": "0",
+   "heritage": "Helm",
+   "instance": "10.0.100.36:9100",
+   "job": "kubernetes-service-endpoints",
+   "kubernetes_name": "servicesstackprometheuscf14a6d7-node-exporter",
+   "kubernetes_namespace": "default",
+   "kubernetes_node": "ip-10-0-100-36.us-west-2.compute.internal",
+   "mode": "iowait",
+   "release": "servicesstackprometheuscf14a6d7"
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+
+// ---------------------------------------------------------------------------------- PostgreSQL
+// Appended only after observability.sh verified the monitoring credential: a wrong password would
+// write "password authentication failed" into the Postgres log on every scrape, which the Arena's
+// baseline check treats as residual fault state (and which would pollute credential evidence).
+// Only collectors that never lock user tables are enabled (stat_user_tables would queue behind an
+// exclusive table lock and show up as a lock waiter itself).
+
+prometheus.exporter.postgres "datastore" {
+  data_source_names          = [sys.env("POSTGRES_DSN")]
+  enabled_collectors         = ["database", "locks", "stat_database"]
+  custom_queries_config_path = "/etc/alloy/postgres-queries.yaml"
+}
+
+prometheus.scrape "postgres" {
+  targets         = prometheus.exporter.postgres.datastore.targets
+  job_name        = "postgres"
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.lgtm.receiver]
+}

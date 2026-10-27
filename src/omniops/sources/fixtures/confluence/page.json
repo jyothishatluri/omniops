@@ -1,0 +1,51 @@
+{
+ "id": "123456",
+ "status": "current",
+ "title": "Checkout service runbook",
+ "spaceId": "98305",
+ "parentId": "98306",
+ "parentType": "page",
+ "position": 3,
+ "authorId": "5b10a2844c20165700ede21g",
+ "ownerId": "5b10a2844c20165700ede21g",
+ "lastOwnerId": null,
+ "createdAt": "2025-03-02T10:00:00.000Z",
+ "version": {
+  "createdAt": "2026-09-28T14:03:11.000Z",
+  "message": "add pool exhaustion step",
+  "number": 17,
+  "minorEdit": false,
+  "authorId": "5b10a2844c20165700ede21g"
+ },
+ "body": {
+  "storage": {
+   "representation": "storage",
+   "value": "<h2>Symptoms</h2><p>Checkout API returns 502.</p><h2>Mitigation</h2><ol><li><p>Check the payments-db pool:</p></li></ol><ac:structured-macro ac:name=\"code\"><ac:parameter ac:name=\"language\">bash</ac:parameter><ac:plain-text-body><![CDATA[kubectl -n checkout rollout restart deploy/checkout-api]]></ac:plain-text-body></ac:structured-macro>"
+  }
+ },
+ "labels": {
+  "results": [
+   {
+    "id": "1001",
+    "name": "runbook",
+    "prefix": "global"
+   },
+   {
+    "id": "1002",
+    "name": "checkout",
+    "prefix": "global"
+   }
+  ],
+  "meta": {
+   "hasMore": false,
+   "cursor": ""
+  },
+  "_links": {}
+ },
+ "_links": {
+  "webui": "/spaces/OPS/pages/123456/Checkout+service+runbook",
+  "editui": "/pages/resumedraft.action?draftId=123456",
+  "tinyui": "/x/QAAB",
+  "base": "https://your-domain.atlassian.net/wiki"
+ }
+}

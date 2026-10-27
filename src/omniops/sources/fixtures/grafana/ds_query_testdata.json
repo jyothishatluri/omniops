@@ -1,0 +1,50 @@
+{
+  "results": {
+    "A": {
+      "frames": [
+        {
+          "schema": {
+            "refId": "A",
+            "fields": [
+              {
+                "name": "time",
+                "type": "time",
+                "typeInfo": {
+                  "frame": "time.Time"
+                }
+              },
+              {
+                "name": "A-series",
+                "type": "number",
+                "typeInfo": {
+                  "frame": "int64",
+                  "nullable": true
+                }
+              }
+            ]
+          },
+          "data": {
+            "values": [
+              [
+                1644488152084,
+                1644488212084,
+                1644488272084,
+                1644488332084,
+                1644488392084,
+                1644488452084
+              ],
+              [
+                1,
+                20,
+                90,
+                30,
+                5,
+                0
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

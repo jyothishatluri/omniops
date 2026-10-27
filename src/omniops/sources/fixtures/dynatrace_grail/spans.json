@@ -1,0 +1,160 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 42,
+    "locale": "en_US",
+    "query": "fetch spans | filter trace.id == toUid(\"357bf70f3c617cb34584b31bd4616af8\") | sort start_time asc",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 125000,
+    "scannedBytes": 52428800,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "start_time": "2026-10-01T11:42:07.400000000Z",
+    "end_time": "2026-10-01T11:42:07.512000000Z",
+    "duration_ms": 112.0,
+    "trace.id": "357bf70f3c617cb34584b31bd4616af8",
+    "span.id": "f76281848bd8288c",
+    "span.parent_id": null,
+    "span.name": "POST /api/checkout",
+    "span.kind": "server",
+    "dt.service.name": "checkout-service",
+    "service.name": "checkout-service",
+    "endpoint.name": "POST /api/checkout",
+    "http.request.method": "POST",
+    "http.response.status_code": "500",
+    "span.status_code": "error",
+    "span.status_message": "upstream payment-service returned 503",
+    "request.is_failed": true,
+    "transaction.is_failed": true,
+    "request.is_root_span": true,
+    "k8s.namespace.name": "shop",
+    "k8s.pod.name": "checkout-service-7895755b94-mzs5m",
+    "host.name": "ip-10-0-1-17.eu-west-1.compute.internal",
+    "db.system": null,
+    "server.address": null,
+    "dt.entity.service": "SERVICE-5D53A2A6A1F2C3B4"
+   },
+   {
+    "start_time": "2026-10-01T11:42:07.420000000Z",
+    "end_time": "2026-10-01T11:42:07.505000000Z",
+    "duration_ms": 85.0,
+    "trace.id": "357bf70f3c617cb34584b31bd4616af8",
+    "span.id": "a1b2c3d4e5f60718",
+    "span.parent_id": "f76281848bd8288c",
+    "span.name": "POST",
+    "span.kind": "client",
+    "dt.service.name": "checkout-service",
+    "service.name": "checkout-service",
+    "endpoint.name": null,
+    "http.request.method": "POST",
+    "http.response.status_code": "503",
+    "span.status_code": "error",
+    "span.status_message": null,
+    "request.is_failed": null,
+    "transaction.is_failed": null,
+    "request.is_root_span": false,
+    "k8s.namespace.name": "shop",
+    "k8s.pod.name": "checkout-service-7895755b94-mzs5m",
+    "host.name": "ip-10-0-1-17.eu-west-1.compute.internal",
+    "db.system": null,
+    "server.address": "payment-service",
+    "dt.entity.service": "SERVICE-5D53A2A6A1F2C3B4"
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     1
+    ],
+    "mappings": {
+     "start_time": {
+      "type": "timestamp"
+     },
+     "end_time": {
+      "type": "timestamp"
+     },
+     "duration_ms": {
+      "type": "double"
+     },
+     "trace.id": {
+      "type": "uid"
+     },
+     "span.id": {
+      "type": "uid"
+     },
+     "span.parent_id": {
+      "type": "uid"
+     },
+     "span.name": {
+      "type": "string"
+     },
+     "span.kind": {
+      "type": "string"
+     },
+     "dt.service.name": {
+      "type": "string"
+     },
+     "service.name": {
+      "type": "string"
+     },
+     "endpoint.name": {
+      "type": "string"
+     },
+     "http.request.method": {
+      "type": "string"
+     },
+     "http.response.status_code": {
+      "type": "long"
+     },
+     "span.status_code": {
+      "type": "string"
+     },
+     "span.status_message": {
+      "type": "string"
+     },
+     "request.is_failed": {
+      "type": "boolean"
+     },
+     "transaction.is_failed": {
+      "type": "boolean"
+     },
+     "request.is_root_span": {
+      "type": "boolean"
+     },
+     "k8s.namespace.name": {
+      "type": "string"
+     },
+     "k8s.pod.name": {
+      "type": "string"
+     },
+     "host.name": {
+      "type": "string"
+     },
+     "db.system": {
+      "type": "string"
+     },
+     "server.address": {
+      "type": "string"
+     },
+     "dt.entity.service": {
+      "type": "string"
+     }
+    }
+   }
+  ]
+ }
+}

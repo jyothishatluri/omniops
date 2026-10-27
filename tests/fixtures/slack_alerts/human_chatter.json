@@ -1,0 +1,25 @@
+{
+  "platform": "human",
+  "description": "Ordinary human chatter in the alert channel. The triage model says it is not an incident report, so no Alert is produced.",
+  "provenance": "Slack Events API message event for a user post. The triage reply is scripted by the test stub.",
+  "llm": {
+    "CustomerReportTriage": {
+      "is_incident_report": false,
+      "confidence": 0.95,
+      "title": "",
+      "reason": "Social message after a successful deploy; no problem described."
+    }
+  },
+  "event": {
+    "type": "message",
+    "user": "U06DEVELOP",
+    "client_msg_id": "7a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809",
+    "text": "thanks all, the deploy went fine :tada: lunch at 12?",
+    "team": "T01ACME",
+    "ts": "1792505100.000100",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792505100.000100",
+    "channel_type": "channel"
+  },
+  "expected": {"none": true}
+}

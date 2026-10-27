@@ -1,0 +1,33 @@
+{
+  "alerts": [
+    {
+      "name": "projects/my-project/alerts/0.nc2bwh4w7r9k",
+      "state": "OPEN",
+      "openTime": "2026-10-20T14:02:11Z",
+      "resource": {
+        "type": "k8s_container",
+        "labels": {"project_id": "my-project", "location": "us-central1", "cluster_name": "prod-gke", "namespace_name": "checkout", "pod_name": "checkout-7d9f8c6b5-x2x9q", "container_name": "checkout"}
+      },
+      "metadata": {"userLabels": {"team": "payments"}},
+      "metric": {"type": "kubernetes.io/container/restart_count", "labels": {}},
+      "policy": {
+        "name": "projects/my-project/alertPolicies/4721338519483937810",
+        "displayName": "Checkout container restarts",
+        "severity": "CRITICAL",
+        "userLabels": {"team": "payments"}
+      }
+    },
+    {
+      "name": "projects/my-project/alerts/0.nc2a9z1k3m4p",
+      "state": "CLOSED",
+      "openTime": "2026-10-19T08:30:00Z",
+      "closeTime": "2026-10-19T08:45:30Z",
+      "resource": {"type": "cloud_run_revision", "labels": {"project_id": "my-project", "location": "us-central1", "service_name": "payments-api", "revision_name": "payments-api-00042-abc", "configuration_name": "payments-api"}},
+      "metric": {"type": "logging.googleapis.com/user/payment_errors", "labels": {}},
+      "log": {"extractedLabels": {"error_code": "CARD_DECLINED_TIMEOUT"}},
+      "policy": {"name": "projects/my-project/alertPolicies/5550001112223334445", "displayName": "Payment errors", "severity": "ERROR"}
+    }
+  ],
+  "nextPageToken": "",
+  "totalSize": 2
+}

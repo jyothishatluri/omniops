@@ -1,0 +1,16 @@
+{
+  "data": {
+    "actor": {
+      "account": {
+        "nrql": {
+          "results": [
+            {"beginTimeSeconds": 1759321800, "endTimeSeconds": 1759321830, "facet": "ERROR", "level": "ERROR", "count": 3},
+            {"beginTimeSeconds": 1759321830, "endTimeSeconds": 1759321860, "facet": "ERROR", "level": "ERROR", "count": 0},
+            {"beginTimeSeconds": 1759321800, "endTimeSeconds": 1759321830, "facet": "INFO", "level": "INFO", "count": 1250},
+            {"beginTimeSeconds": 1759321830, "endTimeSeconds": 1759321860, "facet": "INFO", "level": "INFO", "count": 1302}
+          ]
+        }
+      }
+    }
+  }
+}

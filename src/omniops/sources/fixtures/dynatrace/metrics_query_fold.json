@@ -1,0 +1,77 @@
+{
+ "totalCount": 2,
+ "nextPageKey": null,
+ "resolution": "1m",
+ "result": [
+  {
+   "metricId": "builtin:host.cpu.idle:fold",
+   "dataPointCountRatio": 1.8e-05,
+   "dimensionCountRatio": 3e-05,
+   "data": [
+    {
+     "dimensions": [
+      "HOST-0990886B7D39FE29"
+     ],
+     "dimensionMap": {
+      "dt.entity.host": "HOST-0990886B7D39FE29"
+     },
+     "timestamps": [
+      1589455320000
+     ],
+     "values": [
+      79.0
+     ]
+    },
+    {
+     "dimensions": [
+      "HOST-0956C3557E9109C1"
+     ],
+     "dimensionMap": {
+      "dt.entity.host": "HOST-0956C3557E9109C1"
+     },
+     "timestamps": [
+      1589455320000
+     ],
+     "values": [
+      78.0
+     ]
+    }
+   ]
+  },
+  {
+   "metricId": "builtin:host.cpu.usage:fold",
+   "dataPointCountRatio": 1.8e-05,
+   "dimensionCountRatio": 3e-05,
+   "data": [
+    {
+     "dimensions": [
+      "HOST-0990886B7D39FE29"
+     ],
+     "dimensionMap": {
+      "dt.entity.host": "HOST-0990886B7D39FE29"
+     },
+     "timestamps": [
+      1589455320000
+     ],
+     "values": [
+      21.0
+     ]
+    },
+    {
+     "dimensions": [
+      "HOST-0956C3557E9109C1"
+     ],
+     "dimensionMap": {
+      "dt.entity.host": "HOST-0956C3557E9109C1"
+     },
+     "timestamps": [
+      1589455320000
+     ],
+     "values": [
+      22.0
+     ]
+    }
+   ]
+  }
+ ]
+}

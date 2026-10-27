@@ -1,0 +1,19 @@
+{
+  "data": {
+    "attributes": {
+      "columns": [
+        {
+          "name": "env",
+          "type": "group",
+          "values": [
+            [
+              "staging"
+            ]
+          ]
+        }
+      ]
+    },
+    "type": "scalar_response"
+  },
+  "errors": "string"
+}

@@ -1,0 +1,21 @@
+{
+  "servica_a": {
+    "calls": [
+      "service_b",
+      "service_c"
+    ]
+  },
+  "service_b": {
+    "calls": [
+      "service_o"
+    ]
+  },
+  "service_c": {
+    "calls": [
+      "service_o"
+    ]
+  },
+  "service_o": {
+    "calls": []
+  }
+}

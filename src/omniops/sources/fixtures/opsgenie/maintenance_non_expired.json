@@ -1,0 +1,24 @@
+{
+    "data": [
+        {
+            "id": "20b78362-9d1e-43e0-8b86-3026b7071109",
+            "status": "planned",
+            "time": {
+                "type": "schedule",
+                "startDate": "2017-03-20T11:41:00Z",
+                "endDate": "2017-03-20T12:15:00Z"
+            },
+            "description": "Maintenance1"
+        },
+        {
+            "id": "32fff5fe-ae03-4ce8-b9e7-a2a4e5bda65d",
+            "status": "active",
+            "time": {
+                "type": "indefinitely"
+            },
+            "description": "Maintenance2"
+        }
+    ],
+    "took": 0.115,
+    "requestId": "ecbe0030-21b7-4aa3-8e54-1970cc934490"
+}

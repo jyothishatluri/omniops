@@ -1,0 +1,45 @@
+{
+  "platform": "datadog",
+  "description": "Datadog (legacy Slack webhook integration, posted as a bot message) recovery notice for the same monitor and group as datadog_triggered.",
+  "provenance": "Datadog Slack integration docs (legacy webhook integration still supported; {{#is_recovery}} message blocks). Same title and monitor-link conventions as datadog_triggered; the link window surrounds the recovery event.",
+  "event": {
+    "type": "message",
+    "subtype": "bot_message",
+    "bot_id": "B01DDHOOK1",
+    "username": "Datadog",
+    "icons": {"image_48": "https://s3-us-west-2.amazonaws.com/slack-files2/bot_icons/2016-03-14/datadog_48.png"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "2EB67D",
+        "fallback": "[Recovered on {host:web-01,env:prod}] [P2] High CPU on checkout web tier",
+        "title": "[Recovered on {host:web-01,env:prod}] [P2] High CPU on checkout web tier",
+        "title_link": "https://app.datadoghq.com/monitors/48213977?group=host%3Aweb-01%2Cenv%3Aprod&from_ts=1792505160000&to_ts=1792506360000&event_id=7781234567890199999&link_source=monitor_notif",
+        "text": "CPU usage on web-01 is back below 90%.\nValue: 41.2\n@slack-acme-ops-alerts",
+        "footer": "Datadog",
+        "ts": 1792506060
+      }
+    ],
+    "ts": "1792506084.000500",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792506084.000500",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "datadog",
+    "rule_id": "48213977",
+    "rule_name": "High CPU on checkout web tier",
+    "status": "resolved",
+    "raw_status": "Recovered",
+    "is_recovery": true,
+    "severity": "P2",
+    "host": "web-01",
+    "env": "prod",
+    "group": "host:web-01,env:prod",
+    "value": "41.2",
+    "window_start": "2026-10-20T14:06:00Z",
+    "window_end": "2026-10-20T14:26:00Z",
+    "same_key_as": "datadog_triggered.json"
+  }
+}

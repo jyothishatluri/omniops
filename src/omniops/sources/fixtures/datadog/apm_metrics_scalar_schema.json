@@ -1,0 +1,12 @@
+{
+  "data": {
+    "id": "0",
+    "type": "scalar_response",
+    "attributes": {
+      "columns": [
+        {"name": "resource_name", "type": "group", "values": [["post_/api/checkout"], ["get_/api/cart"]]},
+        {"name": "a", "type": "number", "values": [101.0, 1.0], "meta": {"unit": null}}
+      ]
+    }
+  }
+}

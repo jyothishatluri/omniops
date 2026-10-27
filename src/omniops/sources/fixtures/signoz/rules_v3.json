@@ -1,0 +1,15 @@
+{
+  "status": "success",
+  "data": {
+    "rules": [
+      {"id": "rule-1", "alert": "High CPU Alert", "alertType": "METRIC_BASED_ALERT", "ruleType": "threshold_rule", "state": "firing", "disabled": false, "description": "", "labels": {"severity": "critical", "team": "infra"}, "createdAt": "2023-10-15T10:00:00Z", "createdBy": "alice@signoz.io", "updatedAt": "2023-10-19T10:00:00Z", "updatedBy": "alice@signoz.io"},
+      {"id": "rule-2", "alert": "Memory Pending Alert", "alertType": "METRIC_BASED_ALERT", "ruleType": "threshold_rule", "state": "pending", "disabled": false, "description": "", "labels": {"severity": "warning", "team": "backend"}, "createdAt": "2023-10-15T10:00:00Z", "createdBy": "alice@signoz.io", "updatedAt": "2023-10-19T10:00:00Z", "updatedBy": "alice@signoz.io"},
+      {"id": "rule-3", "alert": "Healthy Alert", "alertType": "METRIC_BASED_ALERT", "ruleType": "threshold_rule", "state": "inactive", "disabled": false, "description": "", "labels": {"severity": "info", "team": "infra"}, "createdAt": "2023-10-15T10:00:00Z", "createdBy": "alice@signoz.io", "updatedAt": "2023-10-19T10:00:00Z", "updatedBy": "alice@signoz.io"},
+      {"id": "rule-4", "alert": "Disabled Alert", "alertType": "METRIC_BASED_ALERT", "ruleType": "threshold_rule", "state": "disabled", "disabled": true, "description": "", "labels": {"severity": "critical", "team": "frontend"}, "createdAt": "2023-10-15T10:00:00Z", "createdBy": "alice@signoz.io", "updatedAt": "2023-10-19T10:00:00Z", "updatedBy": "alice@signoz.io"},
+      {"id": "rule-5", "alert": "No Labels Alert", "alertType": "METRIC_BASED_ALERT", "ruleType": "threshold_rule", "state": "inactive", "disabled": false, "description": "", "labels": {}, "createdAt": "2023-10-15T10:00:00Z", "createdBy": "alice@signoz.io", "updatedAt": "2023-10-19T10:00:00Z", "updatedBy": "alice@signoz.io"}
+    ],
+    "total": 5,
+    "labels": [{"key": "severity", "value": "critical"}, {"key": "severity", "value": "warning"}, {"key": "severity", "value": "info"}, {"key": "team", "value": "infra"}, {"key": "team", "value": "backend"}, {"key": "team", "value": "frontend"}],
+    "reservedKeywords": ["name", "state", "severity", "created_by", "updated_by"]
+  }
+}

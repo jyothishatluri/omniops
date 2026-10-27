@@ -1,0 +1,372 @@
+# Atlassian Confluence Cloud as SQL tables: CQL search (REST v1, the only search API) and pages,
+# blog posts, spaces and comments (REST v2). Direct REST, no MCP.
+#
+# Checked on 2026-10-27 against the official OpenAPI descriptions behind the reference pages:
+#   v1: https://developer.atlassian.com/cloud/confluence/swagger.v3.json        (/wiki/rest/api/search)
+#   v2: https://dac-static.atlassian.com/cloud/confluence/openapi-v2.v3.json   (/wiki/api/v2/...)
+# and the CQL field reference (https://developer.atlassian.com/cloud/confluence/cql-fields/).
+# Neither OpenAPI document ships example responses for these operations (the reference pages show
+# schema placeholders only), so every fixture is built strictly from the response schema; see notes.
+# Research notes: docs/sources/confluence.md.
+#
+# base_url always ends in /wiki. v1 `_links.next` is relative to `_links.base` (= <site>/wiki), so
+# next_url pagination works for search. v2 `_links.next` is relative to the SITE ROOT
+# ("/wiki/api/v2/...?cursor=") and the engine resolves next links against base_url, which would
+# give /wiki/wiki/...: v2 list tables therefore fetch one page of the documented maximum (250).
+source: confluence
+display_name: Confluence
+vendor: Atlassian
+description: >-
+  Confluence Cloud: CQL full-text search across pages, blog posts, comments and attachments
+  (runbooks, postmortems, architecture docs), one page or blog post with its body as plain
+  text and labels, pages of a space (recently modified first), spaces, and page footer comments.
+docs_url: https://developer.atlassian.com/cloud/confluence/rest/v2/intro/
+categories: [docs, runbooks, postmortems, knowledge]
+base_url: "{% set u = (env.CONFLUENCE_URL or '') | trim('/') %}{{ u if u.endswith('/wiki') else u ~ '/wiki' }}"
+ui_base_url: "{% set u = (env.CONFLUENCE_URL or '') | trim('/') %}{{ u[:-5] if u.endswith('/wiki') else u }}"
+env:
+  - {name: CONFLUENCE_URL, description: "Site URL, e.g. https://acme.atlassian.net (with or without /wiki). For OAuth 2.0 (3LO) or scoped API tokens use https://api.atlassian.com/ex/confluence/<cloudId>."}
+  - {name: CONFLUENCE_EMAIL, description: "Atlassian account email for basic auth (CONFLUENCE_AUTH=basic)"}
+  - {name: CONFLUENCE_API_TOKEN, description: "API token (id.atlassian.com > Security > API tokens) for basic auth, or an OAuth 2.0 access token when CONFLUENCE_AUTH=bearer. The same Atlassian API token works for Jira and Confluence on one site.", secret: true}
+  - {name: CONFLUENCE_AUTH, description: "basic (email + API token, default) | bearer (OAuth 2.0 access token)", default: basic}
+required_env: [CONFLUENCE_URL, CONFLUENCE_API_TOKEN]
+auth:
+  type: headers
+  headers:
+    Authorization: "{{ ('Bearer ' ~ env.CONFLUENCE_API_TOKEN) if (env.CONFLUENCE_AUTH or 'basic') | lower == 'bearer' else ('Basic ' ~ (((env.CONFLUENCE_EMAIL or '') ~ ':' ~ (env.CONFLUENCE_API_TOKEN or '')) | b64)) }}"
+headers:
+  Accept: application/json
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 300
+  notes: >-
+    HTTP 429 with Retry-After, X-RateLimit-* and RateLimit-Reason (conf-global-based |
+    conf-tenant-based). Points-based hourly quotas (65,000 points/hour global pool) apply to
+    Forge/Connect/OAuth apps; API-token traffic only has burst limits.
+errors:
+  - {path: "$.errors", non_empty: true, message: "$.errors", hint: "Confluence rejected the request: fix the id/parameter named in the message"}
+pitfalls:
+  - "Search is CQL over the v1 API; there is no v2 search. Page/blog/space ids from search results (id column) are the same numeric ids v2 uses, but a blog post must be read with content_type = 'blogpost' (v2 /pages/{id} does not resolve blog post, comment or attachment ids), and v2 identifies spaces by numeric space_id, not key."
+  - "CQL dates have no time zone (they are read in the API user's time zone): modified_after/modified_before are widened by 14 h when pushed down; compare ts in SQL for exact UTC bounds."
+  - "Only content the API user can view is returned: a missing page may be a permission restriction, not absence."
+  - "An unknown space key or label in CQL simply returns 0 results (no error); list spaces with confluence_spaces first."
+query_languages:
+  cql: >-
+    CQL (Confluence Query Language): field operator value joined with AND / OR / NOT, e.g.
+    space = OPS AND type = page AND label = runbook AND text ~ "checkout 502" ORDER BY
+    lastmodified DESC. Fields: text (title + body + labels, ~ only), title (= ~), space (key),
+    type (page | blogpost | comment | attachment), label, ancestor (page id: whole subtree),
+    parent, id, creator, contributor, mention, created, lastmodified (>= with "yyyy-MM-dd" or
+    "yyyy-MM-dd HH:mm", or now("-4w")). Quote phrases; ~ is a full-text (word/stem) match.
+    Without ORDER BY a text search is ranked by relevance.
+
+tables:
+  - name: confluence_search
+    title: CQL search (pages, blog posts, comments, attachments)
+    description: >-
+      One row per search hit from GET /wiki/rest/api/search?cql=... (CQL). Filter with query
+      (full text, CQL text ~), cql (any CQL clause; may end with ORDER BY), space (key), type
+      (page | blogpost | comment | attachment), label, title_words (title ~), ancestor (page id: only
+      its subtree), modified_after / modified_before ('YYYY-MM-DD' or timestamp). Results are
+      relevance-ranked for text searches, otherwise newest-modified first. Use it to find the
+      runbook, postmortem or design doc for a service or error, then read it with
+      confluence_page.
+    kind: text
+    request:
+      method: GET
+      path: /rest/api/search
+      query:
+        cql: >-
+          {%- set q = (filters.cql or '') | trim -%}
+          {%- set oi = (q | lower).find('order by') -%}
+          {%- set w = ((q[:oi] if oi >= 0 else q) | trim) -%}
+          {%- set c = [] -%}
+          {%- if w %}{% set _ = c.append('(' ~ w ~ ')') %}{% endif -%}
+          {%- if filters.query %}{% set _ = c.append('text ~ ' ~ (filters.query | quote)) %}{% endif -%}
+          {%- if filters.title_words %}{% set _ = c.append('title ~ ' ~ (filters.title_words | quote)) %}{% endif -%}
+          {%- if filters.space %}{% set _ = c.append('space in (' ~ (filters.space | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.type %}{% set _ = c.append('type in (' ~ (filters.type | as_list | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.label %}{% set _ = c.append('label in (' ~ (filters.label | as_list | map('quote') | join(', ')) ~ ')') %}{% endif -%}
+          {%- if filters.ancestor %}{% set _ = c.append('ancestor = ' ~ filters.ancestor) %}{% endif -%}
+          {%- if filters.modified_after %}{% set _ = c.append('lastmodified >= "' ~ (((filters.modified_after | epoch_s) - 50400) | strftime('%Y-%m-%d %H:%M')) ~ '"') %}{% endif -%}
+          {%- if filters.modified_before %}{% set _ = c.append('lastmodified <= "' ~ (((filters.modified_before | epoch_s) + 50400) | strftime('%Y-%m-%d %H:%M')) ~ '"') %}{% endif -%}
+          {%- if not c %}{% set _ = c.append('type in (page, blogpost)') %}{% endif -%}
+          {{ c | join(' AND ') }}{{ (' ' ~ q[oi:]) if oi >= 0 else ('' if filters.query else ' ORDER BY lastmodified DESC') }}
+        limit: "{{ [limit or 50, 50] | min }}"
+        excerpt: highlight
+        expand: "content.space,content.version"
+    filters:
+      - {column: query, description: "Full-text terms (CQL text ~: title, body, labels; word/stem match)", examples: ["checkout 502"]}
+      - {column: cql, description: "Extra CQL ANDed with the other filters; may end with ORDER BY", examples: ["label = postmortem"]}
+      - {column: space, ops: ["=", "in"], fan_out: false, description: "Space key(s)", examples: [OPS]}
+      - {column: type, ops: ["=", "in"], fan_out: false, description: "page | blogpost | comment | attachment", examples: [page]}
+      - {column: label, ops: ["=", "in"], fan_out: false, description: "Label name(s), e.g. runbook, postmortem", examples: [runbook]}
+      - {column: title_words, description: "Title contains these words (CQL title ~; not re-checked in SQL)", examples: [runbook]}
+      - {column: ancestor, description: "Page id: only pages below it (whole subtree)", examples: ["98306"]}
+      - {column: modified_after, description: "Last modified on/after this time ('2026-09-01' or ISO timestamp)", examples: ["2026-09-01"]}
+      - {column: modified_before, description: "Last modified on/before this time", examples: ["2026-10-01"]}
+    pagination: {type: next_url, next_url_path: "$._links.next", max_pages: 4}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: id, path: content.id, description: "Content id (read pages/blog posts with confluence_page)"}
+      - {name: type, path: content.type, description: "page | blogpost | comment | attachment"}
+      - {name: title, expr: "(_.title or (_.content.title if _.content else '') or '') | replace('@@@hl@@@', '') | replace('@@@endhl@@@', '')", description: "Title (highlight markers removed)"}
+      - {name: excerpt, expr: "(_.excerpt or '') | replace('@@@hl@@@', '') | replace('@@@endhl@@@', '')", description: "Matching snippet (highlight markers removed)"}
+      - {name: space, path: content.space.key, description: "Space key"}
+      - {name: space_name, path: resultGlobalContainer.title}
+      - {name: ts, type: TIMESTAMP, path: lastModified, description: "Last modified (UTC)"}
+      - {name: author, path: content.version.by.displayName, description: "Last editor"}
+      - {name: version, type: BIGINT, path: content.version.number}
+      - {name: status, path: content.status}
+      - {name: entity_type, path: entityType, description: "content | space | user"}
+      - {name: score, type: DOUBLE, path: score}
+      - {name: url, expr: "((root._links.base or '') ~ (_.url or '')) if _.url else None", description: "Browser link"}
+      - {name: query, filter_only: true}
+      - {name: cql, filter_only: true}
+      - {name: label, filter_only: true}
+      - {name: ancestor, filter_only: true}
+      - {name: title_words, filter_only: true}
+      - {name: modified_after, filter_only: true}
+      - {name: modified_before, filter_only: true}
+    max_rows: 200
+    sort_hint: "relevance when query is given, else newest modified first"
+    pitfalls:
+      - "No time window is applied by default: runbooks are often years old. Use modified_after / modified_before (pushed into CQL) to find recently edited pages."
+      - "space and type are re-checked in SQL against the returned values (exact, case-sensitive space key); use title_words (pushed down, not re-checked) rather than title = '...' to match words in titles."
+      - "CQL ~ is a word/stem match: 'checkout-api' is split into words; quote phrases inside query for adjacency."
+      - "Search results lag edits by a short indexing delay."
+      - "Follow-up pages are fetched from the _links.next URL exactly as Confluence returns it (cursor-based; the start offset was removed from search in 2020). If a later page lacks the content.space / content.version expansion, space or author is NULL on those rows: keep queries narrow enough for one page (50 hits)."
+    examples:
+      - sql: >-
+          SELECT title, space, ts, excerpt, url FROM confluence_search
+          WHERE query = 'checkout 502' AND label = 'runbook' LIMIT 10
+        description: Runbooks that mention the failing service and symptom.
+      - sql: >-
+          SELECT title, ts, author, url FROM confluence_search
+          WHERE cql = 'label = postmortem' AND query = 'payments-db' AND type = 'blogpost'
+        description: Postmortems about the same dependency.
+      - sql: >-
+          SELECT title, author, ts, url FROM confluence_search
+          WHERE space = 'OPS' AND modified_after = '2026-09-25' ORDER BY ts DESC
+        description: What changed recently in the operations space (runbook edits before an incident).
+    fixtures:
+      - file: search.json
+        filters: {query: checkout}
+        expect_rows: 2
+        expect_columns: {id: "123456", type: page, title: Checkout service runbook, excerpt: "If the checkout API returns 502, check the payments-db connection pool first...", space: OPS, space_name: Operations, ts: "2026-09-28T14:03:11Z", author: Mia Krystof, version: 17, url: "https://your-domain.atlassian.net/wiki/spaces/OPS/pages/123456/Checkout+service+runbook"}
+        note: "Built strictly from the SearchPageResponseSearchResult / SearchResult / Content / Version schemas of GET /wiki/rest/api/search (operation searchByCQL, Confluence v1 OpenAPI); the reference page shows no concrete example. Highlight markers @@@hl@@@ / @@@endhl@@@ are the documented excerpt=highlight format."
+    ui_link: "{{ ui_base_url }}/wiki/search?text={{ (filters.query or '') | urlencode }}"
+    docs_url: https://developer.atlassian.com/cloud/confluence/rest/v1/api-group-search/#api-wiki-rest-api-search-get
+
+  - name: confluence_page
+    title: One page or blog post with body text
+    description: >-
+      One row for a page (GET /wiki/api/v2/pages/{id}) or blog post (content_type = 'blogpost':
+      GET /wiki/api/v2/blogposts/{id}) with its body (storage XHTML by default) converted to plain
+      text, plus labels, version and author ids. Use it to read a runbook or postmortem found
+      with confluence_search (id column) or linked from a ticket or alert.
+    kind: text
+    request:
+      method: GET
+      path: "/api/v2/{{ 'blogposts' if (filters.content_type or 'page') == 'blogpost' else 'pages' }}/{{ filters.id }}"
+      query:
+        body-format: "{{ filters.body_format or 'storage' }}"
+        include-labels: "true"
+      accept_status: [404]
+    filters:
+      - {column: id, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Page or blog post id (confluence_search.id)", examples: ["123456"]}
+      - {column: content_type, description: "page (default) | blogpost", examples: [page]}
+      - {column: body_format, description: "storage (default, XHTML) | view (rendered HTML, macros expanded) | atlas_doc_format (ADF JSON string)", examples: [storage]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: id, path: id}
+      - {name: title, path: title}
+      - {name: status, path: status}
+      - {name: space_id, path: spaceId, description: "Numeric v2 space id (confluence_spaces.id)"}
+      - {name: parent_id, path: parentId}
+      - {name: author_id, path: authorId, description: "accountId of the creator"}
+      - {name: owner_id, path: ownerId}
+      - {name: created, type: TIMESTAMP, path: createdAt}
+      - {name: ts, type: TIMESTAMP, path: version.createdAt, description: "Last modified (current version time)"}
+      - {name: version, type: BIGINT, path: version.number}
+      - {name: version_message, path: version.message}
+      - {name: last_editor_id, path: version.authorId}
+      - {name: labels, type: JSON, path: "labels.results[*].name", description: "JSON array of label names"}
+      - {name: text, expr: "((_.body.storage.value or _.body.view.value or '') | replace('<![CDATA[', ' ') | replace(']]>', ' ') | replace('<', ' <') | striptags) if (_.body.storage or _.body.view) else (_.body.atlas_doc_format.value if _.body.atlas_doc_format else None)", description: "Body as plain text (tags stripped, code-block contents kept)"}
+      - {name: body, expr: "_.body.storage.value or _.body.view.value or _.body.atlas_doc_format.value", description: "Raw body in body_format"}
+      - {name: url, expr: "((root._links.base or '') ~ _._links.webui) if _._links and _._links.webui else None"}
+      - {name: content_type, filter_only: true}
+      - {name: body_format, filter_only: true}
+    pitfalls:
+      - "404 is returned as 0 rows: the id does not exist, is not a page (use content_type = 'blogpost' for blog posts; comments and attachments cannot be read here) or the page is restricted."
+      - "Long pages produce long text; select text only when you need it, or read excerpts with confluence_search first."
+    examples:
+      - sql: "SELECT title, ts, version, text, url FROM confluence_page WHERE id = '123456'"
+        description: Read the runbook found by search.
+      - sql: "SELECT title, text FROM confluence_page WHERE id = '229377' AND content_type = 'blogpost'"
+        description: Read a postmortem published as a blog post.
+    fixtures:
+      - file: page.json
+        filters: {id: "123456"}
+        expect_rows: 1
+        expect_columns: {id: "123456", title: Checkout service runbook, space_id: "98305", ts: "2026-09-28T14:03:11Z", version: 17, version_message: add pool exhaustion step, text: "Symptoms Checkout API returns 502. Mitigation Check the payments-db pool: bash kubectl -n checkout rollout restart deploy/checkout-api", url: "https://your-domain.atlassian.net/wiki/spaces/OPS/pages/123456/Checkout+service+runbook"}
+        note: "Built strictly from the PageSingle schema (+ _links.base) of GET /wiki/api/v2/pages/{id} (operation getPageById, Confluence v2 OpenAPI); the storage body is standard Confluence storage format (code macro with CDATA). No concrete example is published."
+    ui_link: "{{ ui_base_url }}/wiki/pages/viewpage.action?pageId={{ filters.id }}"
+    docs_url: https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-page/#api-pages-id-get
+
+  - name: confluence_pages
+    title: Pages of a space (or by title), recently modified first
+    description: >-
+      One row per page from GET /wiki/api/v2/pages (sort=-modified-date, one page of up to 250).
+      Filter space (key, resolved to the numeric id with one spaces lookup) or space_id, title
+      (exact title), status. Use it to list what was edited recently in a runbook space, or to
+      find a page id by its exact title. No body: read it with confluence_page.
+    kind: entities
+    steps:
+      - name: space
+        when: "filters.space and not filters.space_id"
+        method: GET
+        path: /api/v2/spaces
+        query: {keys: "{{ filters.space }}", limit: 1}
+        capture: {space_id: "$.results[0].id"}
+      - name: pages
+        method: GET
+        path: /api/v2/pages
+        query:
+          space-id: "{{ filters.space_id or captures.space_id }}"
+          title: "{{ filters.title }}"
+          status: "{{ filters.status }}"
+          sort: "-modified-date"
+          limit: "{{ [limit or 250, 250] | min }}"
+    filters:
+      - {column: space, description: "Space key (looked up to its numeric id)", examples: [OPS]}
+      - {column: space_id, description: "Numeric v2 space id", examples: ["98305"]}
+      - {column: title, description: "Exact page title", examples: [Checkout service runbook]}
+      - {column: status, description: "current | archived | deleted | trashed (default current and archived)", examples: [current]}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: title, path: title}
+      - {name: status, path: status}
+      - {name: space_id, path: spaceId}
+      - {name: parent_id, path: parentId}
+      - {name: author_id, path: authorId}
+      - {name: created, type: TIMESTAMP, path: createdAt}
+      - {name: ts, type: TIMESTAMP, path: version.createdAt, description: "Last modified"}
+      - {name: version, type: BIGINT, path: version.number}
+      - {name: version_message, path: version.message}
+      - {name: last_editor_id, path: version.authorId}
+      - {name: url, expr: "((root._links.base or '') ~ _._links.webui) if _._links and _._links.webui else None"}
+      - {name: space, filter_only: true}
+    max_rows: 250
+    sort_hint: "most recently modified first"
+    pitfalls:
+      - "Only the first 250 pages are returned (v2 next links are site-relative and not followed); narrow with title or use confluence_search with space + modified_after."
+      - "Without space / space_id / title this lists pages across ALL spaces."
+    examples:
+      - sql: "SELECT title, ts, version, version_message, url FROM confluence_pages WHERE space = 'OPS' AND ts >= now() - INTERVAL 7 DAY ORDER BY ts DESC"
+        description: Runbook pages edited in the last week.
+      - sql: "SELECT id, url FROM confluence_pages WHERE title = 'Checkout service runbook'"
+        description: Page id of a known runbook title.
+    fixtures:
+      - file: pages.json
+        filters: {space_id: "98305"}
+        expect_rows: 2
+        expect_columns: {id: "123456", title: Checkout service runbook, space_id: "98305", ts: "2026-09-28T14:03:11Z", version: 17, url: "https://your-domain.atlassian.net/wiki/spaces/OPS/pages/123456/Checkout+service+runbook"}
+        note: "Built strictly from the MultiEntityResult<PageBulk> / PageBulk / Version / MultiEntityLinks schemas of GET /wiki/api/v2/pages (operation getPages, Confluence v2 OpenAPI); the _links.next form (/wiki/api/v2/pages?...&cursor=) is the documented Link-header example."
+    docs_url: https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-page/#api-pages-get
+
+  - name: confluence_spaces
+    title: Spaces
+    description: >-
+      One row per space visible to the API user (GET /wiki/api/v2/spaces, one page of up to
+      250), with key, numeric id, type and plain-text description. Filter key (one or more keys),
+      type (global | personal | collaboration | knowledge_base ...), status (current | archived).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/spaces
+      query:
+        keys: "{{ filters.key | as_list | join(',') if filters.key else None }}"
+        type: "{{ filters.type }}"
+        status: "{{ filters.status }}"
+        description-format: plain
+        sort: key
+        limit: 250
+    filters:
+      - {column: key, ops: ["=", "in"], fan_out: false, description: "Space key(s)", examples: [OPS]}
+      - {column: type, description: "global | collaboration | knowledge_base | personal | system", examples: [global]}
+      - {column: status, description: "current | archived | trashed", examples: [current]}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: id, path: id, description: "Numeric v2 space id"}
+      - {name: key, path: key}
+      - {name: name, path: name}
+      - {name: type, path: type}
+      - {name: status, path: status}
+      - {name: description, path: description.plain.value}
+      - {name: homepage_id, path: homepageId}
+      - {name: created, type: TIMESTAMP, path: createdAt}
+      - {name: url, expr: "((root._links.base or '') ~ _._links.webui) if _._links and _._links.webui else None"}
+    pitfalls:
+      - "Only the first 250 spaces (sorted by key) are returned; filter key or type on large sites."
+    examples:
+      - sql: "SELECT key, name, description FROM confluence_spaces WHERE type = 'global' ORDER BY key"
+        description: Team spaces, to pick the space key for searches.
+    fixtures:
+      - file: spaces.json
+        expect_rows: 1
+        expect_columns: {id: "98305", key: OPS, name: Operations, type: global, status: current, description: "Runbooks, postmortems and on-call guides", homepage_id: "98306", url: "https://your-domain.atlassian.net/wiki/spaces/OPS"}
+        note: "Built strictly from the MultiEntityResult<Space> / SpaceBulk / SpaceDescription schemas of GET /wiki/api/v2/spaces (operation getSpaces, Confluence v2 OpenAPI); no concrete example is published."
+    docs_url: https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-space/#api-spaces-get
+
+  - name: confluence_page_comments
+    title: Footer comments of a page or blog post
+    description: >-
+      One row per footer comment (GET /wiki/api/v2/pages/{id}/footer-comments, or blogposts/{id}
+      with content_type = 'blogpost'), newest first, body as plain text. Postmortem discussions,
+      corrections to runbook steps.
+    kind: events
+    request:
+      method: GET
+      path: "/api/v2/{{ 'blogposts' if (filters.content_type or 'page') == 'blogpost' else 'pages' }}/{{ filters.id }}/footer-comments"
+      query:
+        body-format: storage
+        sort: "-created-date"
+        limit: 250
+      accept_status: [404]
+    filters:
+      - {column: id, required: true, ops: ["=", "in"], max_fan_out: 5, description: "Page or blog post id", examples: ["123456"]}
+      - {column: content_type, description: "page (default) | blogpost", examples: [page]}
+    response:
+      rows_path: "$.results[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: version.createdAt}
+      - {name: comment_id, path: id}
+      - {name: author_id, path: version.authorId}
+      - {name: message, expr: "((_.body.storage.value or '') | replace('<![CDATA[', ' ') | replace(']]>', ' ') | replace('<', ' <') | striptags) if _.body and _.body.storage else None"}
+      - {name: status, path: status}
+      - {name: url, expr: "((root._links.base or '') ~ _._links.webui) if _._links and _._links.webui else None"}
+      - {name: id, filter_only: true}
+      - {name: content_type, filter_only: true}
+    examples:
+      - sql: "SELECT ts, author_id, message FROM confluence_page_comments WHERE id = '123456' ORDER BY ts"
+        description: Discussion under a runbook or postmortem.
+    fixtures:
+      - file: footer_comments.json
+        filters: {id: "123456"}
+        expect_rows: 1
+        expect_columns: {ts: "2026-09-29T08:15:00Z", comment_id: "130001", author_id: 5b10ac8d82e05b22cc7d4ef5, message: "Step 2 also needs --timeout=120s since the 4.12 deploy.", id: "123456", url: "https://your-domain.atlassian.net/wiki/spaces/OPS/pages/123456/Checkout+service+runbook?focusedCommentId=130001"}
+        note: "Built strictly from the MultiEntityResult<PageCommentModel> / PageCommentModel / Version / BodyBulk schemas of GET /wiki/api/v2/pages/{id}/footer-comments (operation getPageFooterComments, Confluence v2 OpenAPI); no concrete example is published."
+    docs_url: https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-comment/#api-pages-id-footer-comments-get
+
+roles:
+  docs:
+    table: confluence_search
+    columns: {title: title, ts: ts, url: url, message: excerpt, id: id}
+    query_language: cql
+    notes: "Pass the service, error text or alert name as query; follow up with confluence_page WHERE id = ... to read the body."

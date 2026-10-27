@@ -1,0 +1,41 @@
+{
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "ruleId": "0196f794-ff30-7bee-a5f4-ef5ad315715e",
+        "ruleName": "High error rate on checkout",
+        "overallState": "firing",
+        "overallStateChanged": true,
+        "state": "firing",
+        "stateChanged": true,
+        "unixMilli": 1790854980000,
+        "value": 87,
+        "fingerprint": 11298547832123940211,
+        "labels": [
+          {"key": {"name": "service.name"}, "value": "checkout"},
+          {"key": {"name": "host.name"}, "value": "ip-10-0-0-1"}
+        ],
+        "relatedTracesLink": "/traces-explorer?compositeQuery=%7B%7D&startTime=1790854680000&endTime=1790854980000",
+        "relatedLogsLink": "/logs/logs-explorer?compositeQuery=%7B%7D&startTime=1790854680000&endTime=1790854980000"
+      },
+      {
+        "ruleId": "0196f794-ff30-7bee-a5f4-ef5ad315715e",
+        "ruleName": "High error rate on checkout",
+        "overallState": "inactive",
+        "overallStateChanged": true,
+        "state": "inactive",
+        "stateChanged": true,
+        "unixMilli": 1790851380000,
+        "value": 3,
+        "fingerprint": 11298547832123940211,
+        "labels": [
+          {"key": {"name": "service.name"}, "value": "checkout"},
+          {"key": {"name": "host.name"}, "value": "ip-10-0-0-1"}
+        ]
+      }
+    ],
+    "total": 2,
+    "nextCursor": ""
+  }
+}

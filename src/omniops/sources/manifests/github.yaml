@@ -1,0 +1,1368 @@
+# GitHub REST API (api.github.com and GitHub Enterprise Server) as SQL tables. Direct REST, no MCP.
+#
+# Every path, parameter name, time format and response path below was checked against the official
+# REST reference (docs.github.com/en/rest, API version 2022-11-28) and GitHub's own OpenAPI
+# description (github/rest-api-description, descriptions/api.github.com), whose `examples` are the
+# example responses shown in the docs; the offline fixtures are those examples verbatim.
+# Research notes, rate limits and pitfalls: docs/sources/github.md.
+#
+# Conventions used by every table:
+#   repo   = 'owner/name' (or a bare 'name', prefixed with GITHUB_OWNER). It is a filter_only column:
+#            it is pushed into the URL path and echoed back on every row (the API rows do not carry it).
+#   ref    = a commit SHA (full or short), branch or tag, pushed into the URL path (filter_only).
+#   ts     = the table's main event time (commit committer date, run created_at, PR updated_at ...).
+# Time formats: every GitHub time parameter is ISO 8601 'YYYY-MM-DDTHH:MM:SSZ' (rfc3339 here);
+# search qualifiers take ranges 'START..END' in the same format.
+source: github
+display_name: GitHub
+vendor: GitHub, Inc. (Microsoft)
+description: >-
+  GitHub REST API: repositories, commits with per-file patches, compare (release diffs), pull
+  requests and their files, merged-PR change feed, deployments and deployment statuses, releases,
+  tags, Actions workflow runs, jobs and job logs, check runs and commit statuses, code / issue /
+  commit search, and file contents at any ref. Works with github.com and GitHub Enterprise Server.
+docs_url: https://docs.github.com/en/rest?apiVersion=2022-11-28
+categories: [code, changes, deployments, ci, releases, search, tickets]
+base_url: "{{ (env.GITHUB_API_URL or 'https://api.github.com') | trim('/') }}"
+ui_base_url: "{{ (env.GITHUB_UI_URL or 'https://github.com') | trim('/') }}"
+env:
+  - {name: GITHUB_TOKEN, description: "Fine-grained PAT (read-only: Contents, Metadata, Pull requests, Actions, Checks, Commit statuses, Deployments, Issues), classic PAT (repo, read:org) or a GitHub App installation token", secret: true}
+  - {name: GITHUB_API_URL, description: "API base URL. github.com: https://api.github.com (default); GitHub Enterprise Server: https://<host>/api/v3; GHE.com data residency: https://api.<subdomain>.ghe.com", default: "https://api.github.com"}
+  - {name: GITHUB_UI_URL, description: "Web UI base for deep links (default https://github.com; GHES https://<host>)", default: "https://github.com"}
+  - {name: GITHUB_OWNER, description: "Default organization (or user) login: bare repo names become GITHUB_OWNER/<repo>, and org-wide searches (merged PRs, code, commits) are scoped with org:GITHUB_OWNER. Strongly recommended."}
+required_env: [GITHUB_TOKEN]
+auth:
+  type: bearer
+  token: "{{ env.GITHUB_TOKEN }}"
+headers:
+  Accept: application/vnd.github+json
+  X-GitHub-Api-Version: "2022-11-28"
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 120
+  max_retries: 2
+  retry_body_patterns: ["secondary rate limit", "API rate limit exceeded"]
+  notes: >-
+    Primary limit 5,000 requests/hour per user token (15,000 for GitHub Apps / OAuth apps owned by
+    an Enterprise Cloud org; 1,000/hour/repo for GITHUB_TOKEN in Actions; 60/hour unauthenticated).
+    Secondary limits: <= 100 concurrent requests, <= 900 points/minute per REST endpoint (GET = 1
+    point). Search: 30 requests/minute; code search: 10 requests/minute. Exceeding any limit returns
+    403 or 429 (body says 'API rate limit exceeded' or 'secondary rate limit'); wait for Retry-After
+    or x-ratelimit-reset (UTC epoch seconds). GitHub returns errors as 4xx with a JSON 'message',
+    never as 2xx-with-error bodies.
+pitfalls:
+  - "repo is 'owner/name'. A bare name is prefixed with GITHUB_OWNER; if GITHUB_OWNER is unset, bare names produce /repos//name -> 404. Service names are assumed to equal repo names (the code_changes / change_events roles pass service as repo): verify with github_repos when a 404 says Not Found."
+  - "404 Not Found also means 'no access' for private repositories (GitHub hides existence): check the token's repository access before concluding a repo or ref does not exist."
+  - "SHA filters on the URL path (ref) accept short SHAs, branches and tags, but the sha COLUMN is always the full 40-char SHA: compare with sha LIKE 'abc1234%' or left(sha, 7), never sha = '<short sha>'."
+  - "List endpoints return at most 100 rows per page (per_page=100) and this source pages with page=1,2,... for up to 5 pages: lists without server-side time filters (pulls, deployments, releases, tags, check runs) only see the newest ~500 rows; narrow by repo/branch/environment instead of paging deeper."
+  - "Commit time windows (since/until) use the COMMITTER date: a rebased or cherry-picked commit has a newer committer date than its author date (authored_at)."
+  - "Search endpoints (github_merged_pulls, github_search_issues, github_search_commits, github_search_code) return at most 1,000 results, are limited to 30 requests/minute (code search 10/minute), and only see repositories the token can access - other repos are silently omitted, not reported as errors."
+  - "Always give an explicit ts range when correlating changes with an incident: without one, time-bound tables use the alert's analysis window (often only ~20 minutes), which usually misses the deploy that caused it. 48 hours before the onset is a good default."
+query_languages:
+  github_search: >-
+    GitHub search syntax (q): space-separated keywords and qualifiers, e.g.
+    'timeout repo:acme/checkout is:pr is:merged', 'org:acme label:incident is:issue state:open',
+    'NullPointerException org:acme language:java' (code). Dates: created:>=2026-10-01,
+    merged:2026-10-01T10:00:00Z..2026-10-01T12:00:00Z, updated:<2026-09-30. Exclude with -qualifier
+    (-label:wontfix). Quote phrases ("connection reset"). Max 256 characters of terms, at most five
+    AND/OR/NOT operators. Code search: only the default branch, files < 384 KB, needs at least one
+    search term (language:go alone is invalid), no regex; qualifiers repo:, org:, user:, path:,
+    filename:, extension:, language:, in:file / in:path.
+
+tables:
+  # ----------------------------------------------------------------------------------------------
+  # Repositories
+  # ----------------------------------------------------------------------------------------------
+  - name: github_repos
+    title: Repositories of an organization or user
+    description: >-
+      One row per repository. Lists GET /orgs/{org}/repos for org (default GITHUB_OWNER), GET
+      /users/{user}/repos when user is set, or the token's own repositories (GET /user/repos) when
+      neither is available. Sorted by last push, newest first, so the repos that changed most
+      recently come first. Use it to map a service name to its repository and default branch.
+    kind: entities
+    request:
+      method: GET
+      path: "{{ ('/users/' ~ filters.user ~ '/repos') if filters.user else (('/orgs/' ~ (filters.org or env.GITHUB_OWNER) ~ '/repos') if (filters.org or env.GITHUB_OWNER) else '/user/repos') }}"
+      query:
+        type: "{{ filters.type }}"
+        sort: pushed
+        direction: desc
+        per_page: 100
+    filters:
+      - {column: org, description: "Organization login (default GITHUB_OWNER)", examples: [acme]}
+      - {column: user, description: "List a user's repositories instead of an organization's", examples: [octocat]}
+      - {column: type, description: "org: all|public|private|forks|sources|member (default all); user: all|owner|member", examples: [sources]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: repo, path: name, description: "Repository name (without owner)"}
+      - {name: repository, path: full_name, description: "owner/name - use this as the repo filter of other tables"}
+      - {name: description, path: description}
+      - {name: default_branch, path: default_branch}
+      - {name: language, path: language}
+      - {name: topics, type: JSON, path: topics, description: "Repository topics (JSON array)"}
+      - {name: visibility, path: visibility, description: "public | private | internal"}
+      - {name: archived, type: BOOLEAN, path: archived}
+      - {name: fork, type: BOOLEAN, path: fork}
+      - {name: pushed_at, type: TIMESTAMP, path: pushed_at, description: "Last push to any branch"}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: url, path: html_url, description: "Repository web URL"}
+      - {name: org, filter_only: true}
+      - {name: user, filter_only: true}
+      - {name: type, filter_only: true}
+    pitfalls:
+      - "GET /orgs/{org}/repos 404s when GITHUB_OWNER is a USER account: set user = '<login>' instead."
+      - "Archived repositories are included; filter archived = false for live services."
+    examples:
+      - sql: "SELECT repository, default_branch, pushed_at, language FROM github_repos WHERE org = 'acme' AND NOT archived ORDER BY pushed_at DESC LIMIT 20"
+        description: Which repositories were pushed to most recently (candidates for a fresh change).
+      - sql: "SELECT repository, default_branch FROM github_repos WHERE repo ILIKE '%checkout%'"
+        description: Find the repository behind a service name.
+    fixtures:
+      - file: repos.json
+        filters: {org: octocat}
+        expect_rows: 1
+        expect_columns: {repo: Hello-World, repository: octocat/Hello-World, default_branch: master, pushed_at: "2011-01-26T19:06:43Z", url: "https://github.com/octocat/Hello-World", org: octocat}
+        note: "Official example response of GET /orgs/{org}/repos (OpenAPI example minimal-repository-items, shown on docs.github.com)."
+    ui_link: "{{ ui_base_url }}/{{ filters.org or filters.user or env.GITHUB_OWNER }}?tab=repositories"
+    docs_url: https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28#list-organization-repositories
+
+  # ----------------------------------------------------------------------------------------------
+  # Commits
+  # ----------------------------------------------------------------------------------------------
+  - name: github_commits
+    title: Commits of a repository (branch history)
+    description: >-
+      One row per commit reachable from ref (default: the default branch), newest first, within
+      the ts window (pushed down as since/until on the committer date). Filter on repo (required),
+      optionally ref (branch/tag/SHA to walk from), path (only commits touching this file or
+      directory), author / committer (GitHub login). No per-file detail here: join with
+      github_commit_files for patches.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/commits"
+      query:
+        sha: "{{ filters.ref }}"
+        path: "{{ filters.path }}"
+        author: "{{ filters.author }}"
+        committer: "{{ filters.committer }}"
+        since: "{{ time.start | rfc3339 }}"
+        until: "{{ time.end | rfc3339 }}"
+        per_page: 100
+      accept_status: [409]
+    filters:
+      - {column: repo, required: true, ops: ["=", "in"], max_fan_out: 10, description: "owner/name (or bare name with GITHUB_OWNER)", examples: [acme/checkout]}
+      - {column: ref, description: "Branch, tag or SHA to list history from (default: default branch)", examples: [main]}
+      - {column: path, description: "Only commits containing this file path (file or directory)", examples: [deploy/helm/values-prod.yaml]}
+      - {column: author, description: "GitHub login of the commit author (exact; the predicate is re-checked against the login column, so filter emails with author_email in SQL instead)", examples: [octocat]}
+      - {column: committer, description: "GitHub login of the committer (exact)"}
+    time: {column: ts, default_lookback: 48h, max_window: 90d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: commit.committer.date, description: "Committer date (what since/until filter on)"}
+      - {name: authored_at, type: TIMESTAMP, path: commit.author.date, description: "Author date"}
+      - {name: sha, path: sha, description: "Full 40-char commit SHA"}
+      - {name: short_sha, expr: "(_.sha or '')[:7]", description: "First 7 chars of the SHA"}
+      - {name: title, expr: "((_.commit.message or '').split('\n'))[0]", description: "First line of the commit message"}
+      - {name: message, path: commit.message, description: "Full commit message"}
+      - {name: author, path: author.login, description: "GitHub login of the author (NULL when the email is not linked to an account)"}
+      - {name: author_name, path: commit.author.name, description: "Git author name"}
+      - {name: author_email, path: commit.author.email}
+      - {name: committer, path: committer.login, description: "GitHub login of the committer (web-flow for merges made in the UI)"}
+      - {name: parents, type: JSON, path: "parents[*].sha", description: "Parent SHAs (JSON array)"}
+      - {name: is_merge, type: BOOLEAN, expr: "(_.parents or []) | length > 1", description: "True for merge commits (2+ parents)"}
+      - {name: verified, type: BOOLEAN, path: commit.verification.verified, description: "Signature verified"}
+      - {name: url, path: html_url, description: "Commit web URL"}
+      - {name: repo, filter_only: true}
+      - {name: ref, filter_only: true}
+      - {name: path, filter_only: true}
+    pitfalls:
+      - "Only commits reachable from ref are listed: a hotfix pushed to a release branch is invisible on main; pass ref = '<release branch>'."
+      - "A squash-merged PR is ONE commit whose author is the PR author and committer is 'web-flow'."
+      - "409 Conflict (empty repository) is returned as 0 rows."
+    examples:
+      - sql: >-
+          SELECT ts, short_sha, author, title, url FROM github_commits
+          WHERE repo = 'acme/checkout' AND ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 12:00:00'
+          ORDER BY ts DESC
+        description: Everything that landed on the default branch in the 36h before an incident.
+      - sql: >-
+          SELECT ts, short_sha, author, title FROM github_commits
+          WHERE repo = 'acme/checkout' AND path = 'deploy/helm/values-prod.yaml' AND ts >= now() - INTERVAL 14 DAY
+        description: Who changed the production config file recently.
+    fixtures:
+      - file: commits.json
+        filters: {repo: octocat/Hello-World}
+        expect_rows: 1
+        expect_columns: {sha: 6dcb09b5b57875f334f61aebed695e2e4193db5e, short_sha: 6dcb09b, title: "Fix all the bugs", author: octocat, author_email: support@github.com, ts: "2011-04-14T16:00:49Z", is_merge: false, verified: false, repo: octocat/Hello-World}
+        note: "Official example response of GET /repos/{owner}/{repo}/commits (OpenAPI example commit-items, shown on docs.github.com)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/commits{{ ('/' ~ filters.ref) if filters.ref else '' }}"
+    docs_url: https://docs.github.com/en/rest/commits/commits?apiVersion=2022-11-28#list-commits
+
+  - name: github_commit_files
+    title: One commit with its changed files and patches
+    description: >-
+      GET one commit (ref = SHA, branch or tag) WITH its file list: one row per changed file with
+      status (added/modified/removed/renamed), line counts and the unified-diff patch. Commit-level
+      fields (sha, ts, author, title, totals) repeat on every row. Filter on repo and ref (both
+      required). Use it to read exactly what a suspect commit changed.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/commits/{{ filters.ref }}"
+      query:
+        per_page: 100
+    filters:
+      - {column: repo, required: true, ops: ["=", "in"], max_fan_out: 10, description: "owner/name", examples: [acme/checkout]}
+      - {column: ref, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Commit SHA (full or short), or heads/<branch>, tags/<tag>", examples: [6dcb09b5b57875f334f61aebed695e2e4193db5e]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 10}
+    response:
+      rows_path: "$.files[*]"
+    columns:
+      - {name: sha, path: "$.sha", description: "Full commit SHA"}
+      - {name: ts, type: TIMESTAMP, path: "$.commit.committer.date", description: "Committer date"}
+      - {name: author, path: "$.author.login"}
+      - {name: author_name, path: "$.commit.author.name"}
+      - {name: title, expr: "((root.commit.message or '').split('\n'))[0]", description: "First line of the commit message"}
+      - {name: message, path: "$.commit.message"}
+      - {name: filename, path: filename, description: "Path of the changed file"}
+      - {name: status, path: status, description: "added | removed | modified | renamed | copied | changed | unchanged"}
+      - {name: previous_filename, path: previous_filename, description: "Old path for renamed files"}
+      - {name: additions, type: BIGINT, path: additions}
+      - {name: deletions, type: BIGINT, path: deletions}
+      - {name: changes, type: BIGINT, path: changes}
+      - {name: patch, path: patch, description: "Unified diff hunk(s) for this file; absent for binary files and very large diffs"}
+      - {name: commit_additions, type: BIGINT, path: "$.stats.additions"}
+      - {name: commit_deletions, type: BIGINT, path: "$.stats.deletions"}
+      - {name: parents, type: JSON, path: "$.parents[*].sha"}
+      - {name: file_url, path: blob_url, description: "File at this commit (web)"}
+      - {name: url, path: "$.html_url", description: "Commit web URL"}
+      - {name: repo, filter_only: true}
+      - {name: ref, filter_only: true}
+    pitfalls:
+      - "Large commits are paginated (page/per_page, up to 3,000 files); patch is omitted for binary files and huge diffs - fetch the file with github_file_lines instead."
+      - "Merge commits may list few or no files (0 rows is not an error): for a PR's full change use github_pull_files, or github_compare_files between the merge's parents."
+      - "An empty result also happens for an empty commit; a wrong ref is a loud 404/422, never 0 rows."
+    examples:
+      - sql: >-
+          SELECT filename, status, additions, deletions, patch FROM github_commit_files
+          WHERE repo = 'acme/checkout' AND ref = '6dcb09b' ORDER BY changes DESC
+        description: What a suspect commit changed, biggest files first.
+      - sql: >-
+          SELECT ref, filename, patch FROM github_commit_files
+          WHERE repo = 'acme/checkout' AND ref IN ('6dcb09b', 'a84d88e') AND filename LIKE '%config%'
+        description: Config files touched by two candidate commits.
+    fixtures:
+      - file: commit.json
+        filters: {repo: octocat/Hello-World, ref: 6dcb09b5b57875f334f61aebed695e2e4193db5e}
+        expect_rows: 1
+        expect_columns: {sha: 6dcb09b5b57875f334f61aebed695e2e4193db5e, filename: file1.txt, status: modified, additions: 10, deletions: 2, patch: "@@ -29,7 +29,7 @@\n.....", commit_additions: 104, title: "Fix all the bugs", author: octocat}
+        note: "Official example response of GET /repos/{owner}/{repo}/commits/{ref} (OpenAPI example commit, shown on docs.github.com)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/commit/{{ filters.ref }}"
+    docs_url: https://docs.github.com/en/rest/commits/commits?apiVersion=2022-11-28#get-a-commit
+
+  - name: github_commit_pulls
+    title: Pull requests associated with a commit
+    description: >-
+      The pull request(s) that introduced a commit (or contain it): one row per PR. Filter on repo
+      and ref (a commit SHA; both required). Use it to go from a deployed SHA to the PR, its author
+      and its description.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/commits/{{ filters.ref }}/pulls"
+      query:
+        per_page: 100
+    filters:
+      - {column: repo, required: true, ops: ["=", "in"], max_fan_out: 10, description: "owner/name", examples: [acme/checkout]}
+      - {column: ref, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Commit SHA", examples: [6dcb09b5b57875f334f61aebed695e2e4193db5e]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 2}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: number, type: BIGINT, path: number, description: "PR number"}
+      - {name: title, path: title}
+      - {name: state, path: state, description: "open | closed (merged PRs are closed with merged_at set)"}
+      - {name: merged_at, type: TIMESTAMP, path: merged_at}
+      - {name: author, path: user.login}
+      - {name: base_ref, path: base.ref, description: "Target branch"}
+      - {name: head_ref, path: head.ref, description: "Source branch"}
+      - {name: merge_commit_sha, path: merge_commit_sha}
+      - {name: labels, type: JSON, path: "labels[*].name"}
+      - {name: body, path: body, description: "PR description (markdown)"}
+      - {name: url, path: html_url}
+      - {name: repo, filter_only: true}
+      - {name: ref, filter_only: true}
+    examples:
+      - sql: "SELECT number, title, author, merged_at, url FROM github_commit_pulls WHERE repo = 'acme/checkout' AND ref = 'a84d88e7554fc1fa21bcbc4efae3c782a70d2b9d'"
+        description: Which PR shipped the deployed SHA.
+    fixtures:
+      - file: commit_pulls.json
+        filters: {repo: octocat/Hello-World, ref: 6dcb09b5b57875f334f61aebed695e2e4193db5e}
+        expect_rows: 1
+        expect_columns: {number: 1347, title: "Amazing new feature", author: octocat, base_ref: master, head_ref: new-topic, url: "https://github.com/octocat/Hello-World/pull/1347"}
+        note: "Official example response of GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls (OpenAPI example pull-request-simple-items, shown on docs.github.com)."
+    docs_url: https://docs.github.com/en/rest/commits/commits?apiVersion=2022-11-28#list-pull-requests-associated-with-a-commit
+
+  # ----------------------------------------------------------------------------------------------
+  # Compare (release diffs)
+  # ----------------------------------------------------------------------------------------------
+  - name: github_compare_commits
+    title: Commits between two refs (release diff)
+    description: >-
+      Compare base...head (tags, branches or SHAs; e.g. the previous and the current release tag):
+      one row per commit that head has and base does not, in CHRONOLOGICAL order (oldest first,
+      unlike git log). Filter on repo, base and head (all required). Comparison-level status /
+      ahead_by / behind_by / total_commits repeat on every row. Pair with github_compare_files.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/compare/{{ filters.base }}...{{ filters.head }}"
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: base, required: true, description: "Older ref: tag, branch or SHA (e.g. previous release)", examples: [v1.4.2]}
+      - {column: head, required: true, description: "Newer ref: tag, branch or SHA (e.g. the release that is live)", examples: [v1.5.0]}
+    response:
+      rows_path: "$.commits[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: commit.committer.date}
+      - {name: sha, path: sha}
+      - {name: short_sha, expr: "(_.sha or '')[:7]"}
+      - {name: title, expr: "((_.commit.message or '').split('\n'))[0]"}
+      - {name: message, path: commit.message}
+      - {name: author, path: author.login}
+      - {name: author_name, path: commit.author.name}
+      - {name: is_merge, type: BOOLEAN, expr: "(_.parents or []) | length > 1"}
+      - {name: url, path: html_url}
+      - {name: compare_status, path: "$.status", description: "ahead | behind | diverged | identical"}
+      - {name: ahead_by, type: BIGINT, path: "$.ahead_by"}
+      - {name: behind_by, type: BIGINT, path: "$.behind_by"}
+      - {name: total_commits, type: BIGINT, path: "$.total_commits", description: "Commits in the whole comparison (may exceed the 250 listed)"}
+      - {name: compare_url, path: "$.html_url"}
+      - {name: repo, filter_only: true}
+      - {name: base, filter_only: true}
+      - {name: head, filter_only: true}
+    pitfalls:
+      - "Without paging parameters GitHub lists at most 250 commits (the last one is the newest); if total_commits > 250 the list is truncated - compare smaller ranges."
+      - "compare_status = 'behind' with 0 rows means base and head were swapped: base must be the OLDER ref."
+    examples:
+      - sql: >-
+          SELECT ts, short_sha, author, title FROM github_compare_commits
+          WHERE repo = 'acme/checkout' AND base = 'v1.4.2' AND head = 'v1.5.0' AND NOT is_merge ORDER BY ts
+        description: The changelog of the release that went out right before the incident.
+    fixtures:
+      - file: compare.json
+        filters: {repo: octocat/Hello-World, base: master, head: topic}
+        expect_rows: 1
+        expect_columns: {sha: 6dcb09b5b57875f334f61aebed695e2e4193db5e, title: "Fix all the bugs", author: octocat, compare_status: behind, ahead_by: 1, behind_by: 2, total_commits: 1, base: master}
+        note: "Official example response of GET /repos/{owner}/{repo}/compare/{basehead} (OpenAPI example commit-comparison, shown on docs.github.com)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/compare/{{ filters.base }}...{{ filters.head }}"
+    docs_url: https://docs.github.com/en/rest/commits/commits?apiVersion=2022-11-28#compare-two-commits
+
+  - name: github_compare_files
+    title: Files changed between two refs (release diff with patches)
+    description: >-
+      Compare base...head: one row per file changed in the whole range, with status, line counts
+      and the unified-diff patch. Filter on repo, base and head (all required). Use it to read what
+      a release changed in config, migrations, dependency manifests or a suspect module.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/compare/{{ filters.base }}...{{ filters.head }}"
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: base, required: true, description: "Older ref (tag, branch or SHA)", examples: [v1.4.2]}
+      - {column: head, required: true, description: "Newer ref (tag, branch or SHA)", examples: [v1.5.0]}
+    response:
+      rows_path: "$.files[*]"
+    columns:
+      - {name: filename, path: filename}
+      - {name: status, path: status, description: "added | removed | modified | renamed | copied | changed | unchanged"}
+      - {name: previous_filename, path: previous_filename}
+      - {name: additions, type: BIGINT, path: additions}
+      - {name: deletions, type: BIGINT, path: deletions}
+      - {name: changes, type: BIGINT, path: changes}
+      - {name: patch, path: patch, description: "Unified diff; absent for binary/huge files"}
+      - {name: file_url, path: blob_url}
+      - {name: total_commits, type: BIGINT, path: "$.total_commits"}
+      - {name: compare_status, path: "$.status"}
+      - {name: url, path: "$.html_url", description: "Comparison web URL"}
+      - {name: repo, filter_only: true}
+      - {name: base, filter_only: true}
+      - {name: head, filter_only: true}
+    pitfalls:
+      - "The file list is capped at 300 files for the whole comparison; huge releases need per-commit github_commit_files."
+    examples:
+      - sql: >-
+          SELECT filename, status, additions, deletions, patch FROM github_compare_files
+          WHERE repo = 'acme/checkout' AND base = 'v1.4.2' AND head = 'v1.5.0'
+            AND (filename LIKE '%.yaml' OR filename LIKE '%migrations%' OR filename IN ('go.mod', 'package.json'))
+        description: Config, migration and dependency changes shipped by a release.
+    fixtures:
+      - file: compare.json
+        filters: {repo: octocat/Hello-World, base: master, head: topic}
+        expect_rows: 1
+        expect_columns: {filename: file1.txt, status: added, additions: 103, deletions: 21, changes: 124, total_commits: 1, compare_status: behind}
+        note: "Official example response of GET /repos/{owner}/{repo}/compare/{basehead} (OpenAPI example commit-comparison)."
+    docs_url: https://docs.github.com/en/rest/commits/commits?apiVersion=2022-11-28#compare-two-commits
+
+  # ----------------------------------------------------------------------------------------------
+  # Pull requests
+  # ----------------------------------------------------------------------------------------------
+  - name: github_pulls
+    title: Pull requests of a repository
+    description: >-
+      One row per pull request, most recently UPDATED first (open, closed and merged unless state
+      is given). Filter on repo (required), state ('open' | 'closed'; default all), base_ref (target
+      branch). merged = true marks merged PRs. ts = updated_at; the time range is applied after
+      fetching the newest 500 PRs (the API has no time filter) - use github_merged_pulls for
+      'what merged in this window' across a repo or the whole org.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/pulls"
+      query:
+        state: "{{ filters.state or 'all' }}"
+        base: "{{ filters.base_ref }}"
+        sort: updated
+        direction: desc
+        per_page: 100
+    filters:
+      - {column: repo, required: true, ops: ["=", "in"], max_fan_out: 10, description: "owner/name", examples: [acme/checkout]}
+      - {column: state, description: "open | closed (merged PRs are 'closed'); default: all", examples: [closed]}
+      - {column: base_ref, description: "Target branch name", examples: [main]}
+    time: {column: ts, default_lookback: 7d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: updated_at, description: "Last update"}
+      - {name: number, type: BIGINT, path: number}
+      - {name: title, path: title}
+      - {name: state, path: state, description: "open | closed"}
+      - {name: merged, type: BOOLEAN, expr: "_.merged_at is not none and _.merged_at is defined", description: "True when merged (merged_at set)"}
+      - {name: draft, type: BOOLEAN, path: draft}
+      - {name: author, path: user.login}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: closed_at, type: TIMESTAMP, path: closed_at}
+      - {name: merged_at, type: TIMESTAMP, path: merged_at}
+      - {name: merge_commit_sha, path: merge_commit_sha, description: "SHA of the merge/squash commit once merged"}
+      - {name: base_ref, path: base.ref, description: "Target branch"}
+      - {name: head_ref, path: head.ref, description: "Source branch"}
+      - {name: head_sha, path: head.sha}
+      - {name: labels, type: JSON, path: "labels[*].name"}
+      - {name: body, path: body}
+      - {name: url, path: html_url}
+      - {name: repo, filter_only: true}
+    pitfalls:
+      - "There is no 'merged' state in the REST API: state = 'merged' is invalid; use merged = true (or github_merged_pulls)."
+    examples:
+      - sql: >-
+          SELECT merged_at, number, author, title, merge_commit_sha FROM github_pulls
+          WHERE repo = 'acme/checkout' AND state = 'closed' AND merged AND merged_at >= now() - INTERVAL 2 DAY
+          ORDER BY merged_at DESC
+        description: PRs merged into the repo in the last two days.
+    fixtures:
+      - file: pulls.json
+        filters: {repo: octocat/Hello-World}
+        expect_rows: 1
+        expect_columns: {number: 1347, title: "Amazing new feature", state: open, merged: true, author: octocat, base_ref: master, head_ref: new-topic, merge_commit_sha: e5bd3914e2e596debea16f433f57875b5b90bcd6, ts: "2011-01-26T19:01:12Z"}
+        note: "Official example response of GET /repos/{owner}/{repo}/pulls (OpenAPI example pull-request-simple-items, shown on docs.github.com). The doc example sets merged_at on an 'open' PR; real merged PRs are 'closed'."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/pulls?q=is%3Apr+sort%3Aupdated-desc"
+    docs_url: https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28#list-pull-requests
+
+  - name: github_merged_pulls
+    title: Merged pull requests in a time window (repo or org-wide change feed)
+    description: >-
+      Pull requests MERGED inside the ts window, via the search API (q = 'is:pr is:merged
+      merged:START..END' + scope). Scope with repo (one repository) or org (default GITHUB_OWNER:
+      the whole organization). Optional query adds search terms/qualifiers (label:hotfix,
+      base:main, author:octocat). One row per PR, ts = merged time. The best org-wide 'what changed
+      before the incident' feed.
+    kind: changes
+    steps:
+      - name: search
+        when: "filters.repo or filters.org or env.GITHUB_OWNER"
+        method: GET
+        path: /search/issues
+        query:
+          q: "is:pr is:merged merged:{{ time.start | rfc3339 }}..{{ time.end | rfc3339 }} {{ ('repo:' ~ (filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo)) if filters.repo else ('org:' ~ (filters.org or env.GITHUB_OWNER)) }}{{ (' ' ~ filters.query) if filters.query else '' }}"
+          sort: updated
+          order: desc
+          per_page: 100
+    filters:
+      - {column: repo, ops: ["=", "in"], max_fan_out: 10, description: "owner/name or bare name (scope to one repo)", examples: [acme/checkout]}
+      - {column: org, description: "Organization to search (default GITHUB_OWNER) when repo is not given", examples: [acme]}
+      - {column: query, description: "Extra search terms / qualifiers appended to q", examples: ['base:main -label:dependencies']}
+    time: {column: ts, default_lookback: 48h, max_window: 90d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.pull_request.merged_at if (_.pull_request is mapping and _.pull_request.merged_at) else _.closed_at", description: "Merge time (closed_at when the search payload omits merged_at)"}
+      - {name: number, type: BIGINT, path: number}
+      - {name: title, path: title}
+      - {name: author, path: user.login}
+      - {name: repo, expr: "filters.repo if filters.repo else ((_.repository_url or '').split('/')[-1])", description: "Repository name (the repo filter value when given)"}
+      - {name: repository, expr: "(_.repository_url or '').split('/repos/')[-1]", description: "owner/name, from repository_url"}
+      - {name: state, path: state}
+      - {name: labels, type: JSON, path: "labels[*].name"}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: closed_at, type: TIMESTAMP, path: closed_at}
+      - {name: comments, type: BIGINT, path: comments}
+      - {name: body, path: body}
+      - {name: url, path: html_url}
+      - {name: total_count, type: BIGINT, path: "$.total_count", description: "Total matches (search caps listing at 1,000)"}
+      - {name: incomplete_results, type: BOOLEAN, path: "$.incomplete_results", description: "True when the search timed out: results may be partial"}
+      - {name: org, filter_only: true}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Without repo, org and GITHUB_OWNER the table does not run (it would otherwise search every public repository on GitHub) and returns 0 rows."
+      - "The search index lags merges by up to a minute or so; a PR merged seconds ago may be missing."
+      - "The merge commit SHA is not in the search payload: join on (repo, number) with github_pulls, or use github_commit_pulls from a SHA."
+    examples:
+      - sql: >-
+          SELECT ts, repository, number, author, title, url FROM github_merged_pulls
+          WHERE org = 'acme' AND ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 12:00:00'
+          ORDER BY ts DESC
+        description: Every PR merged anywhere in the org in the 36h before the incident.
+      - sql: "SELECT ts, number, title, author FROM github_merged_pulls WHERE repo = 'acme/checkout' AND query = 'label:hotfix' AND ts >= now() - INTERVAL 7 DAY"
+        description: Hotfixes merged into one repo this week.
+    fixtures:
+      - file: search_issues.json
+        filters: {repo: octocat/Hello-World}
+        expect_rows: 1
+        expect_columns: {number: 132, title: "Line Number Indexes Beyond 20 Not Displayed", author: Nick3C, repo: octocat/Hello-World, repository: batterseapower/pinyin-toolkit, total_count: 280, incomplete_results: false}
+        note: "Official example response of GET /search/issues (OpenAPI example issue-search-result-item-paginated, shown on docs.github.com). The example item is an issue-with-pull_request without merged_at, so ts falls back to closed_at (null here)."
+    ui_link: "{{ ui_base_url }}/search?type=pullrequests&q={{ ('is:pr is:merged ' ~ (('repo:' ~ (filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo)) if filters.repo else ('org:' ~ (filters.org or env.GITHUB_OWNER)))) | urlencode }}"
+    docs_url: https://docs.github.com/en/rest/search/search?apiVersion=2022-11-28#search-issues-and-pull-requests
+
+  - name: github_pull_files
+    title: Files changed by a pull request
+    description: >-
+      One row per file changed by a pull request, with status, line counts and the patch. Filter
+      on repo and number (both required). Use it to read the full change of a suspect PR.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/pulls/{{ filters.number }}/files"
+      query:
+        per_page: 100
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: number, required: true, type: BIGINT, ops: ["=", "in"], max_fan_out: 10, description: "PR number", examples: ["1347"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 30}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: filename, path: filename}
+      - {name: status, path: status}
+      - {name: previous_filename, path: previous_filename}
+      - {name: additions, type: BIGINT, path: additions}
+      - {name: deletions, type: BIGINT, path: deletions}
+      - {name: changes, type: BIGINT, path: changes}
+      - {name: patch, path: patch}
+      - {name: file_url, path: blob_url}
+      - {name: repo, filter_only: true}
+      - {name: number, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "At most 3,000 files per PR; patch is missing for binary or very large files."
+    examples:
+      - sql: "SELECT filename, status, additions, deletions, patch FROM github_pull_files WHERE repo = 'acme/checkout' AND number = 1347 ORDER BY changes DESC"
+        description: Everything a suspect PR changed.
+    fixtures:
+      - file: pull_files.json
+        filters: {repo: octocat/Hello-World, number: 1347}
+        expect_rows: 1
+        expect_columns: {filename: file1.txt, status: added, additions: 103, deletions: 21, number: 1347}
+        note: "Official example response of GET /repos/{owner}/{repo}/pulls/{pull_number}/files (OpenAPI example diff-entry-items)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/pull/{{ filters.number }}/files"
+    docs_url: https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28#list-pull-requests-files
+
+  # ----------------------------------------------------------------------------------------------
+  # Deployments and releases
+  # ----------------------------------------------------------------------------------------------
+  - name: github_deployments
+    title: Deployments (GitHub Deployments API)
+    description: >-
+      One row per deployment recorded through the Deployments API (by Actions environments, Argo
+      CD / Spinnaker / Heroku integrations, or custom tooling). Filter on repo (required), env
+      (environment name, e.g. production), sha (full SHA), ref, task. ts = created_at. The state
+      of each deployment lives in github_deployment_statuses (join on deployment_id = id).
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/deployments"
+      query:
+        environment: "{{ filters.environment }}"
+        sha: "{{ filters.sha }}"
+        ref: "{{ filters.ref }}"
+        task: "{{ filters.task }}"
+        per_page: 100
+    filters:
+      - {column: repo, required: true, ops: ["=", "in"], max_fan_out: 10, description: "owner/name", examples: [acme/checkout]}
+      - {column: env, param: environment, description: "Environment name (exact, case-sensitive)", examples: [production]}
+      - {column: sha, description: "Full 40-char SHA recorded at creation", examples: [a84d88e7554fc1fa21bcbc4efae3c782a70d2b9d]}
+      - {column: ref, description: "Branch, tag or SHA name that was deployed", examples: [main]}
+      - {column: task, description: "Task name, e.g. deploy or deploy:migrations", examples: [deploy]}
+    time: {column: ts, default_lookback: 7d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at, description: "When the deployment was created"}
+      - {name: id, type: BIGINT, path: id, description: "Deployment id (join github_deployment_statuses.deployment_id)"}
+      - {name: title, expr: "'deploy ' ~ (_.ref or (_.sha or '')[:7]) ~ ' to ' ~ (_.environment or '?') ~ ((': ' ~ _.description) if _.description else '')", description: "Readable summary"}
+      - {name: env, path: environment, description: "Environment"}
+      - {name: original_environment, path: original_environment}
+      - {name: sha, path: sha}
+      - {name: ref, path: ref}
+      - {name: task, path: task}
+      - {name: description, path: description}
+      - {name: author, path: creator.login, description: "Who/what created the deployment"}
+      - {name: production, type: BOOLEAN, path: production_environment}
+      - {name: transient, type: BOOLEAN, path: transient_environment}
+      - {name: payload, type: JSON, path: payload, description: "Free-form deploy payload (tool-specific)"}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at}
+      - {name: statuses_url, path: statuses_url}
+      - {name: repo, filter_only: true}
+    pitfalls:
+      - "Only deployments created through the Deployments API appear: teams deploying with plain CI jobs (no 'environment:' key) have none - check github_workflow_runs for deploy workflows instead."
+      - "This list has no time filter; it shows the newest 500 deployments, and the ts range is applied after fetching."
+      - "Environment names are case-sensitive (Production != production)."
+    examples:
+      - sql: >-
+          SELECT ts, id, env, ref, sha, author, description FROM github_deployments
+          WHERE repo = 'acme/checkout' AND env = 'production' AND ts >= now() - INTERVAL 2 DAY ORDER BY ts DESC
+        description: Production deploys of a service in the last two days.
+    fixtures:
+      - file: deployments.json
+        filters: {repo: octocat/example}
+        expect_rows: 1
+        expect_columns: {id: 1, env: production, sha: a84d88e7554fc1fa21bcbc4efae3c782a70d2b9d, ref: topic-branch, task: deploy, author: octocat, production: true, ts: "2012-07-20T01:19:13Z", title: "deploy topic-branch to production: Deploy request from hubot"}
+        note: "Official example response of GET /repos/{owner}/{repo}/deployments (OpenAPI example deployment-items)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/deployments"
+    docs_url: https://docs.github.com/en/rest/deployments/deployments?apiVersion=2022-11-28#list-deployments
+
+  - name: github_deployment_statuses
+    title: Status history of a deployment
+    description: >-
+      One row per status update of a deployment (newest first): state (error | failure | inactive |
+      in_progress | queued | pending | success), description, log/target URL. Filter on repo and
+      deployment_id (both required; IN-lists fan out). The first row is the current state.
+    kind: events
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/deployments/{{ filters.deployment_id }}/statuses"
+      query:
+        per_page: 100
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: deployment_id, required: true, type: BIGINT, ops: ["=", "in"], max_fan_out: 20, description: "github_deployments.id", examples: ["42"]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 2}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at}
+      - {name: state, path: state, description: "error | failure | inactive | in_progress | queued | pending | success"}
+      - {name: description, path: description}
+      - {name: env, path: environment}
+      - {name: author, path: creator.login}
+      - {name: target_url, path: target_url}
+      - {name: log_url, path: log_url}
+      - {name: environment_url, path: environment_url}
+      - {name: id, type: BIGINT, path: id}
+      - {name: repo, filter_only: true}
+      - {name: deployment_id, type: BIGINT, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT deployment_id, ts, state, description FROM github_deployment_statuses
+          WHERE repo = 'acme/checkout' AND deployment_id IN (1201, 1202) ORDER BY deployment_id, ts
+        description: How two deployments progressed (and whether one failed or was rolled back).
+    fixtures:
+      - file: deployment_statuses.json
+        filters: {repo: octocat/example, deployment_id: 42}
+        expect_rows: 1
+        expect_columns: {state: success, description: "Deployment finished successfully.", env: production, target_url: "https://example.com/deployment/42/output", deployment_id: 42, ts: "2012-07-20T01:19:13Z"}
+        note: "Official example response of GET /repos/{owner}/{repo}/deployments/{deployment_id}/statuses (OpenAPI example deployment-status-items)."
+    docs_url: https://docs.github.com/en/rest/deployments/statuses?apiVersion=2022-11-28#list-deployment-statuses
+
+  - name: github_releases
+    title: Releases
+    description: >-
+      One row per GitHub Release (newest first), with tag (version), name, notes and publish
+      time. Filter on repo (required). Drafts are visible only with push access. Plain git tags
+      without a release are in github_tags.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/releases"
+      query:
+        per_page: 100
+    filters:
+      - {column: repo, required: true, ops: ["=", "in"], max_fan_out: 10, description: "owner/name", examples: [acme/checkout]}
+    time: {column: ts, default_lookback: 30d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: ts, type: TIMESTAMP, expr: "_.published_at or _.created_at", description: "Published time (created_at for drafts)"}
+      - {name: version, path: tag_name, description: "Release tag"}
+      - {name: title, expr: "_.name or _.tag_name", description: "Release name (tag when unnamed)"}
+      - {name: body, path: body, description: "Release notes (markdown)"}
+      - {name: draft, type: BOOLEAN, path: draft}
+      - {name: prerelease, type: BOOLEAN, path: prerelease}
+      - {name: target_commitish, path: target_commitish, description: "Branch or SHA the tag was created from"}
+      - {name: author, path: author.login}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: id, type: BIGINT, path: id}
+      - {name: url, path: html_url}
+      - {name: repo, filter_only: true}
+    pitfalls:
+      - "created_at is the date of the release's COMMIT-ish creation, not publication; use ts (published_at)."
+    examples:
+      - sql: >-
+          SELECT ts, version, title, author, url FROM github_releases
+          WHERE repo = 'acme/checkout' AND NOT draft ORDER BY ts DESC LIMIT 5
+        description: The last releases, to pick base/head for github_compare_commits.
+    fixtures:
+      - file: releases.json
+        filters: {repo: octocat/Hello-World}
+        expect_rows: 1
+        expect_columns: {version: v1.0.0, title: v1.0.0, draft: false, prerelease: false, target_commitish: master, author: octocat, ts: "2013-02-27T19:35:32Z", url: "https://github.com/octocat/Hello-World/releases/v1.0.0"}
+        note: "Official example response of GET /repos/{owner}/{repo}/releases (OpenAPI example release-items)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/releases"
+    docs_url: https://docs.github.com/en/rest/releases/releases?apiVersion=2022-11-28#list-releases
+
+  - name: github_tags
+    title: Git tags
+    description: >-
+      One row per git tag (name and the commit SHA it points to). Filter on repo (required). Tags
+      carry no date here: resolve dates through github_commit_files (ref = tag) or github_releases.
+    kind: entities
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/tags"
+      query:
+        per_page: 100
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: version, path: name, description: "Tag name"}
+      - {name: sha, path: commit.sha, description: "Commit the tag points to"}
+      - {name: repo, filter_only: true}
+    pitfalls:
+      - "The order is not chronological (GitHub sorts tag names in reverse lexical order): v1.10.0 may come after v1.9.0. Prefer github_releases for 'latest version'."
+    examples:
+      - sql: "SELECT version, sha FROM github_tags WHERE repo = 'acme/checkout' AND version LIKE 'v1.5%'"
+        description: Which commit a version tag points to.
+    fixtures:
+      - file: tags.json
+        filters: {repo: octocat/Hello-World}
+        expect_rows: 1
+        expect_columns: {version: v0.1, sha: c5b97d5ae6c19d5c5df71a34c7fbeeda2479ccbc}
+        note: "Official example response of GET /repos/{owner}/{repo}/tags (OpenAPI example tag-items)."
+    docs_url: https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28#list-repository-tags
+
+  # ----------------------------------------------------------------------------------------------
+  # Actions and checks (CI/CD)
+  # ----------------------------------------------------------------------------------------------
+  - name: github_workflow_runs
+    title: GitHub Actions workflow runs
+    description: >-
+      One row per workflow run created inside the ts window (pushed down as created=START..END),
+      newest first. Filter on repo (required), and optionally status (queued | in_progress |
+      completed | waiting | requested | pending | action_required), conclusion (success |
+      failure | cancelled | timed_out | skipped | neutral | stale - sent as the same 'status'
+      parameter), branch, event (push, pull_request, workflow_dispatch, schedule, release...),
+      head_sha, actor. Use it for 'which deploy workflow ran and did it fail'.
+    kind: changes
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/actions/runs"
+      query:
+        status: "{{ filters.conclusion or filters.status }}"
+        branch: "{{ filters.branch }}"
+        event: "{{ filters.event }}"
+        head_sha: "{{ filters.head_sha }}"
+        actor: "{{ filters.actor }}"
+        created: "{{ time.start | rfc3339 }}..{{ time.end | rfc3339 }}"
+        per_page: 100
+    filters:
+      - {column: repo, required: true, ops: ["=", "in"], max_fan_out: 10, description: "owner/name", examples: [acme/checkout]}
+      - {column: status, description: "Run status: queued | in_progress | completed | waiting | requested | pending | action_required", examples: [completed]}
+      - {column: conclusion, description: "Run conclusion: success | failure | cancelled | timed_out | skipped | neutral | stale", examples: [failure]}
+      - {column: branch, description: "Branch of the push / PR head", examples: [main]}
+      - {column: event, description: "Triggering event", examples: [push]}
+      - {column: head_sha, description: "Full commit SHA", examples: [acb5820ced9479c074f688cc328bf03f341a511d]}
+      - {column: actor, description: "Login of the user who triggered the push/run", examples: [octocat]}
+    time: {column: ts, default_lookback: 48h, max_window: 90d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 5}
+    response:
+      rows_path: "$.workflow_runs[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: created_at, description: "Run creation time (what created= filters on)"}
+      - {name: id, type: BIGINT, path: id, description: "Run id (github_workflow_jobs.run_id)"}
+      - {name: workflow, path: name, description: "Workflow name"}
+      - {name: title, path: display_title, description: "Run title (commit message / PR title)"}
+      - {name: status, path: status}
+      - {name: conclusion, path: conclusion, description: "NULL while running"}
+      - {name: event, path: event}
+      - {name: branch, path: head_branch}
+      - {name: head_sha, path: head_sha}
+      - {name: run_number, type: BIGINT, path: run_number}
+      - {name: run_attempt, type: BIGINT, path: run_attempt, description: "> 1 means re-run"}
+      - {name: run_started_at, type: TIMESTAMP, path: run_started_at}
+      - {name: updated_at, type: TIMESTAMP, path: updated_at, description: "Last update (~ completion time for completed runs)"}
+      - {name: actor, path: actor.login}
+      - {name: triggering_actor, path: triggering_actor.login}
+      - {name: head_commit_message, path: head_commit.message}
+      - {name: workflow_path, path: path, description: ".github/workflows/<file>@<ref>"}
+      - {name: workflow_id, type: BIGINT, path: workflow_id}
+      - {name: pull_requests, type: JSON, path: "pull_requests[*].number", description: "Associated PR numbers"}
+      - {name: repository, path: repository.full_name}
+      - {name: url, path: html_url}
+      - {name: repo, filter_only: true}
+    pitfalls:
+      - "status and conclusion share one API parameter: when both are given only conclusion is sent (status is re-applied in SQL)."
+      - "Filtered queries (actor, branch, created, event, head_sha, status) return at most 1,000 runs."
+      - "Run duration = updated_at - run_started_at for completed runs (there is no duration field)."
+      - "Since 2026-10-01 workflow runs, check runs and commit statuses are deleted after the Actions retention period (90 days by default, configurable up to 400 for private repos): older runs are gone, not absent."
+    examples:
+      - sql: >-
+          SELECT ts, workflow, branch, head_sha, conclusion, url FROM github_workflow_runs
+          WHERE repo = 'acme/checkout' AND conclusion = 'failure' AND ts >= now() - INTERVAL 1 DAY ORDER BY ts DESC
+        description: Failed workflow runs in the last day.
+      - sql: >-
+          SELECT ts, workflow, head_sha, status, conclusion, updated_at - run_started_at AS took FROM github_workflow_runs
+          WHERE repo = 'acme/checkout' AND branch = 'main' AND workflow ILIKE '%deploy%'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 00:00:00'
+        description: Deploy workflow runs on main around an incident, with durations.
+    fixtures:
+      - file: workflow_runs.json
+        filters: {repo: octo-org/octo-repo}
+        expect_rows: 1
+        expect_columns: {id: 30433642, workflow: Build, title: "Update README.md", status: queued, event: push, branch: master, head_sha: acb5820ced9479c074f688cc328bf03f341a511d, run_number: 562, actor: octocat, ts: "2020-01-22T19:33:08Z", url: "https://github.com/octo-org/octo-repo/actions/runs/30433642"}
+        note: "Official example response of GET /repos/{owner}/{repo}/actions/runs (OpenAPI example workflow-run-paginated)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/actions"
+    docs_url: https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2022-11-28#list-workflow-runs-for-a-repository
+
+  - name: github_workflow_jobs
+    title: Jobs of a workflow run
+    description: >-
+      One row per job of a workflow run: status, conclusion, start/end, runner, and the steps as
+      JSON (failed_step names the first failing step). Filter on repo and run_id (both required);
+      attempts = 'all' includes jobs of earlier attempts (default: latest attempt only).
+    kind: events
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/actions/runs/{{ filters.run_id }}/jobs"
+      query:
+        filter: "{{ filters.attempts }}"
+        per_page: 100
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: run_id, required: true, type: BIGINT, ops: ["=", "in"], max_fan_out: 10, description: "github_workflow_runs.id", examples: ["29679449"]}
+      - {column: attempts, description: "latest (default) | all", examples: [latest]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$.jobs[*]"
+    columns:
+      - {name: id, type: BIGINT, path: id, description: "Job id (github_job_logs.job_id)"}
+      - {name: run_id, type: BIGINT, path: run_id}
+      - {name: name, path: name}
+      - {name: status, path: status}
+      - {name: conclusion, path: conclusion}
+      - {name: ts, type: TIMESTAMP, path: started_at}
+      - {name: completed_at, type: TIMESTAMP, path: completed_at}
+      - {name: failed_step, expr: "(_.steps or []) | selectattr('conclusion', 'equalto', 'failure') | map(attribute='name') | first", description: "Name of the first failed step"}
+      - {name: steps, type: JSON, path: steps, description: "Steps: name, status, conclusion, number, started_at, completed_at"}
+      - {name: workflow, path: workflow_name}
+      - {name: branch, path: head_branch}
+      - {name: head_sha, path: head_sha}
+      - {name: run_attempt, type: BIGINT, path: run_attempt}
+      - {name: runner_name, path: runner_name}
+      - {name: runner_group, path: runner_group_name}
+      - {name: labels, type: JSON, path: labels, description: "runs-on labels"}
+      - {name: url, path: html_url}
+      - {name: repo, filter_only: true}
+      - {name: attempts, filter_only: true}
+    examples:
+      - sql: >-
+          SELECT name, conclusion, failed_step, ts, completed_at - ts AS took, url FROM github_workflow_jobs
+          WHERE repo = 'acme/checkout' AND run_id = 29679449 ORDER BY ts
+        description: Which job and step of a deploy run failed.
+    fixtures:
+      - file: workflow_jobs.json
+        filters: {repo: octo-org/octo-repo, run_id: 29679449}
+        expect_rows: 1
+        expect_columns: {id: 399444496, run_id: 29679449, name: build, status: completed, conclusion: success, ts: "2020-01-20T17:42:40Z", workflow: CI, runner_name: "my runner", failed_step: null}
+        note: "Official example response of GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs (OpenAPI example job-paginated)."
+    docs_url: https://docs.github.com/en/rest/actions/workflow-jobs?apiVersion=2022-11-28#list-jobs-for-a-workflow-run
+
+  - name: github_job_logs
+    title: Log of one Actions job (plain text)
+    description: >-
+      The plain-text log of one workflow job: one row per log line, with the line's timestamp
+      prefix parsed into ts. Filter on repo and job_id (both required; from github_workflow_jobs.id).
+      GitHub answers with a 302 to a short-lived signed download URL, which is followed
+      automatically. Use it to read the actual error of a failed deploy/test job.
+    kind: logs
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/actions/jobs/{{ filters.job_id }}/logs"
+      response_format: text
+      timeout_s: 90
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: job_id, required: true, type: BIGINT, description: "github_workflow_jobs.id", examples: ["399444496"]}
+    response:
+      text:
+        regex: "^\\ufeff?(?P<ts>\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?Z) (?P<msg>.*)$"
+        skip_empty: true
+    columns:
+      - {name: line_no, type: BIGINT, expr: "_i + 1", description: "1-based line number in the log"}
+      - {name: ts, type: TIMESTAMP, path: ts, description: "Timestamp prefix of the line (NULL if absent)"}
+      - {name: message, expr: "_.msg if _.msg is not none and _.msg is defined else _.line", description: "Line text without the timestamp"}
+      - {name: level, expr: "'error' if ('##[error]' in _.line) else ('warning' if '##[warning]' in _.line else 'info')", description: "error for ##[error] lines, warning for ##[warning], else info"}
+      - {name: line, path: line, description: "Raw line"}
+      - {name: repo, filter_only: true}
+      - {name: job_id, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Logs expire with the repository's log retention (90 days by default, configurable 1-400): an expired log returns 410/404, which is not proof the job never ran."
+      - "Logs of a job that is still running are not available yet (404)."
+      - "Do not time-filter log lines with ts unless you need to: a missing prefix leaves ts NULL; filter on message / level instead."
+    examples:
+      - sql: >-
+          SELECT line_no, ts, message FROM github_job_logs
+          WHERE repo = 'acme/checkout' AND job_id = 399444496 AND (level = 'error' OR message ILIKE '%error%') ORDER BY line_no LIMIT 50
+        description: The error lines of a failed job.
+    fixtures:
+      - file: job_logs.txt
+        filters: {repo: octo-org/octo-repo, job_id: 399444496}
+        expect_rows: 6
+        expect_columns: {line_no: 1, ts: "2020-01-20T17:42:40Z", message: "##[group]Run actions/checkout@v4", level: info}
+        note: "The docs give no example body (the endpoint returns a 302 to 'a plain text file of logs'). Constructed minimal plain-text log in the downloaded-log format: each line prefixed with an RFC 3339 UTC timestamp and a space; ##[error] annotation marker."
+    docs_url: https://docs.github.com/en/rest/actions/workflow-jobs?apiVersion=2022-11-28#download-job-logs-for-a-workflow-run
+
+  - name: github_check_runs
+    title: Check runs for a commit / branch / tag
+    description: >-
+      One row per check run (CI jobs from GitHub Actions or third-party apps) on a ref: status,
+      conclusion, output title/summary, app. Filter on repo and ref (both required; SHA, branch or
+      tag), optionally check_name and status. attempts = 'all' includes older re-runs.
+    kind: events
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/commits/{{ filters.ref }}/check-runs"
+      query:
+        check_name: "{{ filters.name }}"
+        status: "{{ filters.status }}"
+        filter: "{{ filters.attempts }}"
+        per_page: 100
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: ref, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Commit SHA, branch or tag", examples: [main]}
+      - {column: name, description: "Check run name (exact)", examples: [build]}
+      - {column: status, description: "queued | in_progress | completed", examples: [completed]}
+      - {column: attempts, description: "latest (default) | all", examples: [latest]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$.check_runs[*]"
+    columns:
+      - {name: name, path: name}
+      - {name: status, path: status}
+      - {name: conclusion, path: conclusion, description: "success | failure | neutral | cancelled | skipped | timed_out | action_required | stale (NULL until completed)"}
+      - {name: ts, type: TIMESTAMP, path: started_at}
+      - {name: completed_at, type: TIMESTAMP, path: completed_at}
+      - {name: title, path: output.title}
+      - {name: summary, path: output.summary}
+      - {name: text, path: output.text}
+      - {name: annotations_count, type: BIGINT, path: output.annotations_count}
+      - {name: head_sha, path: head_sha}
+      - {name: app, path: app.slug, description: "App that created the check (github-actions, ...)"}
+      - {name: id, type: BIGINT, path: id}
+      - {name: url, path: html_url}
+      - {name: details_url, path: details_url}
+      - {name: total_count, type: BIGINT, path: "$.total_count"}
+      - {name: repo, filter_only: true}
+      - {name: ref, filter_only: true}
+      - {name: attempts, filter_only: true}
+    pitfalls:
+      - "Only the 1,000 most recent check suites of a ref are considered."
+      - "Check runs older than the Actions retention period (90 days by default, enforced since 2026-10-01) are deleted."
+      - "Classic commit statuses (Jenkins, CircleCI status API) are NOT check runs: see github_commit_statuses."
+    examples:
+      - sql: >-
+          SELECT name, status, conclusion, title, summary, url FROM github_check_runs
+          WHERE repo = 'acme/checkout' AND ref = 'a84d88e7554fc1fa21bcbc4efae3c782a70d2b9d' AND conclusion <> 'success'
+        description: Which checks did not pass on the deployed commit.
+    fixtures:
+      - file: check_runs.json
+        filters: {repo: github/hello-world, ref: ce587453ced02b1526dfb4cb910479d431683101}
+        expect_rows: 1
+        expect_columns: {name: mighty_readme, status: completed, conclusion: neutral, title: "Mighty Readme report", annotations_count: 2, app: octoapp, id: 4, total_count: 1, ts: "2018-05-04T01:14:52Z"}
+        note: "Official example response of GET /repos/{owner}/{repo}/commits/{ref}/check-runs (OpenAPI example check-run-paginated)."
+    docs_url: https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28#list-check-runs-for-a-git-reference
+
+  - name: github_commit_statuses
+    title: Commit statuses (combined status of a ref)
+    description: >-
+      The combined commit status of a ref: one row per status context (latest status of each
+      external CI/CD system that uses the Statuses API: Jenkins, CircleCI, Argo, deploy bots...),
+      plus the combined state (failure if any context failed, pending if none or one pending,
+      success otherwise). Filter on repo and ref (both required).
+    kind: events
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/commits/{{ filters.ref }}/status"
+      query:
+        per_page: 100
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: ref, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Commit SHA, branch or tag", examples: [main]}
+    response:
+      rows_path: "$.statuses[*]"
+    columns:
+      - {name: context, path: context, description: "Status context, e.g. continuous-integration/jenkins"}
+      - {name: state, path: state, description: "error | failure | pending | success"}
+      - {name: description, path: description}
+      - {name: ts, type: TIMESTAMP, path: updated_at}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: url, path: target_url, description: "Link set by the reporting system (build log)"}
+      - {name: combined_state, path: "$.state"}
+      - {name: sha, path: "$.sha"}
+      - {name: repo, filter_only: true}
+      - {name: ref, filter_only: true}
+    examples:
+      - sql: "SELECT context, state, description, url FROM github_commit_statuses WHERE repo = 'acme/checkout' AND ref = 'main'"
+        description: External CI/deploy statuses of the head of main.
+    fixtures:
+      - file: combined_status.json
+        filters: {repo: octocat/Hello-World, ref: 6dcb09b5b57875f334f61aebed695e2e4193db5e}
+        expect_rows: 2
+        expect_columns: {context: continuous-integration/jenkins, state: success, description: "Build has completed successfully", combined_state: success, sha: 6dcb09b5b57875f334f61aebed695e2e4193db5e, url: "https://ci.example.com/1000/output"}
+        note: "Official example response of GET /repos/{owner}/{repo}/commits/{ref}/status (OpenAPI example combined-commit-status)."
+    docs_url: https://docs.github.com/en/rest/commits/statuses?apiVersion=2022-11-28#get-the-combined-status-for-a-specific-reference
+
+  # ----------------------------------------------------------------------------------------------
+  # Search
+  # ----------------------------------------------------------------------------------------------
+  - name: github_search_code
+    title: Code search (default branch)
+    description: >-
+      Search file contents/paths on the DEFAULT branch: one row per matching file, with matching
+      fragments. query is required (search terms + qualifiers). Always scoped: if query has no
+      repo:/org:/user: qualifier, repo (when given) or org:GITHUB_OWNER is appended - an
+      unscoped query would search all of GitHub. Use it to find where an error message, config
+      key or endpoint lives.
+    kind: text
+    steps:
+      - name: search
+        when: "filters.repo or filters.org or env.GITHUB_OWNER or ('repo:' in filters.query) or ('org:' in filters.query) or ('user:' in filters.query)"
+        method: GET
+        path: /search/code
+        headers:
+          Accept: application/vnd.github.text-match+json
+        query:
+          q: "{{ filters.query }}{% if filters.repo %} repo:{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}{% elif ('repo:' not in filters.query) and ('org:' not in filters.query) and ('user:' not in filters.query) %} org:{{ filters.org or env.GITHUB_OWNER }}{% endif %}"
+          per_page: 100
+    filters:
+      - {column: query, required: true, description: "Search terms and qualifiers (path:, filename:, extension:, language:, in:file)", examples: ['"connection pool exhausted" language:java']}
+      - {column: repo, ops: ["=", "in"], max_fan_out: 5, description: "Scope to one repository (owner/name)", examples: [acme/checkout]}
+      - {column: org, description: "Scope to an organization (default GITHUB_OWNER)", examples: [acme]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 2}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: path, path: path, description: "File path in the repository"}
+      - {name: name, path: name, description: "File name"}
+      - {name: repository, path: repository.full_name}
+      - {name: fragments, type: JSON, path: "text_matches[*].fragment", description: "Matching snippets (text-match media type)"}
+      - {name: sha, path: sha, description: "Blob SHA"}
+      - {name: score, type: DOUBLE, path: score}
+      - {name: url, path: html_url, description: "File web URL (at the indexed commit)"}
+      - {name: total_count, type: BIGINT, path: "$.total_count"}
+      - {name: incomplete_results, type: BOOLEAN, path: "$.incomplete_results"}
+      - {name: query, filter_only: true}
+      - {name: repo, filter_only: true}
+      - {name: org, filter_only: true}
+    pitfalls:
+      - "MUST be scoped by repo:/org:/user: (this table appends one); otherwise it searches every public repo on GitHub."
+      - "Only the default branch is indexed, only files < 384 KB, and the index can lag recent pushes: a fix on a release branch is invisible."
+      - "10 requests per minute: do not fan out over many repos; scope with org instead."
+      - "Requires at least one search term besides qualifiers (language:go alone is invalid); no regular expressions."
+    examples:
+      - sql: >-
+          SELECT repository, path, fragments, url FROM github_search_code
+          WHERE query = '"connection pool exhausted"' AND org = 'acme'
+        description: Which services can emit the error message seen in the logs.
+      - sql: "SELECT path, url FROM github_search_code WHERE repo = 'acme/checkout' AND query = 'PAYMENT_TIMEOUT_MS extension:yaml'"
+        description: Where a config key is defined.
+    fixtures:
+      - file: search_code.json
+        filters: {query: 'addClass in:file language:js', repo: jquery/jquery}
+        expect_rows: 1
+        expect_columns: {path: src/attributes/classes.js, name: classes.js, repository: jquery/jquery, score: 1.0, total_count: 7, incomplete_results: false}
+        note: "Official example response of GET /search/code (OpenAPI example code-search-result-item-paginated)."
+    ui_link: "{{ ui_base_url }}/search?type=code&q={{ filters.query | urlencode }}"
+    docs_url: https://docs.github.com/en/rest/search/search?apiVersion=2022-11-28#search-code
+
+  - name: github_search_issues
+    title: Issue and pull request search
+    description: >-
+      Search issues and pull requests with GitHub search syntax (query required, e.g.
+      'is:issue label:incident state:open', 'is:pr "rate limiter"'). Scoped by repo or org when
+      given (appended as qualifiers), else by org:GITHUB_OWNER unless query already has a
+      repo:/org:/user: qualifier. One row per issue/PR, most recently updated first. Use it to
+      find known issues, incident tickets and PRs mentioning an error.
+    kind: generic
+    request:
+      method: GET
+      path: /search/issues
+      query:
+        q: "{{ filters.query }}{% if filters.repo %} repo:{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}{% elif filters.org %} org:{{ filters.org }}{% elif env.GITHUB_OWNER and ('repo:' not in filters.query) and ('org:' not in filters.query) and ('user:' not in filters.query) %} org:{{ env.GITHUB_OWNER }}{% endif %}"
+        sort: "{{ filters.sort or 'updated' }}"
+        order: desc
+        per_page: 100
+    filters:
+      - {column: query, required: true, description: "GitHub search query (qualifiers is:, label:, state:, author:, created:, updated:...)", examples: ['is:issue label:incident "checkout" state:open']}
+      - {column: repo, ops: ["=", "in"], max_fan_out: 5, description: "Scope to one repository", examples: [acme/checkout]}
+      - {column: org, description: "Scope to an organization", examples: [acme]}
+      - {column: sort, description: "updated (default) | created | comments | reactions | interactions", examples: [created]}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: updated_at, description: "Last update"}
+      - {name: number, type: BIGINT, path: number}
+      - {name: title, path: title}
+      - {name: state, path: state, description: "open | closed"}
+      - {name: state_reason, path: state_reason, description: "completed | not_planned | reopened"}
+      - {name: is_pull_request, type: BOOLEAN, expr: "_.pull_request is mapping"}
+      - {name: author, path: user.login}
+      - {name: labels, type: JSON, path: "labels[*].name"}
+      - {name: assignees, type: JSON, path: "assignees[*].login"}
+      - {name: created_at, type: TIMESTAMP, path: created_at}
+      - {name: closed_at, type: TIMESTAMP, path: closed_at}
+      - {name: comments, type: BIGINT, path: comments}
+      - {name: body, path: body}
+      - {name: repository, expr: "(_.repository_url or '').split('/repos/')[-1]"}
+      - {name: url, path: html_url}
+      - {name: total_count, type: BIGINT, path: "$.total_count"}
+      - {name: incomplete_results, type: BOOLEAN, path: "$.incomplete_results"}
+      - {name: query, filter_only: true}
+      - {name: repo, filter_only: true}
+      - {name: org, filter_only: true}
+      - {name: sort, filter_only: true}
+    pitfalls:
+      - "Without repo/org/user scope (and no GITHUB_OWNER) this searches ALL of GitHub; always scope it."
+      - "GitHub App user tokens must include is:issue or is:pull-request (422 otherwise)."
+      - "Time is not pushed down: put created:/updated: ranges in query (e.g. created:>=2026-10-01) to search a window."
+    examples:
+      - sql: >-
+          SELECT ts, repository, number, title, state, url FROM github_search_issues
+          WHERE query = 'is:issue "504 Gateway Timeout" created:>=2026-09-01' AND org = 'acme'
+        description: Has this error been reported before?
+    fixtures:
+      - file: search_issues.json
+        filters: {query: 'windows label:bug language:python state:open'}
+        expect_rows: 1
+        expect_columns: {number: 132, title: "Line Number Indexes Beyond 20 Not Displayed", state: open, is_pull_request: true, author: Nick3C, repository: batterseapower/pinyin-toolkit, comments: 15, ts: "2009-07-19T09:23:43Z", total_count: 280}
+        note: "Official example response of GET /search/issues (OpenAPI example issue-search-result-item-paginated)."
+    ui_link: "{{ ui_base_url }}/search?type=issues&q={{ filters.query | urlencode }}"
+    docs_url: https://docs.github.com/en/rest/search/search?apiVersion=2022-11-28#search-issues-and-pull-requests
+
+  - name: github_search_commits
+    title: Commit search (default branches, repo or org-wide)
+    description: >-
+      Search commits on default branches by message and qualifiers (author:, committer:,
+      merge:false, hash:), scoped by repo or org (default GITHUB_OWNER). The ts window is appended
+      as committer-date:START..END unless query already has a date qualifier. One row per commit,
+      newest first. Org-wide alternative to github_commits.
+    kind: changes
+    steps:
+      - name: search
+        when: "filters.repo or filters.org or env.GITHUB_OWNER or ('repo:' in (filters.query or '')) or ('org:' in (filters.query or ''))"
+        method: GET
+        path: /search/commits
+        query:
+          q: "{{ filters.query or '' }}{% if filters.repo %} repo:{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}{% elif ('repo:' not in (filters.query or '')) and ('org:' not in (filters.query or '')) and ('user:' not in (filters.query or '')) %} org:{{ filters.org or env.GITHUB_OWNER }}{% endif %}{% if 'committer-date:' not in (filters.query or '') and 'author-date:' not in (filters.query or '') %} committer-date:{{ time.start | rfc3339 }}..{{ time.end | rfc3339 }}{% endif %}"
+          sort: committer-date
+          order: desc
+          per_page: 100
+    filters:
+      - {column: query, description: "Terms and qualifiers, e.g. 'revert' or 'author:octocat merge:false'", examples: ['revert']}
+      - {column: repo, ops: ["=", "in"], max_fan_out: 5, description: "Scope to one repository", examples: [acme/checkout]}
+      - {column: org, description: "Scope to an organization (default GITHUB_OWNER)", examples: [acme]}
+    time: {column: ts, default_lookback: 48h, max_window: 90d}
+    pagination: {type: page, page_param: query.page, limit_param: query.per_page, page_size: 100, start: 1, max_pages: 3}
+    response:
+      rows_path: "$.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: commit.committer.date}
+      - {name: sha, path: sha}
+      - {name: short_sha, expr: "(_.sha or '')[:7]"}
+      - {name: title, expr: "((_.commit.message or '').split('\n'))[0]"}
+      - {name: message, path: commit.message}
+      - {name: author, path: author.login}
+      - {name: author_name, path: commit.author.name}
+      - {name: repository, path: repository.full_name}
+      - {name: repo, expr: "filters.repo if filters.repo else _.repository.name"}
+      - {name: score, type: DOUBLE, path: score}
+      - {name: url, path: html_url}
+      - {name: total_count, type: BIGINT, path: "$.total_count"}
+      - {name: org, filter_only: true}
+      - {name: query, filter_only: true}
+    pitfalls:
+      - "Only default branches are searched, and forks are excluded unless fork:true is given."
+    examples:
+      - sql: >-
+          SELECT ts, repository, short_sha, author, title FROM github_search_commits
+          WHERE org = 'acme' AND query = 'revert' AND ts >= now() - INTERVAL 3 DAY ORDER BY ts DESC
+        description: Reverts anywhere in the org in the last three days (someone may already have rolled back).
+    fixtures:
+      - file: search_commits.json
+        filters: {query: 'css', repo: octocat/Spoon-Knife}
+        expect_rows: 1
+        expect_columns: {sha: bb4cc8d3b2e14b3af5df699876dd4ff3acd00b7f, title: "Create styles.css and updated README", author: octocat, repository: octocat/Spoon-Knife, repo: octocat/Spoon-Knife, total_count: 1}
+        note: "Official example response of GET /search/commits (OpenAPI example commit-search-result-item-paginated)."
+    docs_url: https://docs.github.com/en/rest/search/search?apiVersion=2022-11-28#search-commits
+
+  # ----------------------------------------------------------------------------------------------
+  # Contents
+  # ----------------------------------------------------------------------------------------------
+  - name: github_contents
+    title: Directory listing / file metadata at a ref
+    description: >-
+      GET /repos/{repo}/contents/{path}?ref=...: for a directory, one row per entry (type file |
+      dir | symlink | submodule); for a file, one row with its size, blob SHA and base64 content.
+      Filter on repo and path (required; '' is the repository root) and ref (default: default
+      branch). To READ a file as text use github_file_lines.
+    kind: entities
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/contents/{{ filters.path | trim('/') }}"
+      query:
+        ref: "{{ filters.ref }}"
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: path, required: true, description: "File or directory path ('' = root)", examples: [deploy/helm]}
+      - {column: ref, description: "Branch, tag or SHA (default: default branch)", examples: [v1.5.0]}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: type, path: type, description: "file | dir | symlink | submodule"}
+      - {name: name, path: name}
+      - {name: entry_path, path: path, description: "Full path of the entry"}
+      - {name: size, type: BIGINT, path: size, description: "Bytes"}
+      - {name: sha, path: sha, description: "Blob/tree SHA (changes whenever the content changes)"}
+      - {name: encoding, path: encoding, description: "base64 for files"}
+      - {name: content, path: content, description: "Base64-encoded content (files <= 1 MB only; not decoded - use github_file_lines)"}
+      - {name: url, path: html_url}
+      - {name: download_url, path: download_url}
+      - {name: repo, filter_only: true}
+      - {name: path, filter_only: true}
+      - {name: ref, filter_only: true}
+    pitfalls:
+      - "Directories list at most 1,000 entries; files of 1-100 MB return an empty content (use github_file_lines); > 100 MB are not supported."
+      - "Submodules appear with type 'file' in directory listings (GitHub backwards compatibility)."
+    examples:
+      - sql: "SELECT name, type, size, sha FROM github_contents WHERE repo = 'acme/checkout' AND path = 'deploy/helm' AND ref = 'v1.5.0'"
+        description: What is in the deploy directory at the released tag.
+    fixtures:
+      - file: contents_dir.json
+        filters: {repo: octokit/octokit.rb, path: lib}
+        expect_rows: 2
+        expect_columns: {type: file, name: octokit.rb, entry_path: lib/octokit.rb, size: 625, path: lib}
+        note: "Official example response of GET /repos/{owner}/{repo}/contents/{path} for a directory (OpenAPI example content-file-response-if-content-is-a-directory)."
+      - file: contents_file.json
+        filters: {repo: octokit/octokit.rb, path: README.md}
+        expect_rows: 1
+        expect_columns: {type: file, name: README.md, entry_path: README.md, size: 5362, encoding: base64, sha: 3d21ec53a331a6f037a91c368710b99387d012c1}
+        note: "Official example response of GET /repos/{owner}/{repo}/contents/{path} for a file (OpenAPI example content-file-response-if-content-is-a-file)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/tree/{{ filters.ref or 'HEAD' }}/{{ filters.path }}"
+    docs_url: https://docs.github.com/en/rest/repos/contents?apiVersion=2022-11-28#get-repository-content
+
+  - name: github_file_lines
+    title: A file's text at a ref, one row per line
+    description: >-
+      Read a file as text at any ref (Accept: application/vnd.github.raw+json returns the raw
+      bytes, decoded as UTF-8): one row per line with its 1-based line number. Filter on repo and
+      path (both required) and ref (default branch if omitted). Use it to read configs, manifests
+      or code exactly as deployed (ref = release tag or deployed SHA), and diff two refs in SQL.
+    kind: text
+    request:
+      method: GET
+      path: "/repos/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/contents/{{ filters.path | trim('/') }}"
+      query:
+        ref: "{{ filters.ref }}"
+      headers:
+        Accept: application/vnd.github.raw+json
+      response_format: text
+    filters:
+      - {column: repo, required: true, description: "owner/name", examples: [acme/checkout]}
+      - {column: path, required: true, description: "File path", examples: [deploy/helm/values-prod.yaml]}
+      - {column: ref, ops: ["=", "in"], max_fan_out: 4, description: "Branch, tag or SHA (IN-list fans out: compare versions)", examples: [v1.5.0]}
+    response:
+      text: {skip_empty: false}
+    columns:
+      - {name: line_no, type: BIGINT, expr: "_i + 1", description: "1-based line number"}
+      - {name: line, path: line, description: "Line text"}
+      - {name: repo, filter_only: true}
+      - {name: path, filter_only: true}
+      - {name: ref, filter_only: true}
+    max_rows: 20000
+    pitfalls:
+      - "A directory path returns a JSON listing (one JSON text line), not file content: use github_contents for directories."
+      - "Binary files produce garbage lines; files > 100 MB are not supported."
+    examples:
+      - sql: >-
+          SELECT line_no, line FROM github_file_lines
+          WHERE repo = 'acme/checkout' AND path = 'deploy/helm/values-prod.yaml' AND ref = 'v1.5.0' AND line ILIKE '%timeout%'
+        description: Timeout settings in the production values file as released.
+      - sql: >-
+          SELECT ref, line_no, line FROM github_file_lines
+          WHERE repo = 'acme/checkout' AND path = 'config/pool.yaml' AND ref IN ('v1.4.2', 'v1.5.0') ORDER BY line_no, ref
+        description: The same config file at two releases, side by side.
+    fixtures:
+      - file: file_raw.txt
+        filters: {repo: octokit/octokit.rb, path: README.md, ref: master}
+        expect_rows: 5
+        expect_columns: {line_no: 1, line: "# Octokit", ref: master}
+        note: "The raw media type returns the file's bytes; the docs show no example body for it, so this fixture is a short plain-text file body (README-style lines including an empty line, which must keep its line number)."
+    ui_link: "{{ ui_base_url }}/{{ filters.repo if '/' in filters.repo else env.GITHUB_OWNER ~ '/' ~ filters.repo }}/blob/{{ filters.ref or 'HEAD' }}/{{ filters.path }}"
+    docs_url: https://docs.github.com/en/rest/repos/contents?apiVersion=2022-11-28#get-repository-content
+
+roles:
+  code_changes:
+    - table: github_merged_pulls
+      filters: {repo: "{{ service }}"}
+      columns: {ts: ts, service: repo, title: title, author: author, url: url}
+      notes: "Merged PRs in the window; without a service it covers the whole GITHUB_OWNER org."
+    - table: github_commits
+      filters: {repo: "{{ service }}"}
+      columns: {ts: ts, service: repo, title: title, version: sha, author: author, url: url}
+      notes: "Default-branch commits (also catches direct pushes); needs a service (= repo name)."
+  change_events:
+    - table: github_deployments
+      filters: {repo: "{{ service }}"}
+      columns: {ts: ts, service: repo, title: title, version: sha, author: author, env: env}
+    - table: github_releases
+      filters: {repo: "{{ service }}"}
+      columns: {ts: ts, service: repo, title: title, version: version, author: author, url: url}
+  tickets:
+    table: github_search_issues
+    filters: {query: "is:issue {{ query or service or '' }}"}
+    columns: {ts: ts, title: title, state: state, url: url, author: author}
+    query_language: github_search
+    notes: "Scoped to org:GITHUB_OWNER unless repo/org filters are given."

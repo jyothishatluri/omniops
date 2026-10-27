@@ -1,0 +1,117 @@
+{
+  "tables": [
+    {
+      "name": "PrimaryResult",
+      "columns": [
+        {
+          "name": "TimeGenerated",
+          "type": "datetime"
+        },
+        {
+          "name": "AppRoleName",
+          "type": "string"
+        },
+        {
+          "name": "AppRoleInstance",
+          "type": "string"
+        },
+        {
+          "name": "Name",
+          "type": "string"
+        },
+        {
+          "name": "OperationName",
+          "type": "string"
+        },
+        {
+          "name": "Url",
+          "type": "string"
+        },
+        {
+          "name": "ResultCode",
+          "type": "string"
+        },
+        {
+          "name": "Success",
+          "type": "bool"
+        },
+        {
+          "name": "DurationMs",
+          "type": "real"
+        },
+        {
+          "name": "OperationId",
+          "type": "string"
+        },
+        {
+          "name": "Id",
+          "type": "string"
+        },
+        {
+          "name": "ParentId",
+          "type": "string"
+        },
+        {
+          "name": "ItemCount",
+          "type": "int"
+        },
+        {
+          "name": "AppVersion",
+          "type": "string"
+        },
+        {
+          "name": "SyntheticSource",
+          "type": "string"
+        },
+        {
+          "name": "Properties",
+          "type": "dynamic"
+        },
+        {
+          "name": "_ResourceId",
+          "type": "string"
+        }
+      ],
+      "rows": [
+        [
+          "2026-10-01T11:42:07.1230000Z",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-x2k8p",
+          "POST /api/orders",
+          "POST /api/orders",
+          "https://shop.contoso.com/api/orders",
+          "500",
+          false,
+          1834.5,
+          "0af7651916cd43dd8448eb211c80319c",
+          "a4c2b3d1e5f60718",
+          "0af7651916cd43dd8448eb211c80319c",
+          1,
+          "2.14.0",
+          "",
+          "{\"_MS.ProcessedByMetricExtractors\":\"(Name:'Requests', Ver:'1.1')\"}",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"
+        ],
+        [
+          "2026-10-01T11:41:58.9030000Z",
+          "checkout-api",
+          "checkout-api-7d9c6b5f4-m9q2z",
+          "GET /api/orders/{id}",
+          "GET /api/orders/{id}",
+          "https://shop.contoso.com/api/orders/8812",
+          "200",
+          true,
+          42.7,
+          "5b8efff798038103d269b633813fc60c",
+          "eee19b7ec3c1b174",
+          "5b8efff798038103d269b633813fc60c",
+          4,
+          "2.14.0",
+          "",
+          "{}",
+          "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-shop-prod/providers/microsoft.insights/components/shop-appi"
+        ]
+      ]
+    }
+  ]
+}

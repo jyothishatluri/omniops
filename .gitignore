@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.omniops/
+jobs/
+runs/
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/

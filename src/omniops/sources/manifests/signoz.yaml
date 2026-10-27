@@ -1,0 +1,1731 @@
+# SigNoz (Cloud and self-hosted) HTTP API, direct REST, no MCP.
+#
+# References (checked 2026-10-27):
+#   API reference (OpenAPI, SigNoz v0.147.0):  https://signoz.io/api-reference/
+#   machine-readable spec:                     https://signoz.io/api/api-reference-openapi/latest/
+#   Logs / Traces / Metrics query guides (all POST /api/v5/query_range):
+#     https://signoz.io/docs/logs-management/logs-api/overview/
+#     https://signoz.io/docs/traces-management/trace-api/overview/
+#     https://signoz.io/docs/metrics-management/query-range-api/
+# The query_range v5 docs show request payloads only; response fixtures are built strictly from
+# the OpenAPI response schema (Querybuildertypesv5QueryRangeResponse) and the JSON tags in
+# pkg/types/querybuildertypes/querybuildertypesv5/resp.go, with row contents taken from SigNoz's
+# own integration tests (tests/integration/tests/querier*). The services / top-operations /
+# dependency-graph endpoints that power the SigNoz Services and Service Map pages are not in the
+# API reference; they are taken from the official source (pkg/query-service/app/http_handler.go,
+# pkg/modules/services) and their fixtures from the SigNoz frontend mocks. Each fixture note says
+# which. Research notes and doc links: docs/sources/signoz.md
+source: signoz
+display_name: SigNoz
+vendor: SigNoz Inc.
+description: >-
+  SigNoz (OpenTelemetry-native APM) query API: logs, spans and trace aggregations, metrics
+  (builder and PromQL), trace waterfalls, the services list with RED stats, top operations, the
+  service map, active alerts, alert rules, alert-rule state history, metric and attribute
+  discovery, host and pod infrastructure lists, dashboards, planned downtimes, exceptions and
+  ingestion stats.
+docs_url: https://signoz.io/api-reference/
+categories: [metrics, logs, traces, alerts, apm, topology, infrastructure, kubernetes]
+base_url: "{{ env.SIGNOZ_URL }}"
+ui_base_url: "{{ env.SIGNOZ_URL }}"
+env:
+  - name: SIGNOZ_URL
+    description: >-
+      Instance URL WITHOUT a trailing /api: SigNoz Cloud https://<tenant>.<region>.signoz.cloud
+      (the URL of the SigNoz UI, not the ingest.<region>.signoz.cloud OTLP endpoint);
+      self-hosted e.g. https://signoz.example.com or http://signoz:8080.
+  - name: SIGNOZ_API_KEY
+    description: >-
+      Service-account API key (Settings > Service Accounts > Keys), sent as the SIGNOZ-API-KEY
+      header. A signoz-viewer role is enough for every table here.
+    secret: true
+  - name: SIGNOZ_ENV_ATTRIBUTE
+    description: "Resource attribute holding the environment, used by env filters (deployment.environment, or deployment.environment.name on newer OTel semconv)"
+    default: deployment.environment
+required_env: [SIGNOZ_URL, SIGNOZ_API_KEY]
+auth:
+  type: headers
+  headers:
+    SIGNOZ-API-KEY: "{{ env.SIGNOZ_API_KEY }}"
+headers:
+  Accept: application/json
+rate_limit:
+  concurrency: 4
+  requests_per_minute: 120
+  notes: >-
+    No published query-API quota (the documented 100 RPS limit is for trial-account ingestion).
+    Queries run on the tenant's ClickHouse: keep windows short and filters selective. The engine
+    caps the source at 120 requests/min.
+retention:
+  logs: "15 days by default (Cloud: 15/30/90/180 days or 1 year; self-hosted: Settings > General)"
+  traces: "15 days by default (same options as logs)"
+  metrics: "30 days by default (Cloud: 1, 3, 6 or 13 months)"
+errors:
+  - path: "$.status"
+    equals: error
+    message: "$.error.message"
+    hint: "SigNoz rejected the query (status=error): read error.message / error.errors[].message, fix the filter expression or field names; do not retry unchanged"
+pitfalls:
+  - "All query_range v5 times are epoch MILLISECONDS (start/end); stepInterval is in SECONDS. The services / top-operations / service-map endpoints instead take epoch NANOSECONDS as strings. Span durations (duration_nano, p99, avgDuration) are NANOSECONDS: the tables convert them to *_ms columns."
+  - "Filter expressions use the v5 search syntax: service.name = 'checkout' AND http.status_code >= 500, IN ('a', 'b'), CONTAINS, LIKE '%x%', ILIKE, REGEXP, EXISTS. String values need single quotes. A bare quoted string ('timeout') is a full-text search on the log body."
+  - "An unknown attribute key is NOT an error on current versions: the query returns HTTP 200, 0 rows and a 'key ... not found' warning in data.warning (exposed as the warning column when rows exist); v0.92-era versions answered HTTP 400 with suggestions instead. Check names with signoz_field_keys / signoz_field_values / signoz_metric_attributes before concluding 'no data'."
+  - "Attribute names are OpenTelemetry dotted keys (service.name, host.name, k8s.namespace.name, k8s.pod.name, http.status_code / http.response.status_code); the same key can exist as string and number (an 'ambiguous key' warning): prefix with the context (resource.service.name, attribute.http.status_code) to disambiguate."
+  - "query_range v5 (Query Builder v5) needs SigNoz >= v0.92.1 (August 2025); older self-hosted instances only have /api/v3 (logs/traces) and /api/v4 (metrics) query_range with a different payload: upgrade rather than mixing payload versions. The alert-history v2 endpoints need >= v0.118.0."
+query_languages:
+  signoz_filter: >-
+    SigNoz v5 filter expression (logs, traces, metrics): field operator value joined with AND / OR /
+    NOT and parentheses. Operators: = != > >= < <= IN ('a','b') NOT IN, LIKE '%x%' / ILIKE,
+    CONTAINS 'x', REGEXP 're', EXISTS / NOT EXISTS. Strings in single quotes. Logs top-level fields:
+    body, severity_text, severity_number, trace_id, span_id; span fields: name, duration_nano,
+    has_error, status_code_string, kind_string, parent_span_id, http_method, response_status_code,
+    db_name, db_operation, isRoot, isEntryPoint; resource attributes: service.name, host.name,
+    deployment.environment, k8s.namespace.name, k8s.pod.name. Full-text (logs only): a quoted
+    string such as 'connection refused' (evaluated as an RE2 regex when it compiles).
+  signoz_trace_aggregation: >-
+    Trace/log aggregation expressions: count(), count_distinct(field), countIf(cond), sum(f),
+    avg(f), min(f), max(f), p50(f) p75(f) p90(f) p95(f) p99(f), rate(), e.g.
+    countIf(has_error = true), p99(duration_nano) (nanoseconds), count_distinct(trace_id).
+  promql: >-
+    PromQL over SigNoz metrics. OpenTelemetry metric and label names contain dots, which bare
+    selectors do not allow: write {__name__="k8s.pod.memory.usage", "k8s.namespace.name"="shop"}
+    and quote dotted label names in by (...): sum by ("service.name") (rate({"signoz_calls_total"}[5m])).
+tables:
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_logs
+    title: Log search (query_range v5, raw)
+    description: >-
+      Log records in the window, newest first: one row per log line with level, body, service,
+      host, k8s resource attributes, trace/span ids and the attribute maps. Filter on service,
+      env, host, namespace, pod, level (severity_text), error_only (ERROR/FATAL by severity_text
+      or severity_number >= 17), trace_id, search (full-text on the body) and/or query (any v5
+      filter expression, query language signoz_filter), and ts. One page of up to 5,000 rows
+      (default 500; SQL LIMIT raises it).
+    kind: logs
+    request:
+      method: POST
+      path: /api/v5/query_range
+      body:
+        schemaVersion: v1
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        requestType: raw
+        variables: {}
+        formatOptions: {formatTableResultForUI: false, fillGaps: false}
+        compositeQuery:
+          queries:
+            - type: builder_query
+              spec:
+                name: A
+                signal: logs
+                filter:
+                  expression: >-
+                    {{ [
+                      ('(' ~ filters.query ~ ')') if filters.query else None,
+                      (filters.search | squote) if filters.search else None,
+                      ('service.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ')') if filters.service else None,
+                      (env.SIGNOZ_ENV_ATTRIBUTE ~ ' IN (' ~ (filters.env | as_list | map('squote') | join(', ')) ~ ')') if filters.env else None,
+                      ('host.name IN (' ~ (filters.host | as_list | map('squote') | join(', ')) ~ ')') if filters.host else None,
+                      ('k8s.namespace.name IN (' ~ (filters.namespace | as_list | map('squote') | join(', ')) ~ ')') if filters.namespace else None,
+                      ('k8s.pod.name IN (' ~ (filters.pod | as_list | map('squote') | join(', ')) ~ ')') if filters.pod else None,
+                      ('severity_text IN (' ~ (filters.level | as_list | map('squote') | join(', ')) ~ ')') if filters.level else None,
+                      "(severity_number >= 17 OR severity_text IN ('ERROR', 'error', 'Error', 'FATAL', 'fatal', 'CRITICAL', 'critical'))" if filters.error_only else None,
+                      ('trace_id = ' ~ (filters.trace_id | squote)) if filters.trace_id else None
+                    ] | compact | join(' AND ') }}
+                order:
+                  - {key: {name: timestamp}, direction: desc}
+                  - {key: {name: id}, direction: desc}
+                offset: 0
+                limit: "{{ [limit or 500, 5000] | min }}"
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Exact service.name (resource attribute)", examples: [checkout]}
+      - {column: env, ops: ["=", "in"], fan_out: false, description: "Environment (resource attribute SIGNOZ_ENV_ATTRIBUTE, default deployment.environment)", examples: [production]}
+      - {column: host, ops: ["=", "in"], fan_out: false, description: "Exact host.name", examples: [ip-10-0-3-17]}
+      - {column: namespace, ops: ["=", "in"], fan_out: false, description: "Exact k8s.namespace.name"}
+      - {column: pod, ops: ["=", "in"], fan_out: false, description: "Exact k8s.pod.name"}
+      - {column: level, ops: ["=", "in"], fan_out: false, description: "severity_text exactly as ingested (ERROR, error, WARN...; case-sensitive)", examples: [ERROR]}
+      - {column: error_only, type: BOOLEAN, description: "true = ERROR/FATAL/CRITICAL by severity_text or severity_number >= 17"}
+      - {column: trace_id, description: "Logs correlated to one trace (needs trace_id injected into the logs)"}
+      - {column: search, description: "Full-text search in the log body (quoted phrase; RE2 regex when it compiles, so escape . [ ] ( ) * + ? |)", examples: [connection refused]}
+      - {column: query, description: "Any v5 filter expression, AND-ed with the other filters (query language signoz_filter)", examples: ["k8s.deployment.name = 'checkout' AND body CONTAINS 'timeout'"]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.data.data.results[0].rows[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "Log timestamp (UTC)"}
+      - {name: level, path: "data.severity_text", description: "severity_text as ingested"}
+      - {name: severity_number, type: BIGINT, path: "data.severity_number", description: "OTel severity number (9-12 INFO, 13-16 WARN, 17-20 ERROR, 21-24 FATAL; 0 = unset)"}
+      - {name: message, path: "data.body", description: "Log body"}
+      - {name: service, path: "data.resources_string['service.name']"}
+      - {name: env, expr: "_.data.resources_string['deployment.environment'] or _.data.resources_string['deployment.environment.name']"}
+      - {name: host, path: "data.resources_string['host.name']"}
+      - {name: namespace, path: "data.resources_string['k8s.namespace.name']"}
+      - {name: pod, path: "data.resources_string['k8s.pod.name']"}
+      - {name: container, path: "data.resources_string['k8s.container.name']"}
+      - {name: trace_id, expr: "_.data.trace_id or None"}
+      - {name: span_id, expr: "_.data.span_id or None"}
+      - {name: id, path: "data.id", description: "Log record id (stable sort key)"}
+      - {name: attributes, type: JSON, path: "data.attributes_string", description: "String attributes, e.g. attributes->>'code.file'"}
+      - {name: attributes_number, type: JSON, path: "data.attributes_number"}
+      - {name: attributes_bool, type: JSON, path: "data.attributes_bool"}
+      - {name: resources, type: JSON, path: "data.resources_string", description: "Resource attributes (service.name, host.name, k8s.*, cloud.*)"}
+      - {name: scope_name, path: "data.scope_name"}
+      - {name: warning, type: JSON, path: "$.data.warning", description: "Query warnings (unknown/ambiguous keys) when present"}
+      - {name: error_only, type: BOOLEAN, filter_only: true}
+      - {name: search, filter_only: true}
+      - {name: query, filter_only: true}
+    sort_hint: "Newest first (timestamp desc, id desc)."
+    pitfalls:
+      - "One page only (pagination needs body.compositeQuery.queries[0].spec.offset, which the engine cannot set): at most 5,000 rows; narrow the window or filters, or use signoz_log_counts for volumes."
+      - "severity_text is free text from the source (ERROR vs error vs Error): prefer error_only = true, which also checks severity_number."
+      - "Full-text search runs over the body only and is treated as an RE2 regex when it compiles ('a.b' matches 'axb'): escape metacharacters."
+      - "trace_id is only set when the logging SDK injects it; an empty trace_id does not mean the request had no trace."
+    examples:
+      - sql: >-
+          SELECT ts, service, host, level, message, trace_id FROM signoz_logs
+          WHERE service = 'checkout' AND error_only = true
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY ts DESC LIMIT 200
+        description: Error logs of a service in the incident window, with trace ids to pivot to signoz_trace.
+      - sql: >-
+          SELECT pod, count(*) AS lines, min(ts) AS first_seen, any_value(message) AS sample
+          FROM signoz_logs WHERE namespace = 'payments' AND search = 'connection refused'
+          GROUP BY pod ORDER BY lines DESC
+        description: Which pods log a specific error string, and since when.
+    fixtures:
+      - file: logs_raw.json
+        note: "Built strictly from the OpenAPI RawData schema (data.data.results[].rows[{timestamp, data}]); row contents are the values asserted by SigNoz's integration test tests/integration/tests/querierlogs/01_list.py, key set from 07_list_expectations.py. Timestamps and ids illustrative."
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:42:07.512Z", service: go, host: linux-001, env: production, level: INFO, severity_number: 9, message: "This is a log message, coming from a go application", trace_id: null, attributes: {not_null: true}}
+      - file: logs_empty.json
+        note: "Empty result: rows is null when nothing matches (asserted in querierlogs/07_list_expectations.py)."
+        expect_rows: 0
+      - file: query_error.json
+        note: "RenderErrorResponse shape from the OpenAPI schema (status=error, error{type, code, message, errors[], suggestions[]}); SigNoz normally sends it with HTTP 400, the rule guards proxies that return 200. Message text illustrative."
+        expect_error: "syntax errors"
+    ui_link: "{{ source.base_url }}/logs/logs-explorer?startTime={{ time.start | epoch_ms }}&endTime={{ time.end | epoch_ms }}"
+    docs_url: https://signoz.io/docs/logs-management/logs-api/search-logs/
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_log_counts
+    title: Log volume over time (query_range v5, time_series)
+    description: >-
+      Log counts (or any log aggregation) per time bucket grouped by a field: one row per
+      (group, bucket). Filter on group_by (default service.name; 'none' for a single series; IN
+      for several keys), aggregation (default count(); IN fans out), the same filters as
+      signoz_logs (service, env, host, namespace, pod, level, error_only, search, query), step
+      (seconds) and ts. Empty buckets are filled with 0 (fillGaps).
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/v5/query_range
+      body:
+        schemaVersion: v1
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        requestType: time_series
+        variables: {}
+        formatOptions: {formatTableResultForUI: false, fillGaps: true}
+        compositeQuery:
+          queries:
+            - type: builder_query
+              spec:
+                name: A
+                signal: logs
+                stepInterval: "{{ filters.step or time.step_s }}"
+                aggregations:
+                  - {expression: "{{ filters.aggregation or 'count()' }}", alias: agg_value}
+                filter:
+                  expression: >-
+                    {{ [
+                      ('(' ~ filters.query ~ ')') if filters.query else None,
+                      (filters.search | squote) if filters.search else None,
+                      ('service.name = ' ~ (filters.service | squote)) if filters.service else None,
+                      (env.SIGNOZ_ENV_ATTRIBUTE ~ ' = ' ~ (filters.env | squote)) if filters.env else None,
+                      ('host.name = ' ~ (filters.host | squote)) if filters.host else None,
+                      ('k8s.namespace.name = ' ~ (filters.namespace | squote)) if filters.namespace else None,
+                      ('k8s.pod.name = ' ~ (filters.pod | squote)) if filters.pod else None,
+                      ('severity_text = ' ~ (filters.level | squote)) if filters.level else None,
+                      "(severity_number >= 17 OR severity_text IN ('ERROR', 'error', 'Error', 'FATAL', 'fatal', 'CRITICAL', 'critical'))" if filters.error_only else None
+                    ] | compact | join(' AND ') }}
+                # kv_list turns ['service.name', 'k8s.pod.name'] into [{name: service.name}, {name: k8s.pod.name}]
+                # (key_name == value_name keeps only the value); v5 rejects unknown JSON fields.
+                groupBy: "{{ [] if filters.group_by == 'none' else ((filters.group_by or 'service.name') | as_list | format_each('_={}') | kv_list(',', '=', 'name', 'name')) }}"
+                order:
+                  - {key: {name: agg_value}, direction: desc}
+                limit: "{{ filters.top_n or 50 }}"
+    filters:
+      - {column: group_by, ops: ["=", "in"], fan_out: false, description: "Field(s) to group by (default service.name; 'none' = one series), e.g. severity_text, k8s.pod.name, host.name", examples: [service.name]}
+      - {column: aggregation, ops: ["=", "in"], max_fan_out: 4, description: "Aggregation expression (default count()), e.g. count_distinct(trace_id) (query language signoz_trace_aggregation)", examples: ["count()"]}
+      - {column: service, ops: ["=", "in"], max_fan_out: 10, description: "Exact service.name", examples: [checkout]}
+      - {column: env, ops: ["=", "in"], max_fan_out: 5, description: "Environment (SIGNOZ_ENV_ATTRIBUTE)"}
+      - {column: host, ops: ["=", "in"], max_fan_out: 10, description: "Exact host.name"}
+      - {column: namespace, ops: ["=", "in"], max_fan_out: 10, description: "Exact k8s.namespace.name"}
+      - {column: pod, ops: ["=", "in"], max_fan_out: 10, description: "Exact k8s.pod.name"}
+      - {column: level, ops: ["=", "in"], max_fan_out: 6, description: "Exact severity_text", examples: [ERROR]}
+      - {column: error_only, type: BOOLEAN, description: "true = only ERROR/FATAL logs"}
+      - {column: search, description: "Full-text search in the body"}
+      - {column: query, description: "Any v5 filter expression (signoz_filter)"}
+      - {column: top_n, type: BIGINT, description: "Number of groups kept, highest totals first (default 50)"}
+      - {column: step, type: BIGINT, description: "Bucket size in SECONDS (default ~300 points over the window)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    response:
+      rows_path: "$.data.data.results[*].aggregations[*]"
+      expand:
+        - {explode: series, as: s}
+        - {explode: "@s.values", as: v}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@v.timestamp", transform: epoch_ms, description: "Bucket start (UTC)"}
+      - {name: value, type: DOUBLE, path: "@v.value", description: "Aggregated value in the bucket (log count by default)"}
+      - {name: partial, type: BOOLEAN, path: "@v.partial", description: "true when the bucket is only partly inside the window"}
+      - {name: group_value, expr: "(s.labels or []) | map(attribute='value') | join(', ')", description: "Values of the group-by keys, comma-separated"}
+      - {name: service, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'service.name') | map(attribute='value') | first"}
+      - {name: level, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'severity_text') | map(attribute='value') | first"}
+      - {name: host, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'host.name') | map(attribute='value') | first"}
+      - {name: pod, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'k8s.pod.name') | map(attribute='value') | first"}
+      - {name: namespace, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'k8s.namespace.name') | map(attribute='value') | first"}
+      - {name: env, filter_only: true}
+      - {name: labels, type: JSON, path: "@s.labels", description: "[{key: {name}, value}] group-by labels"}
+      - {name: aggregation, expr: "filters.aggregation or 'count()'", description: "The aggregation expression of this row"}
+      - {name: warning, type: JSON, path: "$.data.warning"}
+      - {name: group_by, filter_only: true}
+      - {name: error_only, type: BOOLEAN, filter_only: true}
+      - {name: search, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: top_n, type: BIGINT, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    zero_fill: false
+    pitfalls:
+      - "Only the top_n groups (default 50) by total are returned: raise top_n or filter when a long tail matters."
+      - "The last bucket is usually partial (partial = true): do not read its drop as recovery."
+    examples:
+      - sql: >-
+          SELECT service, sum(value) AS errors, max(value) AS peak_per_bucket, arg_max(ts, value) AS peak_at
+          FROM signoz_log_counts WHERE error_only = true
+            AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY service ORDER BY errors DESC LIMIT 10
+        description: Services ranked by error-log volume around the incident and when each peaked.
+      - sql: "SELECT ts, level, value FROM signoz_log_counts WHERE service = 'checkout' AND group_by = 'severity_text' ORDER BY ts"
+        description: Log volume per level for one service over the analysis window.
+    fixtures:
+      - file: log_counts_ts.json
+        note: "Built strictly from the OpenAPI TimeSeriesData / AggregationBucket / TimeSeries schemas (results[].aggregations[].series[].{labels[{key{name}, value}], values[{timestamp, value, partial}]}); request = the docs' logs_time_series example (count() grouped by service.name, stepInterval 60s). Values illustrative."
+        filters: {group_by: service.name}
+        expect_rows: 5
+        expect_columns: {ts: "2022-01-01T00:00:00Z", value: 12.0, service: frontend, group_value: frontend, aggregation: "count()", partial: null}
+    docs_url: https://signoz.io/docs/logs-management/logs-api/aggregate-logs/
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_spans
+    title: Span search (query_range v5, raw)
+    description: >-
+      Spans in the window, newest first (or slowest first with order_by = 'duration_nano'): one
+      row per span with service, operation (resource), duration, error flag, status, kind, HTTP
+      and DB fields and the trace id. Filter on service, env, host, namespace, pod, resource
+      (span name), error_only, status_code (HTTP response code), duration_ms > / >= (minimum),
+      root_only, entry_only, trace_id, query (any v5 filter expression) and ts. One page of up to
+      5,000 spans (default 500).
+    kind: spans
+    request:
+      method: POST
+      path: /api/v5/query_range
+      body:
+        schemaVersion: v1
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        requestType: raw
+        variables: {}
+        formatOptions: {formatTableResultForUI: false, fillGaps: false}
+        compositeQuery:
+          queries:
+            - type: builder_query
+              spec:
+                name: A
+                signal: traces
+                filter:
+                  expression: &signoz_trace_filter >-
+                    {{ [
+                      ('(' ~ filters.query ~ ')') if filters.query else None,
+                      ('service.name IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ')') if filters.service else None,
+                      (env.SIGNOZ_ENV_ATTRIBUTE ~ ' IN (' ~ (filters.env | as_list | map('squote') | join(', ')) ~ ')') if filters.env else None,
+                      ('host.name IN (' ~ (filters.host | as_list | map('squote') | join(', ')) ~ ')') if filters.host else None,
+                      ('k8s.namespace.name IN (' ~ (filters.namespace | as_list | map('squote') | join(', ')) ~ ')') if filters.namespace else None,
+                      ('k8s.pod.name IN (' ~ (filters.pod | as_list | map('squote') | join(', ')) ~ ')') if filters.pod else None,
+                      ('name IN (' ~ (filters.resource | as_list | map('squote') | join(', ')) ~ ')') if filters.resource else None,
+                      'has_error = true' if filters.error_only else None,
+                      ('response_status_code IN (' ~ (filters.status_code | as_list | map('string') | map('squote') | join(', ')) ~ ')') if filters.status_code else None,
+                      ('duration_nano >= ' ~ (((filters.min_duration_ms | float) * 1000000) | int)) if filters.min_duration_ms else None,
+                      "parent_span_id = ''" if filters.root_only else None,
+                      'isEntryPoint = true' if filters.entry_only else None,
+                      ('kind_string IN (' ~ (filters.kind | as_list | map('squote') | join(', ')) ~ ')') if filters.kind else None,
+                      ('trace_id = ' ~ (filters.trace_id | squote)) if filters.trace_id else None
+                    ] | compact | join(' AND ') }}
+                selectFields:
+                  - {name: service.name, fieldContext: resource}
+                  - {name: deployment.environment, fieldContext: resource}
+                  - {name: host.name, fieldContext: resource}
+                  - {name: name, fieldContext: span}
+                  - {name: duration_nano, fieldContext: span}
+                  - {name: has_error, fieldContext: span}
+                  - {name: status_code_string, fieldContext: span}
+                  - {name: status_message, fieldContext: span}
+                  - {name: kind_string, fieldContext: span}
+                  - {name: parent_span_id, fieldContext: span}
+                  - {name: http_method, fieldContext: span}
+                  - {name: http_url, fieldContext: span}
+                  - {name: response_status_code, fieldContext: span}
+                  - {name: db_name, fieldContext: span}
+                  - {name: db_operation, fieldContext: span}
+                  - {name: external_http_url, fieldContext: span}
+                order:
+                  - {key: {name: "{{ filters.order_by or 'timestamp' }}"}, direction: desc}
+                offset: 0
+                limit: "{{ [limit or 500, 5000] | min }}"
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Exact service.name", examples: [frontend]}
+      - {column: env, ops: ["=", "in"], fan_out: false, description: "Environment (SIGNOZ_ENV_ATTRIBUTE)"}
+      - {column: host, ops: ["=", "in"], fan_out: false, description: "Exact host.name"}
+      - {column: namespace, ops: ["=", "in"], fan_out: false, description: "Exact k8s.namespace.name"}
+      - {column: pod, ops: ["=", "in"], fan_out: false, description: "Exact k8s.pod.name"}
+      - {column: resource, ops: ["=", "in"], fan_out: false, description: "Exact span name (operation), e.g. 'HTTP GET /dispatch'", examples: [HTTP GET /dispatch]}
+      - {column: error_only, type: BOOLEAN, description: "true = only spans with has_error = true"}
+      - {column: status_code, ops: ["=", "in"], fan_out: false, description: "HTTP response status code (response_status_code, a string)", examples: ['504']}
+      - {column: duration_ms, param: min_duration_ms, type: DOUBLE, ops: [">", ">="], description: "Minimum span duration in ms (sent as duration_nano >= ms*1e6)"}
+      - {column: root_only, type: BOOLEAN, description: "true = only root spans (parent_span_id = '')"}
+      - {column: entry_only, type: BOOLEAN, description: "true = only service entry-point spans (isEntryPoint)"}
+      - {column: kind, ops: ["=", "in"], fan_out: false, description: "Span kind (kind_string): Server, Client, Internal, Producer, Consumer", examples: [Client]}
+      - {column: trace_id, description: "All spans of one trace (signoz_trace gives the full tree)"}
+      - {column: order_by, description: "timestamp (default, newest first) or duration_nano (slowest first)", examples: [duration_nano]}
+      - {column: query, description: "Any v5 filter expression on span/resource attributes (signoz_filter)", examples: ["http.route = '/api/cart' AND response_status_code LIKE '5%'"]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.data.data.results[0].rows[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: timestamp, transform: auto_time, description: "Span start (UTC)"}
+      - {name: trace_id, path: "data.trace_id"}
+      - {name: span_id, path: "data.span_id"}
+      - {name: parent_span_id, expr: "_.data.parent_span_id or None"}
+      - {name: service, path: "data['service.name']"}
+      - {name: env, expr: "_.data['deployment.environment'] or _.data['deployment.environment.name']"}
+      - {name: host, path: "data['host.name']"}
+      - {name: resource, path: "data.name", description: "Span name (operation / endpoint)"}
+      - {name: duration_ms, type: DOUBLE, path: "data.duration_nano", transform: ns_to_ms}
+      - {name: error, type: BOOLEAN, path: "data.has_error"}
+      - {name: status, path: "data.status_code_string", description: "STATUS_CODE_UNSET | STATUS_CODE_OK | STATUS_CODE_ERROR"}
+      - {name: status_message, path: "data.status_message"}
+      - {name: kind, path: "data.kind_string", description: "Server, Client, Internal, Producer, Consumer, Unspecified"}
+      - {name: http_method, expr: "_.data.http_method or None"}
+      - {name: http_url, expr: "_.data.http_url or None"}
+      - {name: status_code, expr: "_.data.response_status_code or None", description: "HTTP / RPC response status code (string)"}
+      - {name: db_name, expr: "_.data.db_name or None"}
+      - {name: db_operation, expr: "_.data.db_operation or None"}
+      - {name: external_http_url, expr: "_.data.external_http_url or None", description: "Downstream URL called by a client span"}
+      - {name: namespace, filter_only: true}
+      - {name: pod, filter_only: true}
+      - {name: error_only, type: BOOLEAN, filter_only: true}
+      - {name: root_only, type: BOOLEAN, filter_only: true}
+      - {name: entry_only, type: BOOLEAN, filter_only: true}
+      - {name: order_by, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: warning, type: JSON, path: "$.data.warning"}
+    pitfalls:
+      - "One page only (at most 5,000 spans): for rates and percentiles use signoz_trace_aggregates or signoz_services instead of counting rows here."
+      - "Root spans are parent_span_id = '' (root_only); a span whose parent was not sampled also looks like a root."
+      - "Durations are converted from nanoseconds to duration_ms; duration_ms > x pushes duration_nano >= x*1e6."
+      - "namespace / pod filters are pushed down but not selected (not every span carries k8s.* attributes)."
+    examples:
+      - sql: >-
+          SELECT ts, service, resource, duration_ms, status_code, status_message, trace_id FROM signoz_spans
+          WHERE service = 'frontend' AND error_only = true
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          ORDER BY ts DESC LIMIT 100
+        description: Error spans of a service in the incident window.
+      - sql: "SELECT resource, count(*) AS slow, max(duration_ms) AS worst_ms FROM signoz_spans WHERE service = 'checkout' AND duration_ms > 1000 AND order_by = 'duration_nano' GROUP BY resource ORDER BY slow DESC"
+        description: Operations of a service producing spans slower than 1 s.
+      - sql: "SELECT service, kind, db_operation, external_http_url, count(*) AS n FROM signoz_spans WHERE kind = 'Client' AND error_only = true GROUP BY ALL ORDER BY n DESC"
+        description: Failing downstream calls (client spans with errors) by caller and dependency.
+    fixtures:
+      - file: spans_raw.json
+        note: "Built strictly from the OpenAPI RawData schema; row data keys = the selectFields plus timestamp, trace_id and span_id, as asserted by SigNoz's integration test tests/integration/tests/queriertraces/01_list.py; field names from pkg/telemetryschema/tracestelemetryschema/const.go. Values illustrative."
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:42:07.120Z", trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, service: frontend, resource: "HTTP GET /dispatch", duration_ms: 1532.0, error: true, status: STATUS_CODE_ERROR, status_code: "504", parent_span_id: null, env: production, kind: Server}
+    ui_link: "{{ source.base_url }}/traces-explorer"
+    docs_url: https://signoz.io/docs/traces-management/trace-api/search-traces/
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_trace_aggregates
+    title: Span aggregations over time (query_range v5, time_series)
+    description: >-
+      Span aggregations per time bucket grouped by a field: one row per (group, bucket). Filter on
+      aggregation (default count(); e.g. countIf(has_error = true), p99(duration_nano),
+      avg(duration_nano), rate(); IN fans out, max 4), group_by (default service.name; 'none';
+      IN for several keys, e.g. name for operations), the span filters of signoz_spans and ts.
+      The RED-metrics workhorse computed directly from spans.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/v5/query_range
+      body:
+        schemaVersion: v1
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        requestType: time_series
+        variables: {}
+        formatOptions: {formatTableResultForUI: false, fillGaps: "{{ true if filters.fill_gaps else false }}"}
+        compositeQuery:
+          queries:
+            - type: builder_query
+              spec:
+                name: A
+                signal: traces
+                stepInterval: "{{ filters.step or time.step_s }}"
+                aggregations:
+                  - {expression: "{{ filters.aggregation or 'count()' }}", alias: agg_value}
+                filter:
+                  expression: *signoz_trace_filter
+                groupBy: "{{ [] if filters.group_by == 'none' else ((filters.group_by or 'service.name') | as_list | format_each('_={}') | kv_list(',', '=', 'name', 'name')) }}"
+                order:
+                  - {key: {name: agg_value}, direction: desc}
+                limit: "{{ filters.top_n or 50 }}"
+    filters:
+      - {column: aggregation, ops: ["=", "in"], max_fan_out: 4, description: "Aggregation expression (signoz_trace_aggregation); durations are nanoseconds", examples: ["countIf(has_error = true)"]}
+      - {column: group_by, ops: ["=", "in"], fan_out: false, description: "Group-by field(s): service.name (default), name (operation), response_status_code, host.name, k8s.pod.name; 'none' = one series", examples: [service.name]}
+      - {column: service, ops: ["=", "in"], max_fan_out: 10, description: "Exact service.name", examples: [checkout]}
+      - {column: env, ops: ["=", "in"], max_fan_out: 5, description: "Environment (SIGNOZ_ENV_ATTRIBUTE)"}
+      - {column: host, ops: ["=", "in"], max_fan_out: 10, description: "Exact host.name"}
+      - {column: namespace, ops: ["=", "in"], max_fan_out: 10, description: "Exact k8s.namespace.name"}
+      - {column: pod, ops: ["=", "in"], max_fan_out: 10, description: "Exact k8s.pod.name"}
+      - {column: resource, ops: ["=", "in"], max_fan_out: 10, description: "Exact span name (operation)"}
+      - {column: error_only, type: BOOLEAN, description: "true = only error spans"}
+      - {column: status_code, ops: ["=", "in"], fan_out: false, description: "HTTP response status code(s)"}
+      - {column: root_only, type: BOOLEAN, description: "true = only root spans"}
+      - {column: entry_only, type: BOOLEAN, description: "true = only entry-point spans (service-level RED metrics)"}
+      - {column: kind, ops: ["=", "in"], fan_out: false, description: "Span kind (kind_string): Server, Client, Internal, Producer, Consumer"}
+      - {column: query, description: "Any v5 filter expression (signoz_filter)"}
+      - {column: fill_gaps, type: BOOLEAN, description: "true = fill empty buckets with 0 (right for counts, wrong for latencies)"}
+      - {column: top_n, type: BIGINT, description: "Groups kept, highest first (default 50)"}
+      - {column: step, type: BIGINT, description: "Bucket size in SECONDS (default ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 15d}
+    response:
+      rows_path: "$.data.data.results[*].aggregations[*]"
+      expand:
+        - {explode: series, as: s}
+        - {explode: "@s.values", as: v}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@v.timestamp", transform: epoch_ms, description: "Bucket start (UTC)"}
+      - {name: value, type: DOUBLE, path: "@v.value", description: "Aggregated value (duration aggregations are in NANOSECONDS: use value_ms)"}
+      - {name: value_ms, type: DOUBLE, expr: "(v.value / 1000000) if (v.value is number and 'duration_nano' in (filters.aggregation or '')) else None", description: "value converted to ms when the aggregation is over duration_nano"}
+      - {name: partial, type: BOOLEAN, path: "@v.partial"}
+      - {name: group_value, expr: "(s.labels or []) | map(attribute='value') | join(', ')"}
+      - {name: service, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'service.name') | map(attribute='value') | first"}
+      - {name: resource, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'name') | map(attribute='value') | first", description: "Operation when grouped by name"}
+      - {name: host, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'host.name') | map(attribute='value') | first"}
+      - {name: pod, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'k8s.pod.name') | map(attribute='value') | first"}
+      - {name: namespace, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'k8s.namespace.name') | map(attribute='value') | first"}
+      - {name: env, filter_only: true}
+      - {name: labels, type: JSON, path: "@s.labels"}
+      - {name: aggregation, expr: "filters.aggregation or 'count()'"}
+      - {name: warning, type: JSON, path: "$.data.warning"}
+      - {name: group_by, filter_only: true}
+      - {name: error_only, type: BOOLEAN, filter_only: true}
+      - {name: status_code, filter_only: true}
+      - {name: root_only, type: BOOLEAN, filter_only: true}
+      - {name: entry_only, type: BOOLEAN, filter_only: true}
+      - {name: kind, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: fill_gaps, type: BOOLEAN, filter_only: true}
+      - {name: top_n, type: BIGINT, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "Spans are counted, not requests: use entry_only = true (or root_only) for request-level rates, otherwise internal and client spans inflate counts."
+      - "Error rate = countIf(has_error = true) / count(): fetch both aggregations (aggregation IN (...)) and divide in SQL per (service, ts)."
+      - "Duration aggregations return nanoseconds (value); value_ms divides by 1e6."
+      - "Empty buckets are omitted unless fill_gaps = true; do not fill latencies with 0."
+    examples:
+      - sql: >-
+          SELECT ts, service,
+                 max(value) FILTER (WHERE aggregation = 'countIf(has_error = true)') / nullif(max(value) FILTER (WHERE aggregation = 'count()'), 0) AS error_ratio
+          FROM signoz_trace_aggregates
+          WHERE aggregation IN ('count()', 'countIf(has_error = true)') AND entry_only = true AND fill_gaps = true
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+          GROUP BY ts, service ORDER BY error_ratio DESC NULLS LAST LIMIT 20
+        description: Per-service error ratio over time from entry-point spans; worst buckets first.
+      - sql: "SELECT resource, max(value_ms) AS worst_p99_ms FROM signoz_trace_aggregates WHERE service = 'checkout' AND aggregation = 'p99(duration_nano)' AND group_by = 'name' GROUP BY resource ORDER BY worst_p99_ms DESC LIMIT 10"
+        description: Operations of a service ranked by peak p99 latency.
+    fixtures:
+      - file: trace_aggregates_ts.json
+        note: "Built strictly from the OpenAPI TimeSeriesData schema; request = the OpenAPI traces_time_series example with p99(duration_nano) grouped by service.name. Values illustrative."
+        filters: {aggregation: "p99(duration_nano)"}
+        expect_rows: 2
+        expect_columns: {ts: "2022-01-01T00:00:00Z", value: 84000000.0, value_ms: 84.0, service: frontend, aggregation: "p99(duration_nano)"}
+    docs_url: https://signoz.io/docs/traces-management/trace-api/aggregate-traces/
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_metrics
+    title: Metric query (query_range v5 builder, time_series)
+    description: >-
+      One metric aggregated over time and space: one row per (series, bucket). Filter on metric
+      (required, OTel name e.g. k8s.pod.cpu.usage, signoz_calls_total, http.server.duration.bucket;
+      IN fans out), space_aggregation (sum default; avg, min, max, count, p50..p99 for histograms),
+      time_aggregation (rate / increase for counters, avg / max / latest for gauges; omitted =
+      server default), group_by (default none), service, env, host, namespace, pod, query (filter
+      expression), step and ts. Discover names with signoz_metric_names and labels with
+      signoz_metric_attributes.
+    kind: timeseries
+    request:
+      method: POST
+      path: /api/v5/query_range
+      body:
+        schemaVersion: v1
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        requestType: time_series
+        variables: {}
+        formatOptions: {formatTableResultForUI: false, fillGaps: false}
+        compositeQuery:
+          queries:
+            - type: builder_query
+              spec:
+                name: A
+                signal: metrics
+                stepInterval: "{{ filters.step or ([time.step_s, 60] | max) }}"
+                aggregations:
+                  - metricName: "{{ filters.metric }}"
+                    timeAggregation: "{{ filters.time_aggregation }}"
+                    spaceAggregation: "{{ filters.space_aggregation or 'sum' }}"
+                filter:
+                  expression: >-
+                    {{ [
+                      ('(' ~ filters.query ~ ')') if filters.query else None,
+                      ('service.name = ' ~ (filters.service | squote)) if filters.service else None,
+                      (env.SIGNOZ_ENV_ATTRIBUTE ~ ' = ' ~ (filters.env | squote)) if filters.env else None,
+                      ('host.name = ' ~ (filters.host | squote)) if filters.host else None,
+                      ('k8s.namespace.name = ' ~ (filters.namespace | squote)) if filters.namespace else None,
+                      ('k8s.pod.name = ' ~ (filters.pod | squote)) if filters.pod else None
+                    ] | compact | join(' AND ') }}
+                groupBy: "{{ [] if (not filters.group_by or filters.group_by == 'none') else (filters.group_by | as_list | format_each('_={}') | kv_list(',', '=', 'name', 'name')) }}"
+    filters:
+      - {column: metric, required: true, ops: ["=", "in"], max_fan_out: 5, description: "Metric name exactly as stored (OTel dotted or Prometheus underscore names)", examples: [signoz_calls_total]}
+      - {column: space_aggregation, description: "sum (default), avg, min, max, count, p50, p75, p90, p95, p99 (percentiles need a histogram .bucket metric)", examples: [sum]}
+      - {column: time_aggregation, description: "rate / increase (counters), avg / min / max / sum / latest / count / count_distinct (gauges); omit for histograms", examples: [rate]}
+      - {column: group_by, ops: ["=", "in"], fan_out: false, description: "Group-by label(s), e.g. service.name, k8s.pod.name (default none = one series)", examples: [service.name]}
+      - {column: service, ops: ["=", "in"], max_fan_out: 10, description: "service.name label filter"}
+      - {column: env, ops: ["=", "in"], max_fan_out: 5, description: "Environment label (SIGNOZ_ENV_ATTRIBUTE)"}
+      - {column: host, ops: ["=", "in"], max_fan_out: 10, description: "host.name label filter"}
+      - {column: namespace, ops: ["=", "in"], max_fan_out: 10, description: "k8s.namespace.name label filter"}
+      - {column: pod, ops: ["=", "in"], max_fan_out: 10, description: "k8s.pod.name label filter"}
+      - {column: query, description: "Any v5 filter expression on metric labels, e.g. status.code = 'STATUS_CODE_ERROR'", examples: ["status.code = 'STATUS_CODE_ERROR'"]}
+      - {column: step, type: BIGINT, description: "Bucket size in SECONDS (default ~300 points, at least 60 s: metrics are usually collected every 60 s)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    response:
+      rows_path: "$.data.data.results[*].aggregations[*]"
+      expand:
+        - {explode: series, as: s}
+        - {explode: "@s.values", as: v}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@v.timestamp", transform: epoch_ms}
+      - {name: value, type: DOUBLE, path: "@v.value", description: "Aggregated value (NaN kept)"}
+      - {name: partial, type: BOOLEAN, path: "@v.partial"}
+      - {name: metric, expr: "filters.metric"}
+      - {name: unit, path: "meta.unit", description: "Unit from metric metadata when known"}
+      - {name: group_value, expr: "(s.labels or []) | map(attribute='value') | join(', ')"}
+      - {name: service, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'service.name') | map(attribute='value') | first"}
+      - {name: host, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'host.name') | map(attribute='value') | first"}
+      - {name: pod, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'k8s.pod.name') | map(attribute='value') | first"}
+      - {name: namespace, expr: "(s.labels or []) | selectattr('key.name', 'equalto', 'k8s.namespace.name') | map(attribute='value') | first"}
+      - {name: env, filter_only: true}
+      - {name: labels, type: JSON, path: "@s.labels"}
+      - {name: warning, type: JSON, path: "$.data.warning", description: "e.g. 'no data found for the metric ...' / 'has never been received'"}
+      - {name: space_aggregation, filter_only: true}
+      - {name: time_aggregation, filter_only: true}
+      - {name: group_by, filter_only: true}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "A metric name that was never received returns 0 rows with a warning, not an error: list names with signoz_metric_names first."
+      - "Counters need time_aggregation = 'rate' (per second) or 'increase'; summing raw cumulative values is meaningless."
+      - "Histogram percentiles need the .bucket metric (e.g. http.server.duration.bucket) and space_aggregation p50..p99; values are in the metric's unit (often ms or s)."
+      - "Span-derived metrics (signoz_calls_total, signoz_latency.bucket) only exist when the span-metrics processor is configured."
+    examples:
+      - sql: >-
+          SELECT service, max(value) AS peak_rps FROM signoz_metrics
+          WHERE metric = 'signoz_calls_total' AND time_aggregation = 'rate' AND space_aggregation = 'sum'
+            AND group_by = 'service.name' AND query = 'status.code = ''STATUS_CODE_ERROR'''
+          GROUP BY service ORDER BY peak_rps DESC LIMIT 10
+        description: Peak error-call rate per service from span metrics.
+      - sql: "SELECT ts, pod, value FROM signoz_metrics WHERE metric = 'k8s.pod.cpu.usage' AND time_aggregation = 'avg' AND space_aggregation = 'max' AND namespace = 'payments' AND group_by = 'k8s.pod.name' ORDER BY ts"
+        description: CPU per pod of a namespace over the analysis window.
+    fixtures:
+      - file: metrics_ts.json
+        note: "Built strictly from the OpenAPI TimeSeriesData schema (aggregation meta.unit, string 'NaN' values as produced by resp.go sanitizeValue); request = the Metrics API docs' histogram example (jvm.gc.duration.bucket p90 by service.name); warning text from tests/integration/tests/queriermetrics/02_warnings.py. Values illustrative."
+        filters: {metric: jvm.gc.duration.bucket, space_aggregation: p90, group_by: service.name}
+        expect_rows: 3
+        expect_columns: {ts: "2025-03-22T00:17:00Z", value: 0.012, metric: jvm.gc.duration.bucket, unit: s, service: adservice, warning: {not_null: true}}
+    docs_url: https://signoz.io/docs/metrics-management/query-range-api/
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_promql
+    title: PromQL range query
+    description: >-
+      Evaluate a PromQL expression over the window through SigNoz's Prometheus-compatible
+      endpoint: one row per (series, timestamp). Filter on query (required) and ts; optional step
+      (seconds). Dotted OTel names must be written as {__name__="..."} (query language promql).
+    kind: timeseries
+    request:
+      method: GET
+      path: /prometheus/api/v1/query_range
+      query:
+        query: "{{ filters.query }}"
+        start: "{{ time.start | epoch_s }}"
+        end: "{{ time.end | epoch_s }}"
+        step: "{{ filters.step or time.step_s }}"
+    filters:
+      - {column: query, required: true, description: "PromQL expression", examples: ['sum by ("service.name") (rate({"signoz_calls_total","status.code"="STATUS_CODE_ERROR"}[5m]))']}
+      - {column: step, type: BIGINT, description: "Resolution step in seconds (default ~300 points)"}
+    time: {column: ts, default_lookback: 1h, max_window: 31d}
+    response:
+      rows_path: "$.data.result[*]"
+      expand:
+        - {explode: values, as: p}
+    columns:
+      - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s}
+      - {name: value, type: DOUBLE, path: "@p[1]"}
+      - {name: metric, path: "metric.__name__"}
+      - {name: labels, type: JSON, path: metric, description: "Series labels; dotted keys: labels->>'service.name'"}
+      - {name: query, filter_only: true}
+      - {name: step, type: BIGINT, filter_only: true}
+    pitfalls:
+      - "A bare dotted selector (k8s.pod.memory.usage) is a PromQL syntax error: use {__name__=\"k8s.pod.memory.usage\"} and quote dotted label names."
+      - "Only /query and /query_range are served (no series/labels/metadata endpoints): discover names with signoz_metric_names / signoz_metric_attributes."
+    examples:
+      - sql: >-
+          SELECT labels->>'service.name' AS service, max(value) AS peak_err_rps
+          FROM signoz_promql
+          WHERE query = 'sum by ("service.name") (rate({"signoz_calls_total","status.code"="STATUS_CODE_ERROR"}[5m]))'
+          GROUP BY 1 ORDER BY peak_err_rps DESC
+        description: Peak error-call rate per service via PromQL.
+    fixtures:
+      - file: promql_range.json
+        note: "SigNoz's OpenAPI states this endpoint's response contract is the upstream Prometheus HTTP API; fixture = the Prometheus docs' range-query example response."
+        filters: {query: up}
+        expect_rows: 6
+        expect_columns: {ts: "2015-07-01T20:10:30.781Z", value: 1.0, metric: up}
+    docs_url: https://signoz.io/api-reference/#/operations/PrometheusQueryRange
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_trace
+    title: Trace detail (waterfall)
+    description: >-
+      Every span of one trace (up to 10,000 by default; larger traces are windowed and has_more
+      = true): one row per span with parent, depth, service, operation, duration, error flag,
+      status, HTTP/DB fields, span attributes, resource attributes and events (exceptions). Filter
+      on trace_id (required).
+    kind: traces
+    request:
+      method: POST
+      path: "/api/v4/traces/{{ filters.trace_id | urlencode }}/waterfall"
+      body: {}
+      accept_status: [404]
+    filters:
+      - {column: trace_id, required: true, description: "Trace id (32 hex chars)", examples: [4bf92f3577b34da6a3ce929d0e0e4736]}
+    response:
+      rows_path: "$.data.spans[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: time_unix, transform: epoch_ns, description: "Span start (time_unix is epoch NANOSECONDS)"}
+      - {name: trace_id, path: trace_id}
+      - {name: span_id, path: span_id}
+      - {name: parent_span_id, expr: "_.parent_span_id or None"}
+      - {name: depth, type: BIGINT, path: level, description: "Depth in the tree (0 = root)"}
+      - {name: service, path: "resource['service.name']"}
+      - {name: resource, path: name, description: "Span name (operation)"}
+      - {name: duration_ms, type: DOUBLE, path: duration_nano, transform: ns_to_ms}
+      - {name: error, type: BOOLEAN, path: has_error}
+      - {name: status, path: status_code_string, description: "STATUS_CODE_UNSET | STATUS_CODE_OK | STATUS_CODE_ERROR"}
+      - {name: status_message, path: status_message}
+      - {name: kind, path: kind_string, description: "Server, Client, Internal, Producer, Consumer"}
+      - {name: http_method, expr: "_.http_method or None"}
+      - {name: http_url, expr: "_.http_url or None"}
+      - {name: status_code, expr: "_.response_status_code or None"}
+      - {name: db_name, expr: "_.db_name or None"}
+      - {name: db_operation, expr: "_.db_operation or None"}
+      - {name: external_http_url, expr: "_.external_http_url or None"}
+      - {name: host, path: "resource['host.name']"}
+      - {name: attributes, type: JSON, path: attributes, description: "Span attributes (db.statement, http.route, ...)"}
+      - {name: resource_attributes, type: JSON, path: resource}
+      - {name: events, type: JSON, path: events, description: "Span events [{name, timeUnixNano, isError, attributeMap}] incl. exception.type / exception.message"}
+      - {name: root_service, path: "$.data.rootServiceName"}
+      - {name: root_operation, path: "$.data.rootServiceEntryPoint"}
+      - {name: total_spans, type: BIGINT, path: "$.data.totalSpansCount"}
+      - {name: total_error_spans, type: BIGINT, path: "$.data.totalErrorSpansCount"}
+      - {name: has_more, type: BOOLEAN, path: "$.data.hasMore", description: "true = the trace was windowed (more spans than returned)"}
+      - {name: has_missing_spans, type: BOOLEAN, path: "$.data.hasMissingSpans"}
+    pitfalls:
+      - "Traces with more than 10,000 spans (server default) are windowed around the root: has_more = true."
+      - "time_unix and duration_nano are nanoseconds (converted to ts / duration_ms)."
+    examples:
+      - sql: "SELECT depth, service, resource, duration_ms, error, status_message, span_id, parent_span_id FROM signoz_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736' ORDER BY ts"
+        description: Walk one trace span by span to find the failing or slow hop.
+      - sql: "SELECT service, resource, events FROM signoz_trace WHERE trace_id = '4bf92f3577b34da6a3ce929d0e0e4736' AND error = true"
+        description: The erroring spans of a trace with their exception events.
+    fixtures:
+      - file: trace_waterfall.json
+        note: "Built strictly from the OpenAPI GetWaterfallV4 200 schema and the JSON tags of pkg/types/spantypes/waterfall_span.go / waterfall_trace.go (time_unix = UnixNano). Values illustrative."
+        filters: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:42:07.120Z", service: frontend, resource: "HTTP GET /dispatch", duration_ms: 1532.0, error: true, depth: 0, parent_span_id: null, status_code: "504", root_service: frontend, total_spans: 2, has_more: false}
+    ui_link: "{{ source.base_url }}/trace/{{ filters.trace_id }}"
+    docs_url: https://signoz.io/api-reference/#/operations/GetWaterfallV4
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_services
+    title: Services with RED stats
+    description: >-
+      Services that served root/entry-point spans in the window with request count, call rate,
+      error count and rate, 4xx count and rate, p99 and average latency (the SigNoz Services page).
+      One row per service. Filter on env and ts; filter service in SQL.
+    kind: entities
+    request:
+      method: POST
+      path: /api/v2/services
+      body:
+        start: "{{ time.start | epoch_ns | string }}"
+        end: "{{ time.end | epoch_ns | string }}"
+        tags: "{{ [{'Key': env.SIGNOZ_ENV_ATTRIBUTE, 'Operator': 'in', 'StringValues': (filters.env | as_list), 'TagType': 'ResourceAttribute'}] if filters.env else [] }}"
+    filters:
+      - {column: env, ops: ["=", "in"], fan_out: false, description: "Environment (SIGNOZ_ENV_ATTRIBUTE IN ...)", examples: [production]}
+    time: {column: ts, default_lookback: 1h, max_window: 15d}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: service, path: serviceName}
+      - {name: num_calls, type: BIGINT, path: numCalls, description: "Root/entry-point spans in the window"}
+      - {name: call_rate, type: DOUBLE, path: callRate, description: "Calls per SECOND over the window"}
+      - {name: num_errors, type: BIGINT, path: numErrors, description: "Spans with status_code = ERROR"}
+      - {name: error_rate, type: DOUBLE, path: errorRate, description: "Error PERCENT (0..100)"}
+      - {name: num_4xx, type: BIGINT, path: num4XX}
+      - {name: four_xx_rate, type: DOUBLE, path: fourXXRate, description: "4xx PERCENT (0..100)"}
+      - {name: p99_ms, type: DOUBLE, path: p99, transform: ns_to_ms}
+      - {name: avg_duration_ms, type: DOUBLE, path: avgDuration, transform: ns_to_ms}
+      - {name: top_level_ops, type: JSON, path: "dataWarning.topLevelOps"}
+      - {name: env, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Not part of the published API reference (it backs the Services page; POST /api/v2/services since the QBv5 migration, /api/v1/services on old versions): if it 404s, use signoz_trace_aggregates with entry_only = true."
+      - "start/end are epoch NANOSECONDS sent as strings (the table does this); error_rate and four_xx_rate are percentages, p99/avgDuration arrive in ns."
+    examples:
+      - sql: "SELECT service, num_calls, error_rate, p99_ms FROM signoz_services ORDER BY error_rate DESC LIMIT 20"
+        description: Services ranked by error rate in the analysis window.
+      - sql: "SELECT service, call_rate, p99_ms, avg_duration_ms FROM signoz_services WHERE env = 'production' AND service = 'checkout'"
+        description: RED stats of one service in production.
+    fixtures:
+      - file: services.json
+        note: "Values verbatim from SigNoz's frontend mock frontend/src/mocks-server/__mockdata__/services.ts (ServicesList), wrapped in the render.Success envelope {status, data} that the v2 handler returns; fields per pkg/types/servicetypes/servicetypesv1."
+        expect_rows: 2
+        expect_columns: {service: TestService, p99_ms: 8.106824, num_calls: 1, error_rate: 0.0, num_4xx: null}
+    ui_link: "{{ source.base_url }}/services"
+    docs_url: https://github.com/SigNoz/signoz/blob/main/pkg/modules/services/implservices/module.go
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_top_operations
+    title: Top operations of a service
+    description: >-
+      Operations (span names) of one service with p50/p95/p99 latency, call count and error
+      count, slowest p99 first (the Key Operations table of a service page). Filter on service
+      (required), env and ts.
+    kind: entities
+    request:
+      method: POST
+      path: /api/v2/service/top_operations
+      body:
+        start: "{{ time.start | epoch_ns | string }}"
+        end: "{{ time.end | epoch_ns | string }}"
+        service: "{{ filters.service }}"
+        limit: "{{ [limit or 200, 5000] | min }}"
+        tags: "{{ [{'Key': env.SIGNOZ_ENV_ATTRIBUTE, 'Operator': 'in', 'StringValues': (filters.env | as_list), 'TagType': 'ResourceAttribute'}] if filters.env else [] }}"
+    filters:
+      - {column: service, required: true, description: "Exact service.name", examples: [checkout]}
+      - {column: env, ops: ["=", "in"], fan_out: false, description: "Environment (SIGNOZ_ENV_ATTRIBUTE)"}
+    time: {column: ts, default_lookback: 1h, max_window: 15d}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: resource, path: name, description: "Operation (span name)"}
+      - {name: p50_ms, type: DOUBLE, path: p50, transform: ns_to_ms}
+      - {name: p95_ms, type: DOUBLE, path: p95, transform: ns_to_ms}
+      - {name: p99_ms, type: DOUBLE, path: p99, transform: ns_to_ms}
+      - {name: num_calls, type: BIGINT, path: numCalls}
+      - {name: error_count, type: BIGINT, path: errorCount}
+      - {name: error_rate, type: DOUBLE, expr: "(100.0 * _.errorCount / _.numCalls) if _.numCalls else None", description: "Error PERCENT (0..100)"}
+      - {name: service, filter_only: true}
+      - {name: env, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Not in the published API reference (backs the service page). Counts all spans of the service grouped by name, not only entry points."
+    examples:
+      - sql: "SELECT resource, num_calls, error_count, error_rate, p99_ms FROM signoz_top_operations WHERE service = 'checkout' ORDER BY error_count DESC LIMIT 10"
+        description: Which operations of a service fail most in the window.
+    fixtures:
+      - file: top_operations.json
+        note: "Values verbatim from SigNoz's frontend mock frontend/src/container/MetricsApplication/__mocks__/getTopOperation.ts (mockTopOperationsData) in the render.Success envelope; fields per servicetypesv1.OperationItem."
+        filters: {service: test-service}
+        expect_rows: 2
+        expect_columns: {resource: GET /api/users, p99_ms: 3.0, num_calls: 100, error_count: 5, error_rate: 5.0, service: test-service}
+    ui_link: "{{ source.base_url }}/services/{{ filters.service | urlencode }}"
+    docs_url: https://github.com/SigNoz/signoz/blob/main/pkg/modules/services/implservices/module.go
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_service_map
+    title: Service map (dependency graph)
+    description: >-
+      Service-to-service call edges in the window with call count, call rate, error rate and
+      latency percentiles (the SigNoz Service Map): one row per (caller, callee). Filter on ts;
+      filter source/target in SQL.
+    kind: entities
+    request:
+      method: POST
+      path: /api/v1/dependency_graph
+      body:
+        start: "{{ time.start | epoch_ns | string }}"
+        end: "{{ time.end | epoch_ns | string }}"
+        tags: []
+    time: {column: ts, default_lookback: 1h, max_window: 15d}
+    response:
+      rows_path: "$"
+    columns:
+      - {name: source, path: parent, description: "Calling service"}
+      - {name: target, path: child, description: "Called service (or external dependency)"}
+      - {name: calls, type: BIGINT, path: callCount}
+      - {name: call_rate, type: DOUBLE, path: callRate, description: "Calls per second"}
+      - {name: error_rate, type: DOUBLE, path: errorRate, description: "Error PERCENT (0..100)"}
+      - {name: p50_ms, type: DOUBLE, path: p50, transform: ns_to_ms}
+      - {name: p90_ms, type: DOUBLE, path: p90, transform: ns_to_ms}
+      - {name: p95_ms, type: DOUBLE, path: p95, transform: ns_to_ms}
+      - {name: p99_ms, type: DOUBLE, path: p99, transform: ns_to_ms}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Built from a pre-aggregated dependency table: windows shorter than a few minutes can be empty; the response is a bare JSON array (no status envelope)."
+      - "Not in the published API reference (backs the Service Map page)."
+    examples:
+      - sql: "SELECT source, target, calls, error_rate, p99_ms FROM signoz_service_map WHERE source = 'checkout' OR target = 'checkout' ORDER BY error_rate DESC"
+        description: Upstream callers and downstream dependencies of one service with their health.
+    fixtures:
+      - file: dependency_graph.json
+        note: "Edges (parent, child, callCount, callRate, p99 in ns) verbatim from SigNoz's frontend story mock frontend/src/modules/Servicemap/stories/__story_mockdata__/serviceMap.ts; errorRate/p50-p95 added per model.ServiceMapDependencyResponseItem (pkg/query-service/model/response.go). Bare array as written by APIHandler.WriteJSON."
+        expect_rows: 2
+        expect_columns: {source: gateway, target: frontend, calls: 41200, call_rate: 68.4, p99_ms: 184.0, error_rate: 0.4}
+    ui_link: "{{ source.base_url }}/service-map"
+    docs_url: https://github.com/SigNoz/signoz/blob/main/pkg/query-service/app/http_handler.go
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_alerts
+    title: Active alerts
+    description: >-
+      Alerts currently known to SigNoz's alertmanager (firing, plus suppressed/unprocessed): one
+      row per alert instance with rule name, rule id, severity, labels, annotations and state.
+      Filter in SQL (state, severity, rule_id).
+    kind: alerts
+    request:
+      method: GET
+      path: /api/v1/alerts
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: title, path: "labels.alertname", description: "Rule name (alertname label)"}
+      - {name: rule_id, path: "labels.ruleId", description: "Alert rule id (signoz_rule.rule_id)"}
+      - {name: state, path: "status.state", description: "active | suppressed | unprocessed"}
+      - {name: severity, path: "labels.severity"}
+      - {name: ts, type: TIMESTAMP, path: startsAt, transform: auto_time, description: "Started firing"}
+      - {name: ends_at, type: TIMESTAMP, expr: "None if (_.endsAt or '').startswith('0001-') else _.endsAt", transform: auto_time, description: "NULL while firing (the API sends 0001-01-01)"}
+      - {name: service, expr: "_.labels['service.name'] or _.labels.service"}
+      - {name: env, expr: "_.labels['deployment.environment'] or _.labels.env"}
+      - {name: summary, path: "annotations.summary"}
+      - {name: description, path: "annotations.description"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+      - {name: fingerprint, path: fingerprint}
+      - {name: silenced_by, type: JSON, path: "status.silencedBy"}
+      - {name: receivers, type: JSON, path: receivers}
+      - {name: url, path: generatorURL, description: "Link to the rule (host is the instance's configured URL)"}
+    pitfalls:
+      - "Only current alerts: resolved alerts disappear from this list; use signoz_rule_history for transitions."
+      - "Labels are the rule's group-by labels plus rule labels; service may be under service.name or a custom label."
+    examples:
+      - sql: "SELECT ts, title, severity, service, summary, rule_id FROM signoz_alerts WHERE state = 'active' ORDER BY ts"
+        description: What is firing right now, oldest first.
+    fixtures:
+      - file: alerts.json
+        note: "Alert objects verbatim from SigNoz's frontend fixture frontend/src/mocks-server/__mockdata__/triggered_alerts.ts (typed AlertmanagertypesDeprecatedGettableAlertDTO, the GetAlerts schema) wrapped in the {status, data} envelope."
+        expect_rows: 5
+        expect_columns: {title: High CPU Usage, rule_id: rule-1, state: active, severity: critical, ts: "2023-10-19T10:00:00Z", ends_at: null, service: frontend, env: prod, summary: CPU above 90%}
+    ui_link: "{{ source.base_url }}/alerts"
+    docs_url: https://signoz.io/api-reference/#/operations/GetAlerts
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_rules
+    title: Alert rules (list)
+    description: >-
+      Alert rules with their current evaluation state: one row per rule (id, name, state,
+      severity, type, labels). Filter on state (inactive, pending, recovering, firing, nodata,
+      disabled; IN allowed) and query (rule filter DSL, e.g. team = infra or name CONTAINS 'cpu').
+      Read thresholds and queries with signoz_rule.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v3/rules
+      query:
+        query: "{{ filters.query }}"
+        states: "{{ filters.state | as_list if filters.state else None }}"
+        sort: updated_at
+        order: desc
+    filters:
+      - {column: state, ops: ["=", "in"], fan_out: false, description: "inactive | pending | recovering | firing | nodata | disabled", examples: [firing]}
+      - {column: query, description: "Rule list filter DSL: label keys directly (team = infra), reserved keys name, state, severity, created_by, updated_by", examples: ["team = infra"]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 200, total_path: "$.data.total", max_pages: 5}
+    response:
+      rows_path: "$.data.rules[*]"
+    columns:
+      - {name: rule_id, path: id}
+      - {name: name, path: alert}
+      - {name: state, path: state}
+      - {name: severity, path: "labels.severity"}
+      - {name: alert_type, path: alertType, description: "METRIC_BASED_ALERT, LOGS_BASED_ALERT, TRACES_BASED_ALERT, EXCEPTIONS_BASED_ALERT"}
+      - {name: rule_type, path: ruleType, description: "threshold_rule | promql_rule | anomaly_rule"}
+      - {name: disabled, type: BOOLEAN, path: disabled}
+      - {name: description, path: description}
+      - {name: labels, type: JSON, path: labels}
+      - {name: created_at, type: TIMESTAMP, path: createdAt}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: updated_by, path: updatedBy}
+      - {name: url, expr: "'/alerts/overview?ruleId=' ~ _.id", description: "Path of the rule page (prefix SIGNOZ_URL)"}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT rule_id, name, state, severity, alert_type FROM signoz_rules WHERE state IN ('firing', 'pending', 'nodata') ORDER BY name"
+        description: Rules that are firing, about to fire or have no data.
+      - sql: "SELECT rule_id, name, updated_at, updated_by FROM signoz_rules ORDER BY updated_at DESC LIMIT 10"
+        description: Recently edited alert rules (a rule change can explain a new page).
+    fixtures:
+      - file: rules_v3.json
+        note: "Built strictly from the ListRulesV3 200 schema (data{rules[], total, labels[], reservedKeywords[]}); rule values from SigNoz's frontend fixture frontend/src/mocks-server/__mockdata__/alert_rules.ts."
+        expect_rows: 5
+        expect_columns: {rule_id: rule-1, name: High CPU Alert, state: firing, severity: critical, rule_type: threshold_rule, disabled: false, url: "/alerts/overview?ruleId=rule-1"}
+    ui_link: "{{ source.base_url }}/alerts"
+    docs_url: https://signoz.io/api-reference/#/operations/ListRulesV3
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_rule
+    title: Alert rule definition
+    description: >-
+      One alert rule's full definition: query type and queries (builder filter / PromQL /
+      ClickHouse SQL), thresholds (target, operator, match type), evaluation window and
+      frequency, labels, annotations and notification channels. Filter on rule_id (required, the
+      ruleId label of an alert).
+    kind: entities
+    request:
+      method: GET
+      path: "/api/v2/rules/{{ filters.rule_id | urlencode }}"
+      accept_status: [404]
+    filters:
+      - {column: rule_id, required: true, description: "Rule id (UUID; alerts carry it as the ruleId label)", examples: [0196f794-ff30-7bee-a5f4-ef5ad315715e]}
+    response:
+      rows_path: "$.data"
+    columns:
+      - {name: rule_id, path: id}
+      - {name: name, path: alert}
+      - {name: state, path: state}
+      - {name: severity, path: "labels.severity"}
+      - {name: alert_type, path: alertType}
+      - {name: rule_type, path: ruleType}
+      - {name: disabled, type: BOOLEAN, path: disabled}
+      - {name: description, path: description}
+      - {name: query_type, path: "condition.compositeQuery.queryType", description: "builder | promql | clickhouse_sql"}
+      - name: query
+        expr: "_.condition.compositeQuery.queries[0].spec.query or _.condition.compositeQuery.queries[0].spec.filter.expression"
+        description: "First query: PromQL / ClickHouse SQL text, or the builder filter expression"
+      - {name: queries, type: JSON, path: "condition.compositeQuery.queries", description: "All query envelopes (signal, aggregations, filter, groupBy)"}
+      - {name: threshold, type: DOUBLE, expr: "_.condition.thresholds.spec[0].target if _.condition.thresholds and _.condition.thresholds.spec else _.condition.target", description: "First threshold target"}
+      - {name: operator, expr: "_.condition.thresholds.spec[0].op if _.condition.thresholds and _.condition.thresholds.spec else _.condition.op", description: "above | below | equal | not_equal | above_or_equal | below_or_equal | outside_bounds"}
+      - {name: match_type, expr: "_.condition.thresholds.spec[0].matchType if _.condition.thresholds and _.condition.thresholds.spec else _.condition.matchType", description: "at_least_once | all_the_times | on_average | in_total | last"}
+      - {name: thresholds, type: JSON, path: "condition.thresholds.spec", description: "[{name, target, targetUnit, recoveryTarget, op, matchType, channels}] per severity"}
+      - {name: eval_window, expr: "_.evaluation.spec.evalWindow or _.evalWindow"}
+      - {name: frequency, expr: "_.evaluation.spec.frequency or _.frequency"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: annotations, type: JSON, path: annotations}
+      - {name: channels, type: JSON, path: preferredChannels}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: updated_by, path: updatedBy}
+    pitfalls:
+      - "Builder rules compute the alert value from queries + selectedQueryName (and formulas); the threshold is compared per group-by series, in targetUnit."
+    examples:
+      - sql: "SELECT name, query_type, query, threshold, operator, match_type, eval_window, thresholds FROM signoz_rule WHERE rule_id = '0196f794-ff30-7bee-a5f4-ef5ad315715e'"
+        description: The definition (query, threshold, window) of the rule that fired.
+    fixtures:
+      - file: rule_detail.json
+        note: "Built strictly from the GetRuleByID 200 schema (RuletypesRule: condition.compositeQuery, condition.thresholds{kind: basic, spec[]}, evaluation{kind: rolling, spec}); the builder query copies the OpenAPI traces example. Values illustrative."
+        filters: {rule_id: 0196f794-ff30-7bee-a5f4-ef5ad315715e}
+        expect_rows: 1
+        expect_columns: {name: High error rate on checkout, state: firing, query_type: builder, query: "service.name = 'checkout' AND has_error = true", threshold: 50.0, operator: above, match_type: at_least_once, eval_window: 5m0s, frequency: 1m0s}
+    ui_link: "{{ source.base_url }}/alerts/overview?ruleId={{ filters.rule_id }}"
+    docs_url: https://signoz.io/api-reference/#/operations/GetRuleByID
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_rule_history
+    title: Alert rule state history (timeline)
+    description: >-
+      State transitions of one alert rule in the window (firing, inactive, pending, recovering,
+      nodata) per label set, with the evaluated value: one row per transition. Filter on rule_id
+      (required), state, filter_expression (on the alert labels, e.g. service.name = 'checkout')
+      and ts. Answers "when did this start firing, for which series, and how often has it
+      flapped".
+    kind: alerts
+    request:
+      method: GET
+      path: "/api/v2/rules/{{ filters.rule_id | urlencode }}/history/timeline"
+      query:
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        state: "{{ filters.state }}"
+        filterExpression: "{{ filters.filter_expression }}"
+        order: desc
+        limit: 200
+    filters:
+      - {column: rule_id, required: true, description: "Rule UUID", examples: [0196f794-ff30-7bee-a5f4-ef5ad315715e]}
+      - {column: state, description: "inactive | pending | recovering | firing | nodata | disabled", examples: [firing]}
+      - {column: filter_expression, description: "Filter on the alert's labels, e.g. service.name = 'checkout' AND host.name = 'ip-10-0-0-1'"}
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    pagination: {type: cursor, cursor_path: "$.data.nextCursor", cursor_param: query.cursor, max_pages: 5}
+    response:
+      rows_path: "$.data.items[*]"
+    columns:
+      - {name: ts, type: TIMESTAMP, path: unixMilli, transform: epoch_ms}
+      - {name: rule_id, path: ruleId}
+      - {name: title, path: ruleName}
+      - {name: state, path: state, description: "State of this label set"}
+      - {name: state_changed, type: BOOLEAN, path: stateChanged}
+      - {name: overall_state, path: overallState, description: "State of the rule as a whole"}
+      - {name: overall_state_changed, type: BOOLEAN, path: overallStateChanged}
+      - {name: value, type: DOUBLE, path: value, description: "Evaluated value at the transition"}
+      - {name: service, expr: "(_.labels or []) | selectattr('key.name', 'equalto', 'service.name') | map(attribute='value') | first"}
+      - {name: group_value, expr: "(_.labels or []) | map(attribute='value') | join(', ')", description: "The label set's values"}
+      - {name: labels, type: JSON, path: labels, description: "[{key: {name}, value}]"}
+      - {name: fingerprint, path: fingerprint, description: "Label-set fingerprint (as text: it exceeds BIGINT)"}
+      - {name: related_logs_link, path: relatedLogsLink}
+      - {name: related_traces_link, path: relatedTracesLink}
+      - {name: filter_expression, filter_only: true}
+    pitfalls:
+      - "rule_id must be the rule UUID (400 otherwise). The v1 POST history endpoints are deprecated and being removed."
+      - "Rows are transitions, newest first; a rule that has been firing since before the window shows no 'firing' row inside it."
+    examples:
+      - sql: "SELECT ts, state, group_value, value FROM signoz_rule_history WHERE rule_id = '0196f794-ff30-7bee-a5f4-ef5ad315715e' ORDER BY ts"
+        description: When the rule fired and resolved, for which label sets, with the observed values.
+      - sql: "SELECT group_value, count(*) FILTER (WHERE state = 'firing') AS fired FROM signoz_rule_history WHERE rule_id = '0196f794-ff30-7bee-a5f4-ef5ad315715e' AND ts >= TIMESTAMP '2026-09-24 00:00:00' GROUP BY 1 ORDER BY fired DESC"
+        description: How often each series of the rule fired over the past week (flapping check).
+    fixtures:
+      - file: rule_timeline.json
+        note: "Built strictly from the GetRuleHistoryTimeline 200 schema (data{items[], total, nextCursor}); labels shape verbatim from the 'Migrate the Alert History API from v1 to v2' docs page. Values illustrative."
+        filters: {rule_id: 0196f794-ff30-7bee-a5f4-ef5ad315715e}
+        expect_rows: 2
+        expect_columns: {ts: "2026-10-01T11:43:00Z", state: firing, overall_state: firing, value: 87.0, service: checkout, group_value: "checkout, ip-10-0-0-1", fingerprint: "11298547832123940211"}
+    ui_link: "{{ source.base_url }}/alerts/history?ruleId={{ filters.rule_id }}"
+    docs_url: https://signoz.io/api-reference/#/operations/GetRuleHistoryTimeline
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_rule_top_contributors
+    title: Top label sets firing an alert rule
+    description: >-
+      The label combinations (e.g. service/host/pod) that made one alert rule fire most often in
+      the window, with counts and related logs/traces links. One row per label set. Filter on
+      rule_id (required) and ts.
+    kind: alerts
+    request:
+      method: GET
+      path: "/api/v2/rules/{{ filters.rule_id | urlencode }}/history/top_contributors"
+      query:
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+    filters:
+      - {column: rule_id, required: true, description: "Rule UUID", examples: [0196f794-ff30-7bee-a5f4-ef5ad315715e]}
+    time: {column: ts, default_lookback: 24h, max_window: 30d}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: count, type: BIGINT, path: count, description: "Times this label set fired"}
+      - {name: group_value, expr: "(_.labels or []) | map(attribute='value') | join(', ')"}
+      - {name: service, expr: "(_.labels or []) | selectattr('key.name', 'equalto', 'service.name') | map(attribute='value') | first"}
+      - {name: labels, type: JSON, path: labels}
+      - {name: fingerprint, path: fingerprint}
+      - {name: related_logs_link, path: relatedLogsLink}
+      - {name: related_traces_link, path: relatedTracesLink}
+      - {name: rule_id, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT group_value, count FROM signoz_rule_top_contributors WHERE rule_id = '0196f794-ff30-7bee-a5f4-ef5ad315715e' ORDER BY count DESC LIMIT 10"
+        description: Which series of the rule fire the most (one bad host vs. everywhere).
+    fixtures:
+      - file: rule_top_contributors.json
+        note: "Built strictly from the GetRuleHistoryTopContributors 200 schema; labels shape verbatim from the alert-history v2 migration docs page. Values illustrative."
+        filters: {rule_id: 0196f794-ff30-7bee-a5f4-ef5ad315715e}
+        expect_rows: 2
+        expect_columns: {count: 14, group_value: "checkout, ip-10-0-0-1", service: checkout}
+    docs_url: https://signoz.io/api-reference/#/operations/GetRuleHistoryTopContributors
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_metric_names
+    title: Metric names
+    description: >-
+      Metric names received in the window with type (gauge, sum, histogram, summary,
+      exponentialhistogram), unit, temporality and monotonicity. Filter on search (substring)
+      and ts. Use before signoz_metrics / signoz_promql to get exact names.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/metrics
+      query:
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        searchText: "{{ filters.search }}"
+        limit: "{{ [limit or 500, 1000] | min }}"
+    filters:
+      - {column: search, description: "Substring of the metric name", examples: [cpu]}
+    time: {column: ts, default_lookback: 6h, max_window: 31d}
+    response:
+      rows_path: "$.data.metrics[*]"
+    columns:
+      - {name: metric, path: metricName}
+      - {name: type, path: type}
+      - {name: unit, path: unit}
+      - {name: temporality, path: temporality, description: "delta | cumulative | unspecified"}
+      - {name: is_monotonic, type: BOOLEAN, path: isMonotonic, description: "true = counter (use time_aggregation rate/increase)"}
+      - {name: description, path: description}
+      - {name: search, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT metric, type, unit, is_monotonic FROM signoz_metric_names WHERE search = 'http.server' ORDER BY metric"
+        description: Find the exact HTTP server metric names and whether they are counters or histograms.
+    fixtures:
+      - file: metric_names.json
+        note: "Built strictly from the ListMetrics 200 schema (data.metrics[{metricName, description, type, unit, temporality, isMonotonic}]); names from the Metrics API docs examples."
+        expect_rows: 3
+        expect_columns: {metric: k8s.node.cpu.usage, type: gauge, is_monotonic: false}
+    docs_url: https://signoz.io/api-reference/#/operations/ListMetrics
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_metric_attributes
+    title: Attributes (labels) of a metric
+    description: >-
+      Attribute keys of one metric with their distinct values in the window: one row per key.
+      Filter on metric (required) and ts. Use to pick group_by keys and filter values for
+      signoz_metrics.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/metrics/attributes
+      query:
+        metricName: "{{ filters.metric }}"
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+    filters:
+      - {column: metric, required: true, description: "Exact metric name", examples: [signoz_calls_total]}
+    time: {column: ts, default_lookback: 6h, max_window: 31d}
+    response:
+      rows_path: "$.data.attributes[*]"
+    columns:
+      - {name: key, path: key}
+      - {name: value_count, type: BIGINT, path: valueCount}
+      - {name: values, type: JSON, path: values}
+      - {name: metric, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT key, value_count, values FROM signoz_metric_attributes WHERE metric = 'signoz_calls_total' ORDER BY value_count"
+        description: Which labels a metric has and their values.
+    fixtures:
+      - file: metric_attributes.json
+        note: "Built strictly from the GetMetricAttributes 200 schema (data{attributes[{key, valueCount, values[]}], totalKeys}). Values illustrative."
+        filters: {metric: signoz_calls_total}
+        expect_rows: 2
+        expect_columns: {key: service.name, value_count: 3, metric: signoz_calls_total}
+    docs_url: https://signoz.io/api-reference/#/operations/GetMetricAttributes
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_field_keys
+    title: Field keys (logs, traces, metrics)
+    description: >-
+      Attribute / field names available for a signal with their context (resource, attribute,
+      log, span) and data type: one row per (key, context, type). Filter on signal (logs default,
+      traces, metrics), search (substring), metric (for metrics) and ts. Use when a filter on a
+      key returns nothing.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/fields/keys
+      query:
+        signal: "{{ filters.signal or 'logs' }}"
+        searchText: "{{ filters.search }}"
+        metricName: "{{ filters.metric }}"
+        startUnixMilli: "{{ time.start | epoch_ms }}"
+        endUnixMilli: "{{ time.end | epoch_ms }}"
+        limit: "{{ [limit or 200, 1000] | min }}"
+    filters:
+      - {column: signal, description: "logs (default) | traces | metrics", examples: [logs]}
+      - {column: search, description: "Substring of the key", examples: [status]}
+      - {column: metric, description: "Metric name (signal = metrics)"}
+    time: {column: ts, default_lookback: 6h, max_window: 31d}
+    response:
+      rows_path: "$.data.keys"
+      expand:
+        - {entries: ".", as: e}
+        - {explode: "@e.value", as: k}
+    columns:
+      - {name: key, path: "@k.name"}
+      - {name: field_context, path: "@k.fieldContext", description: "resource | attribute | log | span | scope | body"}
+      - {name: field_data_type, path: "@k.fieldDataType", description: "string | number | float64 | int64 | bool"}
+      - {name: signal, path: "@k.signal"}
+      - {name: unit, path: "@k.unit"}
+      - {name: description, path: "@k.description"}
+      - {name: complete, type: BOOLEAN, path: "$.data.complete", description: "false = the list was truncated (narrow with search)"}
+      - {name: search, filter_only: true}
+      - {name: metric, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT key, field_context, field_data_type FROM signoz_field_keys WHERE signal = 'traces' AND search = 'status' ORDER BY key"
+        description: Find the exact span attribute name for status codes (and whether it is string or number).
+    fixtures:
+      - file: field_keys.json
+        note: "Built strictly from the GetFieldsKeys 200 schema (data{complete, keys{<name>: [TelemetryFieldKey]}}); key names from the integration test querierlogs/01_list.py."
+        filters: {signal: logs}
+        expect_rows: 3
+        expect_columns: {key: service.name, field_context: resource, field_data_type: string, signal: logs, complete: true}
+    docs_url: https://signoz.io/api-reference/#/operations/GetFieldsKeys
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_field_values
+    title: Values of a field
+    description: >-
+      Distinct values of one field (attribute / resource / top-level) for a signal in the window:
+      one row per value. Filter on name (required, e.g. service.name, severity_text,
+      k8s.namespace.name), signal (logs default, traces, metrics), search (substring),
+      existing_query (only values co-occurring with this filter expression) and ts.
+    kind: entities
+    request:
+      method: GET
+      path: /api/v1/fields/values
+      query:
+        signal: "{{ filters.signal or 'logs' }}"
+        name: "{{ filters.name }}"
+        searchText: "{{ filters.search }}"
+        existingQuery: "{{ filters.existing_query }}"
+        metricName: "{{ filters.metric }}"
+        startUnixMilli: "{{ time.start | epoch_ms }}"
+        endUnixMilli: "{{ time.end | epoch_ms }}"
+        limit: "{{ [limit or 200, 1000] | min }}"
+    filters:
+      - {column: name, required: true, description: "Field name", examples: [severity_text]}
+      - {column: signal, description: "logs (default) | traces | metrics"}
+      - {column: search, description: "Substring of the value"}
+      - {column: existing_query, description: "Filter expression the values must co-occur with, e.g. service.name = 'checkout'"}
+      - {column: metric, description: "Metric name (signal = metrics)"}
+    time: {column: ts, default_lookback: 6h, max_window: 31d}
+    response:
+      rows_path: "$.data.values"
+      expand:
+        - {entries: ".", as: e}
+        - {explode: "@e.value", as: v}
+    columns:
+      - {name: value, path: "@v", transform: str}
+      - {name: value_type, path: "@e.key", description: "stringValues | numberValues | boolValues | relatedValues"}
+      - {name: complete, type: BOOLEAN, path: "$.data.complete"}
+      - {name: name, filter_only: true}
+      - {name: signal, filter_only: true}
+      - {name: search, filter_only: true}
+      - {name: existing_query, filter_only: true}
+      - {name: metric, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    examples:
+      - sql: "SELECT value FROM signoz_field_values WHERE name = 'service.name' AND signal = 'traces' ORDER BY value"
+        description: Exact service names seen in traces (before filtering by service).
+      - sql: "SELECT value FROM signoz_field_values WHERE name = 'severity_text' AND existing_query = 'service.name = ''checkout'''"
+        description: Which severity spellings a service actually emits.
+    fixtures:
+      - file: field_values.json
+        note: "Built strictly from the GetFieldsValues 200 schema (data{complete, values{stringValues, numberValues, boolValues, relatedValues}}); severity_text values as asserted in querierlogs/01_list.py."
+        filters: {name: severity_text, signal: logs}
+        expect_rows: 2
+        expect_columns: {value: DEBUG, value_type: stringValues, complete: true, name: severity_text}
+    docs_url: https://signoz.io/api-reference/#/operations/GetFieldsValues
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_hosts
+    title: Hosts (infrastructure monitoring)
+    description: >-
+      Hosts reporting host metrics in the window with CPU %, memory %, I/O wait %, disk usage %,
+      15-min load and active/inactive status (no metrics in the last 10 minutes = inactive). One
+      row per host. Filter on host, env, status (active | inactive), query (filter expression on
+      host attributes) and ts.
+    kind: entities
+    request:
+      method: POST
+      path: /api/v2/infra_monitoring/hosts
+      body:
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        filter:
+          expression: >-
+            {{ [
+              ('(' ~ filters.query ~ ')') if filters.query else None,
+              ('host.name IN (' ~ (filters.host | as_list | map('squote') | join(', ')) ~ ')') if filters.host else None,
+              (env.SIGNOZ_ENV_ATTRIBUTE ~ ' IN (' ~ (filters.env | as_list | map('squote') | join(', ')) ~ ')') if filters.env else None
+            ] | compact | join(' AND ') }}
+          filterByStatus: "{{ filters.status or '' }}"
+        limit: 200
+        offset: 0
+    filters:
+      - {column: host, ops: ["=", "in"], fan_out: false, description: "Exact host.name", examples: [checkout-1.ec2.internal]}
+      - {column: env, ops: ["=", "in"], fan_out: false, description: "Environment (SIGNOZ_ENV_ATTRIBUTE)"}
+      - {column: status, description: "active | inactive", examples: [active]}
+      - {column: query, description: "Filter expression on host attributes, e.g. os.type = 'linux'"}
+    time: {column: ts, default_lookback: 30m, max_window: 7d}
+    pagination: {type: offset, offset_param: body.offset, limit_param: body.limit, page_size: 200, total_path: "$.data.total", max_pages: 5}
+    response:
+      rows_path: "$.data.records[*]"
+    columns:
+      - {name: host, path: hostName}
+      - {name: status, path: status, description: "active | inactive"}
+      - {name: cpu_pct, type: DOUBLE, expr: "None if _.cpu == -1 else _.cpu", description: "CPU usage % (NULL = no data; the API sends -1)"}
+      - {name: memory_pct, type: DOUBLE, expr: "None if _.memory == -1 else _.memory"}
+      - {name: iowait_pct, type: DOUBLE, expr: "None if _.wait == -1 else _.wait"}
+      - {name: disk_usage_pct, type: DOUBLE, expr: "None if _.diskUsage == -1 else _.diskUsage"}
+      - {name: load15, type: DOUBLE, expr: "None if _.load15 == -1 else _.load15"}
+      - {name: os_type, path: "meta['os.type']"}
+      - {name: env, expr: "_.meta['deployment.environment'] or _.meta['deployment.environment.name']"}
+      - {name: meta, type: JSON, path: meta}
+      - {name: end_before_retention, type: BOOLEAN, path: "$.data.endTimeBeforeRetention", description: "true = the window is older than metric retention"}
+      - {name: query, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Needs hostmetrics from the OTel collector; hosts without it are absent (not healthy)."
+      - "Metric fields are -1 when no data: converted to NULL here."
+    examples:
+      - sql: "SELECT host, status, cpu_pct, memory_pct, disk_usage_pct, load15 FROM signoz_hosts ORDER BY cpu_pct DESC NULLS LAST LIMIT 20"
+        description: Hottest hosts in the window, and which stopped reporting.
+    fixtures:
+      - file: hosts.json
+        note: "Built strictly from the ListHosts 200 schema (data{type, records[], total, endTimeBeforeRetention}), -1 sentinel per its description; meta keys from the frontend story mock infraMonitoring.ts."
+        expect_rows: 2
+        expect_columns: {host: checkout-1.ec2.internal, status: active, cpu_pct: 91.4, os_type: linux, env: production, end_before_retention: false}
+    ui_link: "{{ source.base_url }}/infrastructure-monitoring/hosts"
+    docs_url: https://signoz.io/api-reference/#/operations/ListHosts
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_pods
+    title: Kubernetes pods (infrastructure monitoring)
+    description: >-
+      Kubernetes pods in the window with kubectl-style status (running, pending,
+      crashloopbackoff, oomkilled, imagepullbackoff, ...), restarts, CPU and memory usage and
+      request/limit utilisation, namespace, node, cluster and owning workload. One row per pod.
+      Filter on namespace, pod, cluster, status (IN allowed), query and ts.
+    kind: entities
+    request:
+      method: POST
+      path: /api/v2/infra_monitoring/pods
+      body:
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        filter:
+          expression: >-
+            {{ [
+              ('(' ~ filters.query ~ ')') if filters.query else None,
+              ('k8s.namespace.name IN (' ~ (filters.namespace | as_list | map('squote') | join(', ')) ~ ')') if filters.namespace else None,
+              ('k8s.pod.name IN (' ~ (filters.pod | as_list | map('squote') | join(', ')) ~ ')') if filters.pod else None,
+              ('k8s.cluster.name IN (' ~ (filters.cluster | as_list | map('squote') | join(', ')) ~ ')') if filters.cluster else None
+            ] | compact | join(' AND ') }}
+          filterByPodStatus: "{{ filters.status | as_list if filters.status else None }}"
+        limit: 200
+        offset: 0
+    filters:
+      - {column: namespace, ops: ["=", "in"], fan_out: false, description: "Exact k8s.namespace.name", examples: [payments]}
+      - {column: pod, ops: ["=", "in"], fan_out: false, description: "Exact k8s.pod.name"}
+      - {column: cluster, ops: ["=", "in"], fan_out: false, description: "Exact k8s.cluster.name"}
+      - {column: status, ops: ["=", "in"], fan_out: false, description: "Pod status: running, pending, failed, crashloopbackoff, oomkilled, imagepullbackoff, errimagepull, evicted, containercreating, completed, error, no_data, ...", examples: [crashloopbackoff]}
+      - {column: query, description: "Filter expression on pod attributes, e.g. k8s.deployment.name = 'checkout'"}
+    time: {column: ts, default_lookback: 30m, max_window: 7d}
+    pagination: {type: offset, offset_param: body.offset, limit_param: body.limit, page_size: 200, total_path: "$.data.total", max_pages: 5}
+    response:
+      rows_path: "$.data.records[*]"
+    columns:
+      - {name: pod, path: "meta['k8s.pod.name']"}
+      - {name: namespace, path: "meta['k8s.namespace.name']"}
+      - {name: status, path: podStatus, description: "Latest kubectl-style status in the window"}
+      - {name: restarts, type: BIGINT, expr: "None if _.podRestarts == -1 else _.podRestarts"}
+      - {name: node, path: "meta['k8s.node.name']"}
+      - {name: cluster, path: "meta['k8s.cluster.name']"}
+      - {name: workload, expr: "_.meta['k8s.deployment.name'] or _.meta['k8s.statefulset.name'] or _.meta['k8s.daemonset.name'] or _.meta['k8s.job.name'] or _.meta['k8s.cronjob.name']"}
+      - {name: kind, expr: "'Pod'"}
+      - {name: cpu_cores, type: DOUBLE, expr: "None if _.podCPU == -1 else _.podCPU", description: "CPU usage (cores)"}
+      - {name: cpu_request_util, type: DOUBLE, expr: "None if _.podCPURequest == -1 else _.podCPURequest", description: "CPU usage / request (1.0 = 100%)"}
+      - {name: cpu_limit_util, type: DOUBLE, expr: "None if _.podCPULimit == -1 else _.podCPULimit", description: "CPU usage / limit"}
+      - {name: memory_bytes, type: DOUBLE, expr: "None if _.podMemory == -1 else _.podMemory", description: "Memory working set (bytes)"}
+      - {name: memory_request_util, type: DOUBLE, expr: "None if _.podMemoryRequest == -1 else _.podMemoryRequest"}
+      - {name: memory_limit_util, type: DOUBLE, expr: "None if _.podMemoryLimit == -1 else _.podMemoryLimit", description: "Memory / limit (near 1.0 = OOMKill risk)"}
+      - {name: age_ms, type: BIGINT, expr: "None if _.podAge == -1 else _.podAge"}
+      - {name: uid, path: podUID}
+      - {name: env, expr: "_.meta['deployment.environment'] or _.meta['deployment.environment.name']"}
+      - {name: meta, type: JSON, path: meta}
+      - {name: query, filter_only: true}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Needs the k8s cluster / kubelet receivers (k8s-infra chart); pods are listed from metrics, so a pod that never reported is absent."
+      - "Utilisation fields are ratios (1.0 = 100% of request/limit); -1 (no data) is converted to NULL."
+    examples:
+      - sql: "SELECT namespace, pod, status, restarts, memory_limit_util, node FROM signoz_pods WHERE namespace = 'payments' AND (status <> 'running' OR restarts > 0) ORDER BY restarts DESC"
+        description: Unhealthy or restarting pods in a namespace.
+      - sql: "SELECT pod, workload, memory_limit_util, cpu_limit_util FROM signoz_pods WHERE status IN ('oomkilled', 'crashloopbackoff') ORDER BY memory_limit_util DESC"
+        description: Crash-looping / OOM-killed pods with their resource pressure.
+    fixtures:
+      - file: pods.json
+        note: "Built strictly from the ListPods 200 schema (records[{podUID, podStatus, podAge, podCPU*, podMemory*, podRestarts, podCountsByStatus, meta}]); meta keys and values from the frontend story mock pages/InfrastructureMonitoring/stories/__story_mockdata__/infraMonitoring.ts."
+        expect_rows: 2
+        expect_columns: {pod: checkout-7d9f14-x4k2p, namespace: payments, status: crashloopbackoff, restarts: 8, node: ip-10-0-3-17, workload: checkout, kind: Pod, memory_limit_util: 0.94}
+    ui_link: "{{ source.base_url }}/infrastructure-monitoring/kubernetes"
+    docs_url: https://signoz.io/api-reference/#/operations/ListPods
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_dashboards
+    title: Dashboards
+    description: Dashboards (name, description, tags, source, lock state, last editor). One row per dashboard. Filter on query (dashboard filter DSL, e.g. name contains checkout OR env = prod).
+    kind: entities
+    request:
+      method: GET
+      path: /api/v2/dashboards
+      query:
+        query: "{{ filters.query }}"
+        sort: updated_at
+        order: desc
+    filters:
+      - {column: query, description: "Dashboard list filter DSL: name contains prod, env = prod (tag), combined with AND / OR", examples: ["name contains checkout"]}
+    pagination: {type: offset, offset_param: query.offset, limit_param: query.limit, page_size: 100, total_path: "$.data.total", max_pages: 5}
+    response:
+      rows_path: "$.data.dashboards[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: title, expr: "(_.spec.display.name if _.spec and _.spec.display else None) or _.name"}
+      - {name: description, path: "spec.display.description"}
+      - {name: tags, type: JSON, path: tags}
+      - {name: source, path: source, description: "user | system | integration"}
+      - {name: locked, type: BOOLEAN, path: locked}
+      - {name: updated_at, type: TIMESTAMP, path: updatedAt}
+      - {name: updated_by, path: updatedBy}
+      - {name: url, expr: "'/dashboard/' ~ _.id", description: "Path of the dashboard (prefix SIGNOZ_URL)"}
+      - {name: query, filter_only: true}
+    examples:
+      - sql: "SELECT title, url, updated_at FROM signoz_dashboards WHERE title ILIKE '%checkout%'"
+        description: Dashboards about a service, to link in the investigation.
+    fixtures:
+      - file: dashboards.json
+        note: "Built strictly from the ListDashboardsV2 200 schema (data{dashboards[], tags[], reservedKeywords[], total}). Values illustrative."
+        expect_rows: 1
+        expect_columns: {title: Checkout overview, source: user, locked: false, url: "/dashboard/019a1f6e-2c4b-7d1e-9a43-5f0b8c1d2e3f"}
+    ui_link: "{{ source.base_url }}/dashboard"
+    docs_url: https://signoz.io/api-reference/#/operations/ListDashboardsV2
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_downtime_schedules
+    title: Planned downtime (alert silencing) schedules
+    description: >-
+      Planned maintenance / downtime schedules that silence alert rules: one row per schedule with
+      status (active, upcoming, expired), window, recurrence and the rule ids it covers. Filter on
+      active = true. A silenced rule explains a missing page.
+    kind: changes
+    request:
+      method: GET
+      path: /api/v1/downtime_schedules
+      query:
+        active: "{{ 'true' if filters.active else None }}"
+    filters:
+      - {column: active, type: BOOLEAN, description: "true = only schedules active now"}
+    response:
+      rows_path: "$.data[*]"
+    columns:
+      - {name: id, path: id}
+      - {name: title, path: name}
+      - {name: description, path: description}
+      - {name: status, path: status, description: "active | upcoming | expired"}
+      - {name: kind, path: kind, description: "fixed | recurring"}
+      - {name: ts, type: TIMESTAMP, path: "schedule.startTime"}
+      - {name: end_ts, type: TIMESTAMP, path: "schedule.endTime"}
+      - {name: timezone, path: "schedule.timezone"}
+      - {name: recurrence, type: JSON, path: "schedule.recurrence"}
+      - {name: alert_ids, type: JSON, path: alertIds, description: "Rule ids silenced (empty = all rules)"}
+      - {name: author, path: createdBy}
+      - {name: active, type: BOOLEAN, filter_only: true}
+    examples:
+      - sql: "SELECT title, status, ts, end_ts, alert_ids FROM signoz_downtime_schedules WHERE status IN ('active', 'upcoming')"
+        description: Maintenance windows currently silencing (or about to silence) alerts.
+    fixtures:
+      - file: downtime_schedules.json
+        note: "Built strictly from the ListDowntimeSchedules 200 schema (data[{id, name, kind, status, schedule{startTime, endTime, timezone, recurrence}, alertIds}]). Values illustrative."
+        expect_rows: 1
+        expect_columns: {title: payments DB maintenance, status: active, kind: fixed, ts: "2026-10-01T11:00:00Z", author: alice@signoz.io}
+    docs_url: https://signoz.io/api-reference/#/operations/ListDowntimeSchedules
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_exceptions
+    title: Exceptions grouped by type (ClickHouse error index)
+    description: >-
+      Exceptions recorded on spans in the window, grouped by service, exception type and group
+      id, with counts, first/last seen, a sample message and a sample trace id: one row per
+      exception group (the SigNoz Exceptions page). Filter on service and ts. Runs a ClickHouse SQL
+      query over signoz_traces.distributed_signoz_error_index_v2 through query_range v5.
+    kind: events
+    request:
+      method: POST
+      path: /api/v5/query_range
+      body:
+        schemaVersion: v1
+        start: "{{ time.start | epoch_ms }}"
+        end: "{{ time.end | epoch_ms }}"
+        requestType: raw
+        variables: {}
+        compositeQuery:
+          queries:
+            - type: clickhouse_sql
+              spec:
+                name: exceptions
+                query: >-
+                  SELECT serviceName, exceptionType, groupID, any(exceptionMessage) AS exceptionMessage,
+                  count() AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen,
+                  any(traceID) AS sample_trace_id
+                  FROM signoz_traces.distributed_signoz_error_index_v2
+                  WHERE timestamp >= $start_datetime AND timestamp <= $end_datetime
+                  {{ ('AND serviceName IN (' ~ (filters.service | as_list | map('squote') | join(', ')) ~ ')') if filters.service else '' }}
+                  GROUP BY serviceName, exceptionType, groupID
+                  ORDER BY count DESC LIMIT {{ [limit or 200, 1000] | min }}
+    filters:
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Exact service name (serviceName)", examples: [checkout]}
+    time: {column: ts, default_lookback: 1h, max_window: 7d}
+    response:
+      rows_path: "$.data.data.results[0].rows[*]"
+    columns:
+      - {name: service, path: "data.serviceName"}
+      - {name: title, path: "data.exceptionType", description: "Exception type (class)"}
+      - {name: message, path: "data.exceptionMessage", description: "A sample message of the group"}
+      - {name: count, type: BIGINT, path: "data.count"}
+      - {name: first_seen, type: TIMESTAMP, path: "data.first_seen"}
+      - {name: last_seen, type: TIMESTAMP, path: "data.last_seen"}
+      - {name: trace_id, path: "data.sample_trace_id", description: "A trace that raised it (signoz_trace)"}
+      - {name: id, path: "data.groupID", description: "Exception group id"}
+      - {name: ts, type: TIMESTAMP, filter_only: true}
+    pitfalls:
+      - "Only exceptions recorded as span events (exception.type / exception.message) are indexed; logged-only exceptions are in signoz_logs."
+      - "The ClickHouse table layout is a SigNoz internal; if it changes the query fails loudly (status=error)."
+    examples:
+      - sql: "SELECT service, title, count, first_seen, message, trace_id FROM signoz_exceptions WHERE ts >= TIMESTAMP '2026-10-01 10:00:00' ORDER BY count DESC LIMIT 20"
+        description: Most frequent exceptions around the incident and when each first appeared.
+    fixtures:
+      - file: exceptions_raw.json
+        note: "Built strictly from the OpenAPI RawData schema for a clickhouse_sql raw query (rows[{data}]); columns are the aliases of this table's SQL over the documented distributed_signoz_error_index_v2 schema (Writing ClickHouse queries for traces docs). Values illustrative."
+        expect_rows: 2
+        expect_columns: {service: checkout, title: java.net.SocketTimeoutException, count: 412, first_seen: "2026-10-01T11:02:13.004Z", trace_id: 4bf92f3577b34da6a3ce929d0e0e4736}
+    docs_url: https://signoz.io/docs/userguide/writing-clickhouse-traces-query/
+
+  # ------------------------------------------------------------------------------------------
+  - name: signoz_ingestion_stats
+    title: Ingestion health (row counts, last observed)
+    description: >-
+      Telemetry statistics: total stored rows and the last-observed timestamp of traces, logs and
+      metrics, plus whether k8s/system metrics exist and other operational counters. One row per
+      stat key. Use to tell a data gap (ingestion stopped) from a healthy quiet system.
+    kind: generic
+    request:
+      method: GET
+      path: /api/v1/stats
+      timeout_s: 20
+    response:
+      rows_path: "$.data"
+      expand:
+        - {entries: ".", as: e}
+    columns:
+      - {name: key, path: "@e.key", description: "e.g. telemetry.logs.last_observed.time, telemetry.traces.count"}
+      - {name: value, path: "@e.value", transform: str}
+      - {name: ts, type: TIMESTAMP, expr: "e.value if e.key.endswith('last_observed.time') else None", transform: auto_time, description: "Parsed last-observed time for *.last_observed.time keys"}
+    pitfalls:
+      - "Runs full row counts on every call (10 s server timeout on big installs): call it once per investigation, not in loops."
+      - "last_observed keys are absent when a signal has never been received; counts are totals over retained data, not windowed."
+    examples:
+      - sql: "SELECT key, ts FROM signoz_ingestion_stats WHERE key LIKE 'telemetry.%.last_observed.time' ORDER BY ts"
+        description: When each signal was last received (is ingestion still flowing?).
+    fixtures:
+      - file: stats.json
+        note: "Verbatim example response from the Stats API docs page (https://signoz.io/docs/telemetry-stats-api/)."
+        expect_rows: 11
+        expect_columns: {key: telemetry.traces.count, value: "4821934", ts: null}
+    docs_url: https://signoz.io/docs/telemetry-stats-api/
+
+roles:
+  metrics:
+    - table: signoz_metrics
+      filters: {service: "{{ service or '' }}"}
+      columns: {ts: ts, value: value, metric: metric, labels: labels, service: service}
+      query_language: signoz_filter
+      notes: "metric is required (signoz_metric_names lists them); counters need time_aggregation = 'rate'."
+    - table: signoz_promql
+      query_language: promql
+      columns: {ts: ts, value: value, metric: metric, labels: labels}
+  logs:
+    table: signoz_logs
+    filters:
+      service: "{{ service or '' }}"
+      env: "{{ env or '' }}"
+      host: "{{ host or '' }}"
+      namespace: "{{ namespace or '' }}"
+      pod: "{{ pod or '' }}"
+      error_only: "{{ true if error_only else '' }}"
+      query: "{{ query or '' }}"
+    columns: {ts: ts, service: service, message: message, level: level, host: host, trace_id: trace_id}
+    query_language: signoz_filter
+  log_counts:
+    table: signoz_log_counts
+    filters: {service: "{{ service or '' }}", error_only: "{{ true if error_only else '' }}", group_by: "{{ 'severity_text' if service else 'service.name' }}"}
+    columns: {ts: ts, value: value, service: service, level: level}
+  traces:
+    table: signoz_spans
+    filters: {service: "{{ service or '' }}", error_only: "{{ true if error_only else '' }}", env: "{{ env or '' }}"}
+    columns: {ts: ts, service: service, trace_id: trace_id, span_id: span_id, duration_ms: duration_ms, resource: resource, status_code: status_code, message: status_message}
+    query_language: signoz_filter
+  trace_detail:
+    table: signoz_trace
+    columns: {ts: ts, trace_id: trace_id, span_id: span_id, service: service, duration_ms: duration_ms, resource: resource}
+  services:
+    table: signoz_services
+    columns: {service: service, error_rate: error_rate, p99_ms: p99_ms}
+  service_map:
+    table: signoz_service_map
+    columns: {source: source, target: target, calls: calls, error_rate: error_rate}
+  hosts:
+    table: signoz_hosts
+    filters: {host: "{{ host or '' }}"}
+    columns: {host: host, state: status}
+  k8s_state:
+    table: signoz_pods
+    filters: {namespace: "{{ namespace or '' }}", pod: "{{ pod or '' }}"}
+    columns: {pod: pod, namespace: namespace, kind: kind, phase: status, restarts: restarts, node: node, service: workload}
+    notes: "status is the kubectl-style display status (running, crashloopbackoff, oomkilled, ...)."
+  active_alerts:
+    table: signoz_alerts
+    filters: {state: active}
+    columns: {id: rule_id, name: title, ts: ts, state: state, severity: severity, service: service, labels: labels, url: url}
+  alert_rules:
+    - table: signoz_rule
+      filters: {rule_id: "{{ rule_id or '' }}"}
+      columns: {id: rule_id, name: name, query: query, threshold: threshold, state: state}
+      notes: "Needs the rule UUID (the ruleId label of the alert)."
+    - table: signoz_rules
+      columns: {id: rule_id, name: name, state: state}
+  alert_history:
+    table: signoz_rule_history
+    filters: {rule_id: "{{ rule_id or '' }}"}
+    columns: {ts: ts, name: title, state: state, value: value, service: service, labels: labels}
+  errors:
+    table: signoz_exceptions
+    filters: {service: "{{ service or '' }}"}
+    columns: {ts: last_seen, service: service, title: title, message: message, id: id}
+  dashboards:
+    table: signoz_dashboards
+    columns: {title: title, url: url, id: id}

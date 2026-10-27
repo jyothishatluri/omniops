@@ -1,0 +1,7 @@
+{
+  "status": "success",
+  "data": [
+    {"name": "GET /api/users", "p50": 1000000, "p95": 2000000, "p99": 3000000, "numCalls": 100, "errorCount": 5},
+    {"name": "POST /api/orders", "p50": 1500000, "p95": 2500000, "p99": 3500000, "numCalls": 80, "errorCount": 2}
+  ]
+}

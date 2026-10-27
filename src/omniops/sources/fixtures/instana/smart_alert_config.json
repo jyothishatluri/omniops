@@ -1,0 +1,47 @@
+{
+  "name": "Erroneous call rate is higher than normal",
+  "description": "The erroneous call rate is higher or equal to 4%.",
+  "boundaryScope": "ALL",
+  "applicationId": "IYS1XOEcTNiT1eOD8pxgXg",
+  "applications": {
+    "IYS1XOEcTNiT1eOD8pxgXg": {
+      "applicationId": "IYS1XOEcTNiT1eOD8pxgXg",
+      "inclusive": true,
+      "services": {}
+    }
+  },
+  "severity": 5,
+  "triggering": false,
+  "tagFilterExpression": {
+    "type": "EXPRESSION",
+    "logicalOperator": "AND",
+    "elements": []
+  },
+  "includeInternal": false,
+  "includeSynthetic": false,
+  "rule": {
+    "alertType": "errors",
+    "metricName": "errors",
+    "aggregation": "MEAN"
+  },
+  "threshold": {
+    "type": "staticThreshold",
+    "operator": ">=",
+    "value": 0.04,
+    "lastUpdated": 0
+  },
+  "alertChannelIds": [],
+  "granularity": 600000,
+  "timeThreshold": {
+    "type": "violationsInSequence",
+    "timeWindow": 600000
+  },
+  "evaluationType": "PER_AP",
+  "customPayloadFields": [],
+  "id": "A5VvSXR_SVG6z7YbnIHiHQ",
+  "created": 1707751873882,
+  "initialCreated": 1707751873882,
+  "readOnly": false,
+  "enabled": true,
+  "derivedFromGlobalAlert": false
+}

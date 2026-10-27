@@ -1,0 +1,130 @@
+{
+ "progress": 100,
+ "state": "SUCCEEDED",
+ "result": {
+  "metadata": {
+   "grail": {
+    "analysisTimeframe": {
+     "start": "2026-10-01T11:00:00.000000000Z",
+     "end": "2026-10-01T12:00:00.000000000Z"
+    },
+    "dqlVersion": "V1_0",
+    "executionTimeMilliseconds": 42,
+    "locale": "en_US",
+    "query": "fetch dt.davis.events | dedup event.id, sort: { timestamp desc } | ...",
+    "queryId": "6f3b9a52-7c1d-4e8a-9b0f-2d4c6e8a1b3c",
+    "timezone": "UTC",
+    "scannedRecords": 125000,
+    "scannedBytes": 52428800,
+    "sampled": false,
+    "notifications": []
+   }
+  },
+  "records": [
+   {
+    "event.id": "-2127669892157121805_1727778600000",
+    "event.name": "Failure rate increase",
+    "event.type": "SERVICE_ERROR_RATE_INCREASED",
+    "event.category": "ERROR",
+    "event.status": "ACTIVE",
+    "event.start": "2026-10-01T11:40:00.000000000Z",
+    "event.end": null,
+    "event.description": "The current failure rate (12.4 %) exceeds the auto-detected baseline (0.3 %).",
+    "event.provider": "DAVIS",
+    "event.severity": null,
+    "dt.source_entity": "SERVICE-5D53A2A6A1F2C3B4",
+    "dt.source_entity.type": "service",
+    "dt.smartscape_source.id": "SERVICE-5D53A2A6A1F2C3B4",
+    "dt.smartscape_source.type": "SERVICE",
+    "dt.davis.impact_level": "Services",
+    "dt.davis.is_frequent_event": false,
+    "maintenance.is_under_maintenance": false,
+    "timestamp": "2026-10-01T11:45:00.000000000Z"
+   },
+   {
+    "event.id": "-6475311485380369979_1727778300000",
+    "event.name": "Process restart",
+    "event.type": "PROCESS_RESTART",
+    "event.category": "AVAILABILITY",
+    "event.status": "CLOSED",
+    "event.start": "2026-10-01T11:35:00.000000000Z",
+    "event.end": "2026-10-01T11:36:00.000000000Z",
+    "event.description": null,
+    "event.provider": "ONEAGENT",
+    "event.severity": null,
+    "dt.source_entity": "PROCESS_GROUP_INSTANCE-03F98EA8639FD052",
+    "dt.source_entity.type": "process_group_instance",
+    "dt.smartscape_source.id": null,
+    "dt.davis.impact_level": "Infrastructure",
+    "dt.davis.is_frequent_event": false,
+    "maintenance.is_under_maintenance": false,
+    "timestamp": "2026-10-01T11:36:00.000000000Z",
+    "dt.smartscape_source.type": null
+   }
+  ],
+  "types": [
+   {
+    "indexRange": [
+     0,
+     1
+    ],
+    "mappings": {
+     "event.id": {
+      "type": "string"
+     },
+     "event.name": {
+      "type": "string"
+     },
+     "event.type": {
+      "type": "string"
+     },
+     "event.category": {
+      "type": "string"
+     },
+     "event.status": {
+      "type": "string"
+     },
+     "event.start": {
+      "type": "timestamp"
+     },
+     "event.end": {
+      "type": "timestamp"
+     },
+     "event.description": {
+      "type": "string"
+     },
+     "event.provider": {
+      "type": "string"
+     },
+     "event.severity": {
+      "type": "long"
+     },
+     "dt.source_entity": {
+      "type": "string"
+     },
+     "dt.source_entity.type": {
+      "type": "string"
+     },
+     "dt.smartscape_source.id": {
+      "type": "string"
+     },
+     "dt.davis.impact_level": {
+      "type": "string"
+     },
+     "dt.davis.is_frequent_event": {
+      "type": "boolean"
+     },
+     "maintenance.is_under_maintenance": {
+      "type": "boolean"
+     },
+     "timestamp": {
+      "type": "timestamp"
+     },
+     "dt.smartscape_source.type": {
+      "type": "string"
+     }
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,71 @@
+[
+  {
+    "eventId": "gM73SycATrOFMcL5qspByQ",
+    "start": 1706774419000,
+    "end": 1706783931000,
+    "type": "incident",
+    "state": "open",
+    "problem": "New Event-test-01",
+    "detail": "test",
+    "severity": 5,
+    "entityName": ".NET App",
+    "entityLabel": "powershell.exe",
+    "metrics": [
+      {
+        "metricName": "threads.lck_crs",
+        "snapshotId": "zqEuPom1v7YK61jRU8cEpRhCI1w",
+        "entityId": {
+          "steadyId": "55428",
+          "pluginId": "com.instana.forge.infrastructure.runtime.clr.ClrRuntimePlatform",
+          "host": "00:15:5d:ff:fe:98:d1:f6"
+        }
+      }
+    ],
+    "entityType": "INFRASTRUCTURE",
+    "fixSuggestion": "test",
+    "snapshotId": "zqEuPom1v7YK61jRU8cEpRhCI1w",
+    "recentEvents": [
+      {
+        "eventId": "ZzaptuusSOutGLGmqD-wzA"
+      },
+      {
+        "eventId": "oeqTbltKQw6pp1OJi_QH_Q"
+      },
+      {
+        "eventId": "Cnv-8y96SOW2CzZbn7SK7Q"
+      },
+      {
+        "eventId": "vidr6ZX9QmqhtdvBrYFR3Q"
+      },
+      {
+        "eventId": "NWfYJEUjSLSPJbxfCEW6kA"
+      },
+      {
+        "eventId": "iJ2Bm8Y5Qq-Fh-IAwAnRqQ"
+      },
+      {
+        "eventId": "kHiCKKByTdW0sMhhjxvgQg"
+      },
+      {
+        "eventId": "w-hl_-8NQXKEIemcNR5ouw"
+      },
+      {
+        "eventId": "Vn0weJOGROaFKwRtqNDaeg"
+      },
+      {
+        "eventId": "Z9yz38EOR3aR0rYlBN3oRQ"
+      },
+      {
+        "eventId": "h7-N1PT9Sim4dCbyM-sf3g"
+      },
+      {
+        "eventId": "nnWCZ2L2STi8lXFbPNUgUg"
+      },
+      {
+        "eventId": "j1NlsfUYTz69t3dqSMekPQ"
+      }
+    ],
+    "probableCause": [],
+    "probableCauseMetadata": {}
+  }
+]

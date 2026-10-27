@@ -1,0 +1,4 @@
+[
+  {"id": 92, "name": "/user/.POST", "entryPointType": "WEB_SERVICE", "internalName": "/user/.POST", "tierId": 9, "tierName": "ECommerce-Services", "background": false},
+  {"id": 184, "name": "OrderServiceImplService.createOrder", "entryPointType": "WEB_SERVICE", "internalName": "OrderServiceImplService.createOrder", "tierId": 12, "tierName": "Inventory-Services", "background": false}
+]

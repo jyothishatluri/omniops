@@ -1,0 +1,42 @@
+{
+  "aggregations": {
+    "h": {
+      "buckets": [
+        {
+          "key_as_string": "2025-03-01T00:00:00.000Z",
+          "key": 1740787200000,
+          "doc_count": 4,
+          "g": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "cartservice",
+                "doc_count": 3
+              },
+              {
+                "key": "frontend",
+                "doc_count": 1
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string": "2025-04-01T00:00:00.000Z",
+          "key": 1743465600000,
+          "doc_count": 3,
+          "g": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "cartservice",
+                "doc_count": 3
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

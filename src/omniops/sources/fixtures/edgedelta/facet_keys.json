@@ -1,0 +1,5 @@
+[
+  {"key": "service.name", "name": "service.name"},
+  {"key": "host.name", "name": "host.name"},
+  {"key": "k8s.namespace.name", "name": "k8s.namespace.name"}
+]

@@ -1,0 +1,31 @@
+{
+  "schema": [
+    {
+      "name": "firstname",
+      "type": "text"
+    },
+    {
+      "name": "lastname",
+      "type": "text"
+    },
+    {
+      "name": "age",
+      "type": "long"
+    }
+  ],
+  "total": 4,
+  "datarows": [
+    [
+      "Nanette",
+      "Bates",
+      28
+    ],
+    [
+      "Amber",
+      "Duke",
+      32
+    ]
+  ],
+  "size": 2,
+  "status": 200
+}

@@ -1,0 +1,103 @@
+{
+ "id": "1",
+ "shareId": "123def456abc",
+ "shortId": "PUMP-STATION-1",
+ "title": "This is an example Python exception",
+ "culprit": "raven.scripts.runner in main",
+ "permalink": "https://sentry.io/the-interstellar-jurisdiction/pump-station/issues/1/",
+ "logger": null,
+ "level": "error",
+ "status": "unresolved",
+ "statusDetails": {},
+ "substatus": "ongoing",
+ "isPublic": false,
+ "platform": "python",
+ "priority": "medium",
+ "priorityLockedAt": null,
+ "seerFixabilityScore": null,
+ "seerAutofixLastTriggered": null,
+ "seerExplorerAutofixLastTriggered": null,
+ "project": {
+  "id": "2",
+  "name": "Pump Station",
+  "slug": "pump-station",
+  "platform": "python"
+ },
+ "type": "default",
+ "issueType": "error",
+ "issueCategory": "error",
+ "metadata": {
+  "title": "This is an example Python exception"
+ },
+ "numComments": 0,
+ "assignedTo": {
+  "type": "user",
+  "id": "1",
+  "name": "John Doe",
+  "email": "john.doe@example.com"
+ },
+ "isBookmarked": false,
+ "isSubscribed": true,
+ "subscriptionDetails": null,
+ "hasSeen": false,
+ "annotations": [],
+ "count": "150",
+ "userCount": 12,
+ "firstSeen": "2018-11-06T21:19:55Z",
+ "lastSeen": "2018-12-06T21:19:55Z",
+ "activity": [
+  {
+   "data": {},
+   "dateCreated": "2018-11-06T21:19:55Z",
+   "id": "0",
+   "type": "first_seen",
+   "user": null
+  }
+ ],
+ "seenBy": [],
+ "userReportCount": 0,
+ "participants": [],
+ "firstRelease": {
+  "version": "17642328ead24b51867165985996d04b29310337",
+  "shortVersion": "1764232",
+  "dateCreated": "2018-11-06T21:19:55.146Z",
+  "dateReleased": null,
+  "ref": null,
+  "url": null
+ },
+ "lastRelease": null,
+ "tags": [
+  {
+   "key": "browser",
+   "name": "Browser",
+   "totalValues": 150
+  },
+  {
+   "key": "level",
+   "name": "Level",
+   "totalValues": 150
+  }
+ ],
+ "stats": {
+  "24h": [
+   [
+    1541451600,
+    557
+   ],
+   [
+    1541455200,
+    473
+   ]
+  ],
+  "30d": [
+   [
+    1538870400,
+    565
+   ],
+   [
+    1538956800,
+    12862
+   ]
+  ]
+ }
+}

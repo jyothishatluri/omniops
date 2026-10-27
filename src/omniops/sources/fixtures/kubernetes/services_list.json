@@ -1,0 +1,83 @@
+{
+ "kind": "ServiceList",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "48213",
+  "continue": ""
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "cart",
+    "namespace": "shop",
+    "uid": "b1718293-0000-4000-8000-000000000011",
+    "creationTimestamp": "2026-10-01T08:00:00Z",
+    "labels": {
+     "app.kubernetes.io/name": "cart"
+    }
+   },
+   "spec": {
+    "ports": [
+     {
+      "name": "tcp-service",
+      "protocol": "TCP",
+      "port": 8080,
+      "targetPort": 8080
+     }
+    ],
+    "selector": {
+     "app.kubernetes.io/name": "cart"
+    },
+    "clusterIP": "10.96.41.12",
+    "clusterIPs": [
+     "10.96.41.12"
+    ],
+    "type": "ClusterIP",
+    "sessionAffinity": "None",
+    "ipFamilies": [
+     "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "internalTrafficPolicy": "Cluster"
+   },
+   "status": {
+    "loadBalancer": {}
+   }
+  },
+  {
+   "metadata": {
+    "name": "frontend-proxy",
+    "namespace": "shop",
+    "uid": "c2829304-0000-4000-8000-000000000012",
+    "creationTimestamp": "2026-10-01T08:00:00Z",
+    "labels": {
+     "app.kubernetes.io/name": "frontend-proxy"
+    }
+   },
+   "spec": {
+    "ports": [
+     {
+      "name": "http",
+      "protocol": "TCP",
+      "port": 8080,
+      "targetPort": 8080,
+      "nodePort": 30080
+     }
+    ],
+    "selector": {
+     "app.kubernetes.io/name": "frontend-proxy"
+    },
+    "clusterIP": "10.96.12.7",
+    "clusterIPs": [
+     "10.96.12.7"
+    ],
+    "type": "NodePort",
+    "sessionAffinity": "None",
+    "externalTrafficPolicy": "Cluster"
+   },
+   "status": {
+    "loadBalancer": {}
+   }
+  }
+ ]
+}

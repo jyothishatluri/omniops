@@ -1,0 +1,16 @@
+{
+  "operations": [
+    {
+      "name": "handle POST /api/orders",
+      "spanKind": "server"
+    },
+    {
+      "name": "call payment-service",
+      "spanKind": "client"
+    },
+    {
+      "name": "call user-service",
+      "spanKind": "client"
+    }
+  ]
+}

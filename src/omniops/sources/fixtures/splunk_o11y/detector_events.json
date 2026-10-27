@@ -1,0 +1,16 @@
+[
+ {
+  "anomalyState": "ANOMALOUS",
+  "detectLabel": "loadWarning",
+  "detectorId": "string",
+  "detectorName": "JVM CPU Load detector",
+  "id": "string",
+  "incidentId": "string",
+  "inputs": {
+   "A": 5,
+   "B": 6
+  },
+  "severity": "Info",
+  "timestamp": 0
+ }
+]

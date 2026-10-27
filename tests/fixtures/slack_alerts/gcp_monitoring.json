@@ -1,0 +1,48 @@
+{
+  "platform": "google",
+  "description": "Google Cloud Monitoring Slack notification channel: an open incident for a Kubernetes container latency policy, with the generated summary (resource and metric labels, threshold, value) and links to the incident and the policy.",
+  "provenance": "Google Cloud Monitoring docs (Slack notification channel; incident fields in the webhook schema 1.2: incident.url .../monitoring/alerting/incidents/<id>?project=<project>, policy_name, condition_name, summary '... is above the threshold of X with a value of Y.' / '... returned to normal with a value of Y.', state open/closed, started_at epoch seconds). The '[ALERT - <severity>] <policy>' title form and field layout are reconstructed.",
+  "event": {
+    "type": "message",
+    "user": "U11GCPMON1",
+    "bot_id": "B11GCPMON1",
+    "app_id": "A11GCPMON1",
+    "bot_profile": {"id": "B11GCPMON1", "app_id": "A11GCPMON1", "name": "Google Cloud Monitoring", "deleted": false, "team_id": "T01ACME"},
+    "text": "",
+    "attachments": [
+      {
+        "id": 1,
+        "color": "danger",
+        "fallback": "[ALERT - Critical] Checkout latency high",
+        "title": "[ALERT - Critical] Checkout latency high",
+        "title_link": "https://console.cloud.google.com/monitoring/alerting/incidents/0.nxd5hb3ytq4c?project=shop-prod-1234",
+        "text": "Request latencies (p99) for shop-prod-1234 Kubernetes Container labels {project_id=shop-prod-1234, location=us-central1, cluster_name=shop-gke, namespace_name=shop, pod_name=checkout-7d9f8c6b5-x2x4q, container_name=checkout} with metric labels {response_code=500} is above the threshold of 0.800 with a value of 1.374.",
+        "fields": [
+          {"title": "Policy", "value": "<https://console.cloud.google.com/monitoring/alerting/policies/1234567890123456789?project=shop-prod-1234|Checkout latency high>", "short": false},
+          {"title": "Condition", "value": "p99 latency above 800 ms", "short": false}
+        ]
+      }
+    ],
+    "ts": "1792504957.000800",
+    "channel": "C07ALERTS01",
+    "event_ts": "1792504957.000800",
+    "channel_type": "channel"
+  },
+  "expected": {
+    "platform": "google",
+    "rule_id": "1234567890123456789",
+    "rule_name": "Checkout latency high",
+    "status": "firing",
+    "raw_status": "ALERT",
+    "severity": "Critical",
+    "service": "checkout",
+    "namespace": "shop",
+    "pod": "checkout-7d9f8c6b5-x2x4q",
+    "group": "checkout-7d9f8c6b5-x2x4q",
+    "threshold": "0.800",
+    "value": "1.374",
+    "incident_id": "0.nxd5hb3ytq4c",
+    "url": "https://console.cloud.google.com/monitoring/alerting/incidents/0.nxd5hb3ytq4c?project=shop-prod-1234",
+    "tags": {"project_id": "shop-prod-1234", "cluster_name": "shop-gke", "location": "us-central1", "response_code": "500"}
+  }
+}

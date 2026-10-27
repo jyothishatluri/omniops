@@ -1,0 +1,13 @@
+{
+  "items": [
+    {
+      "boundaryScope": "INBOUND",
+      "entityType": "APPLICATION",
+      "id": "e8krH1wNRV6daAo-NEmG8g",
+      "label": "Robot Shop"
+    }
+  ],
+  "page": 1,
+  "pageSize": 1,
+  "totalHits": 1
+}

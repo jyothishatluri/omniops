@@ -1,0 +1,3 @@
+{"queryId":{"queryId":"12345678-07f8-4313-1234-d954b1b45d31"}}
+{"result":{"results":[{"metadata":[{"key":"logid","value":"c3ca5343-88dc-4807-a8f3-82832274afb7"}],"labels":[{"key":"applicationname","value":"staging"}],"userData":"{ ... \"log_obj\":{\"level\":\"INFO\",\"message\":\"some log message\" ... }, ...}"}]}}
+{"statistics":{"status":"COMPLETED","e2eDurationMs":"260","outputRowCount":"1","storage":{"objectStore":{"bytesRead":"0","crossRegionBytesRead":"0","limits":{"scan":{"reached":false,"limit":"50000000000","measuredValue":"454108"},"shuffleSize":{"reached":false,"limit":"1000000000","measuredValue":"704"},"filesRead":{"reached":false,"measuredValue":"0"},"column":{"reached":false}}}}}}

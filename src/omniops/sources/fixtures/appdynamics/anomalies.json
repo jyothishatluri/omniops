@@ -1,0 +1,28 @@
+{
+  "violationListItem": [
+    {
+      "id": 1,
+      "status": "RESOLVED",
+      "description": "AppDynamics has detected a problem. [\"Average Response Time (ms)\"] is violating.",
+      "startTime": 1756374240000,
+      "endTime": 1756375440000,
+      "duration": 1200000,
+      "affectedEntityId": 35,
+      "affectedEntityName": "/orders",
+      "affectedEntityType": "BUSINESS_TRANSACTION",
+      "eventDetailMap": null
+    },
+    {
+      "id": 2,
+      "status": "RESOLVED",
+      "description": "AppDynamics has detected a problem. [\"Average Response Time (ms)\"] is violating.",
+      "startTime": 1756377900000,
+      "endTime": 1756379280000,
+      "duration": 1380000,
+      "affectedEntityId": 35,
+      "affectedEntityName": "/orders",
+      "affectedEntityType": "BUSINESS_TRANSACTION",
+      "eventDetailMap": null
+    }
+  ]
+}

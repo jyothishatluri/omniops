@@ -1,0 +1,27 @@
+{
+ "count": 0,
+ "results": [
+  {
+   "created": 1556825430000,
+   "creator": "AAXYAAAAAZ3",
+   "description": "string",
+   "filters": [
+    "[\n  {\n    \"NOT\": false,\n    \"property\": \"aws_availability_zone\",\n    \"propertyValue\": \"us-east-1a\"\n  },\n  {\n    \"NOT\": true,\n    \"property\": \"cpu.utilization\",\n    \"propertyValue\": 10.7\n  },\n  {\n    \"NOT\": false,\n    \"property\": \"aws_availability_zone\",\n    \"propertyValue\":\n      [\n        \"us-east-2a\",\n        \"us-west-1a\",\n        \"emea-west-2a\"\n      ]\n  }\n]\n"
+   ],
+   "id": "string",
+   "lastUpdated": 1557689430000,
+   "lastUpdatedBy": "string",
+   "linkedTeams": [
+    "AbcdEf1ABCD",
+    "FO1Vq3ABXYZ"
+   ],
+   "recurrence": {
+    "unit": "d",
+    "value": 2
+   },
+   "sendAlertsOnceMutingPeriodHasEnded": true,
+   "startTime": 0,
+   "stopTime": 0
+  }
+ ]
+}

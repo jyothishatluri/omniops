@@ -1,0 +1,17 @@
+{
+ "count": 0,
+ "results": [
+  {
+   "created": 1555065030000,
+   "creator": "string",
+   "description": "string",
+   "key": "string",
+   "lastUpdated": 1555237830000,
+   "lastUpdatedBy": "string",
+   "tags": [
+    "string"
+   ],
+   "value": "string"
+  }
+ ]
+}

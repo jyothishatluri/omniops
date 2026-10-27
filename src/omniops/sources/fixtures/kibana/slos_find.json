@@ -1,0 +1,55 @@
+{
+  "page": 1,
+  "perPage": 25,
+  "results": [
+    {
+      "budgetingMethod": "occurrences",
+      "createdAt": "2025-01-12T10:03:19.000Z",
+      "description": "Availability of my web service",
+      "enabled": true,
+      "groupBy": "*",
+      "id": "8853df00-ae2e-11ed-90af-09bb6422b258",
+      "indicator": {
+        "params": {
+          "filter": "field.environment : \"production\" and service.name : \"my-service\"",
+          "good": "request.status_code : \"2xx\"",
+          "index": "logs-*",
+          "timestampField": "@timestamp",
+          "total": "request.status_code : *"
+        },
+        "type": "sli.kql.custom"
+      },
+      "instanceId": "*",
+      "name": "My Service Availability",
+      "objective": {
+        "target": 0.99
+      },
+      "revision": 1,
+      "settings": {
+        "frequency": "5m",
+        "syncDelay": "5m"
+      },
+      "summary": {
+        "errorBudget": {
+          "consumed": 0.17,
+          "initial": 0.01,
+          "isEstimated": false,
+          "remaining": 0.83
+        },
+        "sliValue": 0.9983,
+        "status": "HEALTHY"
+      },
+      "tags": [
+        "production",
+        "web-service"
+      ],
+      "timeWindow": {
+        "duration": "30d",
+        "type": "rolling"
+      },
+      "updatedAt": "2025-01-12T10:03:19.000Z",
+      "version": 2
+    }
+  ],
+  "total": 42
+}

@@ -1,0 +1,9 @@
+{
+ "kind": "Status",
+ "apiVersion": "v1",
+ "metadata": {},
+ "status": "Failure",
+ "message": "unable to parse requirement: found '=', expected: identifier",
+ "reason": "BadRequest",
+ "code": 400
+}

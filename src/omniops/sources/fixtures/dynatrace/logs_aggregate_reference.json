@@ -1,0 +1,40 @@
+{
+ "aggregationResult": {
+  "hostId": {
+   "1597835271": {
+    "localhost": "12"
+   },
+   "1597835331": {
+    "remotehost": "6"
+   }
+  },
+  "logLevel": {
+   "1597835271": {
+    "ERROR": "1",
+    "INFO": "2"
+   },
+   "1597835331": {
+    "INFO": "17"
+   }
+  },
+  "logPath": {
+   "1597835271": {
+    "/var/log/messages": "15",
+    "/var/log/syslog": "3"
+   },
+   "1597835331": {
+    "/var/log/messages": "15",
+    "/var/log/syslog": "3"
+   }
+  },
+  "processId": {
+   "1597835271": {
+    "cassandra": "6"
+   },
+   "1597835331": {
+    "apache": "12",
+    "cassandra": "60"
+   }
+  }
+ }
+}

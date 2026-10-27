@@ -1,0 +1,195 @@
+{
+  "tests": [
+    {
+      "config": {
+        "assertions": [
+          {
+            "operator": "contains",
+            "property": "string",
+            "target": 0,
+            "timingsScope": "string",
+            "type": "statusCode"
+          }
+        ],
+        "configVariables": [
+          {
+            "example": "string",
+            "id": "string",
+            "name": "VARIABLE_NAME",
+            "pattern": "string",
+            "secure": false,
+            "type": "text"
+          }
+        ],
+        "request": {
+          "allow_insecure": false,
+          "basicAuth": {
+            "password": "PaSSw0RD!",
+            "type": "web",
+            "username": "my_username"
+          },
+          "body": "string",
+          "bodyType": "text/plain",
+          "callType": "unary",
+          "certificate": {
+            "cert": {
+              "content": "string",
+              "filename": "string",
+              "updatedAt": "string"
+            },
+            "key": {
+              "content": "string",
+              "filename": "string",
+              "updatedAt": "string"
+            }
+          },
+          "certificateDomains": [],
+          "checkCertificateRevocation": false,
+          "compressedJsonDescriptor": "string",
+          "compressedProtoFile": "string",
+          "disableAiaIntermediateFetching": false,
+          "dnsServer": "string",
+          "dnsServerPort": {
+            "description": "undefined",
+            "format": "undefined",
+            "type": "undefined"
+          },
+          "files": [
+            {
+              "bucketKey": "string",
+              "content": "string",
+              "encoding": "string",
+              "name": "string",
+              "originalFileName": "string",
+              "size": "integer",
+              "type": "string"
+            }
+          ],
+          "follow_redirects": false,
+          "form": {
+            "<any-key>": "string"
+          },
+          "headers": {
+            "<any-key>": "string"
+          },
+          "host": "string",
+          "httpVersion": "string",
+          "ignore_certificate_validation": false,
+          "isMessageBase64Encoded": false,
+          "mcpProtocolVersion": "2025-06-18",
+          "message": "string",
+          "metadata": {
+            "<any-key>": "string"
+          },
+          "method": "string",
+          "noSavingResponseBody": false,
+          "numberOfPackets": "integer",
+          "persistCookies": false,
+          "port": {
+            "description": "undefined",
+            "format": "undefined",
+            "type": "undefined"
+          },
+          "proxy": {
+            "headers": {
+              "<any-key>": "string"
+            },
+            "url": "https://example.com"
+          },
+          "query": {},
+          "servername": "string",
+          "service": "Greeter",
+          "shouldTrackHops": false,
+          "timeout": "number",
+          "toolArgs": {},
+          "toolName": "search",
+          "url": "https://example.com"
+        },
+        "variables": [
+          {
+            "example": "string",
+            "id": "string",
+            "name": "VARIABLE_NAME",
+            "pattern": "string",
+            "secure": false,
+            "type": "text"
+          }
+        ]
+      },
+      "creator": {
+        "email": "string",
+        "handle": "string",
+        "name": "string"
+      },
+      "locations": [
+        "aws:eu-west-3"
+      ],
+      "message": "string",
+      "monitor_id": "integer",
+      "name": "string",
+      "options": {
+        "accept_self_signed": false,
+        "allow_insecure": false,
+        "bits_ai_auto_investigate": false,
+        "blockedRequestPatterns": [],
+        "captureNetworkPayloads": false,
+        "checkCertificateRevocation": false,
+        "ci": {
+          "executionRule": "blocking"
+        },
+        "device_ids": [
+          "chrome.laptop_large"
+        ],
+        "disableAiaIntermediateFetching": false,
+        "disableCors": false,
+        "disableCsp": false,
+        "enableProfiling": false,
+        "enableSecurityTesting": false,
+        "follow_redirects": false,
+        "httpVersion": "string",
+        "ignoreServerCertificateError": false,
+        "ignore_certificate_validation": false,
+        "initialNavigationTimeout": "integer",
+        "min_failure_duration": "integer",
+        "min_location_failed": "integer",
+        "monitor_name": "string",
+        "monitor_options": {
+          "escalation_message": "string",
+          "notification_preset_name": "string",
+          "renotify_interval": "integer",
+          "renotify_occurrences": "integer"
+        },
+        "monitor_priority": "integer",
+        "noScreenshot": false,
+        "restricted_roles": [
+          "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        ],
+        "retry": {
+          "count": "integer",
+          "interval": "number"
+        },
+        "rumSettings": {
+          "applicationId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+          "clientTokenId": 12345,
+          "isEnabled": true
+        },
+        "scheduling": {
+          "timeframes": [
+            {
+              "day": 1,
+              "from": "07:00",
+              "to": "16:00"
+            }
+          ],
+          "timezone": "America/New_York"
+        },
+        "tick_every": "integer"
+      },
+      "public_id": "string",
+      "status": "live",
+      "subtype": "http",
+      "tags": [],
+      "type": "string"
+    }
+  ]
+}

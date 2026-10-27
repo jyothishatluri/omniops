@@ -1,0 +1,162 @@
+{
+  "data": [
+    {
+      "attributes": {
+        "apiVersion": "string",
+        "description": "string",
+        "displayName": "string",
+        "kind": "string",
+        "name": "string",
+        "namespace": "string",
+        "owner": "string",
+        "tags": []
+      },
+      "id": "string",
+      "meta": {
+        "createdAt": "string",
+        "ingestionSource": "string",
+        "modifiedAt": "string",
+        "origin": "string"
+      },
+      "relationships": {
+        "incidents": {
+          "data": [
+            {
+              "id": "string",
+              "type": "string"
+            }
+          ]
+        },
+        "oncall": {
+          "data": [
+            {
+              "id": "string",
+              "type": "string"
+            }
+          ]
+        },
+        "rawSchema": {
+          "data": {
+            "id": "string",
+            "type": "string"
+          }
+        },
+        "relatedEntities": {
+          "data": [
+            {
+              "id": "string",
+              "type": "string"
+            }
+          ]
+        },
+        "schema": {
+          "data": {
+            "id": "string",
+            "type": "string"
+          }
+        }
+      },
+      "type": "string"
+    }
+  ],
+  "included": [
+    {
+      "attributes": {
+        "schema": {
+          "apiVersion": "v3",
+          "datadog": {
+            "codeLocations": [
+              {
+                "paths": [],
+                "repositoryURL": "string"
+              }
+            ],
+            "events": [
+              {
+                "name": "string",
+                "query": "string"
+              }
+            ],
+            "logs": [
+              {
+                "name": "string",
+                "query": "string"
+              }
+            ],
+            "performanceData": {
+              "tags": []
+            },
+            "pipelines": {
+              "fingerprints": []
+            }
+          },
+          "extensions": {},
+          "integrations": {
+            "opsgenie": {
+              "region": "string",
+              "serviceURL": "https://www.opsgenie.com/service/shopping-cart"
+            },
+            "pagerduty": {
+              "serviceURL": "https://www.pagerduty.com/service-directory/Pshopping-cart"
+            }
+          },
+          "kind": "service",
+          "metadata": {
+            "additionalOwners": [
+              {
+                "name": "",
+                "type": "string"
+              }
+            ],
+            "contacts": [
+              {
+                "contact": "https://slack/",
+                "name": "string",
+                "type": "slack"
+              }
+            ],
+            "description": "string",
+            "displayName": "string",
+            "id": "4b163705-23c0-4573-b2fb-f6cea2163fcb",
+            "inheritFrom": "application:default/myapp",
+            "links": [
+              {
+                "name": "mylink",
+                "provider": "string",
+                "type": "link",
+                "url": "https://mylink"
+              }
+            ],
+            "managed": {},
+            "name": "myService",
+            "namespace": "default",
+            "owner": "string",
+            "tags": [
+              "this:tag",
+              "that:tag"
+            ]
+          },
+          "spec": {
+            "componentOf": [],
+            "dependsOn": [],
+            "languages": [],
+            "lifecycle": "string",
+            "tier": "string",
+            "type": "string"
+          }
+        }
+      },
+      "id": "string",
+      "type": "string"
+    }
+  ],
+  "links": {
+    "next": "string",
+    "previous": "string",
+    "self": "string"
+  },
+  "meta": {
+    "count": "integer",
+    "includeCount": "integer"
+  }
+}

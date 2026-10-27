@@ -1,0 +1,63 @@
+{
+ "entities": [
+  {
+   "displayName": "my host",
+   "entityId": "HOST-06F288EE2A930951",
+   "firstSeenTms": 1574697667547,
+   "fromRelationships": {
+    "isInstanceOf": [
+     {
+      "id": "HOST_GROUP-0E489369D663A4BF",
+      "type": "HOST_GROUP"
+     }
+    ]
+   },
+   "icon": {
+    "customIconPath": "host",
+    "primaryIconType": "linux",
+    "secondaryIconType": "microsoft-azure-signet"
+   },
+   "lastSeenTms": 1588242361417,
+   "managementZones": [
+    {
+     "id": "6239538939987181652",
+     "name": "main app"
+    }
+   ],
+   "properties": {
+    "bitness": 64,
+    "cpuCores": 8,
+    "monitoringMode": "FULL_STACK",
+    "networkZoneId": "aws.us.east01",
+    "osArchitecture": "X86",
+    "osType": "LINUX"
+   },
+   "tags": [
+    {
+     "context": "CONTEXTLESS",
+     "key": "architecture",
+     "stringRepresentation": "architecture:x86",
+     "value": "x86"
+    },
+    {
+     "context": "ENVIRONMENT",
+     "key": "Infrastructure",
+     "stringRepresentation": "[ENVIRONMENT]Infrastructure:Linux",
+     "value": "Linux"
+    }
+   ],
+   "toRelationships": {
+    "isDiskOf": [
+     {
+      "id": "DISK-0393340DCA3853B0",
+      "type": "DISK"
+     }
+    ]
+   },
+   "type": "HOST"
+  }
+ ],
+ "nextPageKey": "AQAAABQBAAAABQ==",
+ "pageSize": 1,
+ "totalCount": 1
+}
