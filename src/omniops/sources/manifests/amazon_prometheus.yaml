@@ -36,7 +36,9 @@ query_languages:
   promql: >-
     PromQL (Cortex-based engine). Selectors use braces: metric{label="value"}. rate()/increase() need a range
     vector [5m]. Aggregate with sum by (label) (...). Histograms: histogram_quantile(0.95, sum by (le)
-    (rate(x_bucket[5m]))). Instant tables need vector results; wrap scalars with vector().
+    (rate(x_bucket[5m]))). vector(s) takes only a scalar (a number, time(), scalar(x)): sum(), count(),
+    max() ... already return instant vectors, so never wrap them in vector(); use '... or vector(0)' to
+    turn 'no series' into 0.
 pitfalls:
   - "Every request must be SigV4-signed for service 'aps' in the workspace region; IAM needs aps:QueryMetrics, aps:GetSeries, aps:GetLabels, aps:GetMetricMetadata, aps:ListRules, aps:ListAlerts and aps:ListAlertManager* actions. 403 = IAM, not the query."
   - "An unknown metric or label returns 0 series, not an error: list label values first, then filter."

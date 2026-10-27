@@ -30,7 +30,7 @@
         "name": "API service outage",
         "services": [
           "api-service",
-          "payment-service"
+          "ledger-service"
         ],
         "severity": "SEV-2",
         "started_at": "2023-08-31T14:32:54Z",

@@ -144,7 +144,8 @@ def record_from_result(result: QueryResult, *, agent: str, purpose: str, kind: s
     discovery = bool(tables) and all(is_discovery_table(t) for t in tables)
     conf, truncated, flags = _confidence(result.notes)
     head = f"{result.total_rows} row(s) x {len(result.columns)} col(s) from {', '.join(tables) or 'sql'}"
-    windows = [f"{t}: {s} -> {e}" for t, (s, e) in result.windows.items()]
+    windows = [f"{t}: {s} -> {e}" + (f" ({result.window_notes[t]})" if result.window_notes.get(t) else "")
+               for t, (s, e) in result.windows.items()]
     if windows:
         head += "; window " + "; ".join(windows)
     if flags:

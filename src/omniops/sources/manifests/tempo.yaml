@@ -7,7 +7,7 @@
 #   - GET: basic auth, username = tenant, password = access policy token
 #   - Grafana Cloud Traces: basic auth, username = Tempo instance ID ("User"), password = Cloud
 #     Access Policy token with traces:read; URL https://tempo-prod-XX-<region>.grafana.net/tempo
-# o11y-bench: TEMPO_URL=http://localhost:3200 (Tempo 3.1, no auth).
+#   - local single-binary Tempo: TEMPO_URL=http://localhost:3200, no auth.
 source: tempo
 display_name: Grafana Tempo
 extends: tempo

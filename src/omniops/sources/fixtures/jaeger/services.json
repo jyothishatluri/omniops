@@ -1,8 +1,8 @@
 {
   "services": [
-    "api-gateway",
-    "order-service",
-    "payment-service",
-    "webapp"
+    "edge-proxy",
+    "billing-api",
+    "ledger-service",
+    "storefront-web"
   ]
 }

@@ -34,10 +34,14 @@ query_languages:
     sum by (service_name) (...), topk(5, ...). Numeric fields need unwrap:
     quantile_over_time(0.99, {...} | json | unwrap duration_ms [5m]) by (service_name).
     OmniOps replaces the placeholders $__auto / $__interval with the query step and $__range with
-    the whole window, so count_over_time({...}[$__auto]) gives non-overlapping buckets that sum to
-    the true total. After a parser, add | __error__="" before counting or filtering on parsed
-    fields: lines the parser could not read carry an __error__ label and otherwise leak into
-    counts (e.g. {job=~".+"} | json | __error__="" | status >= 500).
+    the whole window. Each point of a range query counts the step ENDING at its ts, so
+    count_over_time({...}[$__auto]) gives non-overlapping per-step buckets; with $__auto /
+    $__interval the series starts one step after the window start so the buckets tile the window
+    (the [window] line shows the step and the span they cover). One total over a window comes from
+    the *_query table with [$__range] (one aggregation over exactly that window); *_query_range is
+    for shape, peaks and per-step breakdowns. After a parser, add | __error__="" before counting
+    or filtering on parsed fields: lines the parser could not read carry an __error__ label and
+    otherwise leak into counts (e.g. {job=~".+"} | json | __error__="" | status >= 500).
 pitfalls:
   - "Timestamps on the wire are nanosecond Unix epochs; the engine converts SQL ts bounds for you - never put times inside LogQL."
   - "An unknown label, label value or field returns 0 rows, not an error. Confirm names with the *_labels / *_label_values (or *_series) tables of the same source before concluding that logs are absent."
@@ -59,8 +63,9 @@ tables:
       |~ line filter) and direction. Time bounds on ts are sent as nanoseconds. Pages of 2000
       lines (a plain SELECT ... LIMIT n asks for n, max 5000), newest first; the engine pages
       backwards by moving end to the oldest timestamp returned, up to 10000 lines. Use for error
-      messages, stack traces, request ids and trace ids around an incident; use the
-      *_query_range table of the same source for counts.
+      messages, stack traces, request ids and trace ids around an incident; for counts use
+      loki_query with count_over_time(...[$__range]) (one total over the window) or
+      loki_query_range (counts per step), not raw lines.
     kind: logs
     request:
       method: GET
@@ -80,11 +85,11 @@ tables:
         description: >-
           Full LogQL log query (stream selector + optional pipeline). Must be a log query, not a
           metric query. Put service/namespace matchers inside the selector.
-        examples: ['{service_name="payment-service"} |= "error" | json']
+        examples: ['{service_name="ledger-service"} |= "error" | json']
       - column: service
         ops: ["=", "in"]
         description: "Service name; when query is absent builds the selector {service_name=\"<service>\"} (Loki 3.x label)."
-        examples: [payment-service]
+        examples: [ledger-service]
       - column: level
         ops: ["=", "in"]
         description: "Log level (error, warn, info...). Pushed down as | level=~\"(?i)<v>\" or detected_level=~\"(?i)<v>\"."
@@ -153,25 +158,25 @@ tables:
     examples:
       - sql: >-
           SELECT ts, service, level, message FROM loki_logs
-          WHERE service = 'payment-service' AND level = 'error'
+          WHERE service = 'ledger-service' AND level = 'error'
             AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
           ORDER BY ts DESC LIMIT 50
         description: Newest error lines of one service in the incident window.
       - sql: >-
           SELECT trace_id, count(*) AS errors, min(ts) AS first_seen, any_value(message) AS sample
           FROM loki_logs
-          WHERE query = '{service_name="api-gateway"} | json | level="error"'
+          WHERE query = '{service_name="edge-proxy"} | json | level="error"'
           GROUP BY trace_id ORDER BY errors DESC LIMIT 20
         description: Error lines grouped by trace id (fields extracted with | json) to pick traces to open.
       - sql: >-
           SELECT ts, message FROM loki_logs
-          WHERE service = 'order-service' AND message LIKE '%timeout%' AND direction = 'forward'
+          WHERE service = 'billing-api' AND message LIKE '%timeout%' AND direction = 'forward'
           ORDER BY ts LIMIT 5
         description: First timeout lines in the window (forward direction), e.g. right after a deploy.
       - sql: >-
           SELECT status_code, count(*) AS lines, avg(duration_ms) AS avg_ms, any_value(trace_id) AS sample_trace
           FROM loki_logs
-          WHERE query = '{service_name="payment-service"} | json | status >= 500'
+          WHERE query = '{service_name="ledger-service"} | json | status >= 500'
             AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
           GROUP BY status_code ORDER BY lines DESC
         description: 5xx lines of a JSON-logging service by status code, with latency and a trace id to open.
@@ -182,16 +187,16 @@ tables:
         expect_columns: {ts: "2019-09-23T19:21:37Z", message: foo, service: varlogs, level: info, ts_ns: "1569266497240578000", trace_id: null}
         note: "Verbatim from the Loki HTTP API docs, 'Query logs within a range of time' streams example (stats elided as in the docs)."
       - file: query_range_streams_json_lines.json
-        filters: {service: payment-service}
+        filters: {service: ledger-service}
         expect_rows: 3
-        expect_columns: {ts: "2026-10-01T11:42:31Z", service: payment-service, level: error, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, status_code: null, message: {not_null: true}}
+        expect_columns: {ts: "2026-10-01T11:42:31Z", service: ledger-service, level: error, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, status_code: null, message: {not_null: true}}
         note: >-
           Built strictly from the documented <stream value> schema of 'Query logs within a range of
           time' (stream labels + [<ns epoch string>, <line>] pairs); the lines are JSON / logfmt
-          application logs (o11y-bench style: labels job/service/level, trace_id inside the line,
-          Loki 3.x service_name added at ingest). Values are illustrative.
+          application logs (labels job/service/level, trace_id inside the line, Loki 3.x
+          service_name added at ingest). Values are illustrative.
       - file: query_range_streams_parsed.json
-        filters: {query: '{service_name="payment-service"} | json'}
+        filters: {query: '{service_name="ledger-service"} | json'}
         expect_rows: 1
         expect_columns: {status_code: 503, duration_ms: 1840.5, trace_id: 0af7651916cd43dd8448eb211c80319c, level: error}
         note: >-
@@ -210,7 +215,11 @@ tables:
       with unwrap, sum by ...) over the ts range via GET /loki/api/v1/query_range (matrix result).
       One row per (series, step). Filter on query (required) and ts; optional step (seconds,
       default auto ~300 points). $__auto/$__interval in the query are replaced by the step and
-      $__range by the window, so count_over_time({...}[$__auto]) buckets sum to the real total.
+      $__range by the window. Each point counts the step ending at its ts; when the query uses
+      $__auto/$__interval the first point is one step after the window start, so the per-step
+      buckets tile the window (the [window] line shows the step and the span covered). Use it for
+      shape, peaks and per-step breakdowns; for one total over the window use loki_query with
+      [$__range].
     kind: timeseries
     request:
       method: GET
@@ -221,7 +230,8 @@ tables:
              | replace('$__auto', ((filters.step ~ 's') if filters.step else (time.step_s | prom_duration)))
              | replace('$__interval', ((filters.step ~ 's') if filters.step else (time.step_s | prom_duration)))
              | replace('$__range', (time.range_s | prom_duration)) }}
-        start: "{{ time.start | epoch_ns }}"
+        # Step-sized ranges: start one step after the window start so the buckets tile the window.
+        start: "{{ (time.buckets(filters.step).start if ('$__auto' in filters.query or '$__interval' in filters.query) else time.start) | epoch_ns }}"
         end: "{{ time.end | epoch_ns }}"
         step: "{{ filters.step if filters.step else time.step_s }}"
     filters:
@@ -247,9 +257,11 @@ tables:
       - {name: step, type: BIGINT, filter_only: true, description: "Step in seconds"}
     pitfalls:
       - "Steps with no matching lines are ABSENT, not 0: a series that stops is not proof the errors stopped unless you check the window end; compare with a baseline window."
+      - "Each point counts the step ENDING at its ts: at a 5m step the point stamped 12:00 holds the lines of 11:55-12:00. Read a peak's ts as the end of its bucket."
       - "count_over_time(...[5m]) with a 15s step counts every line 20 times when you SUM the series in SQL; use [$__auto] so range == step."
+      - "Summing per-step buckets gives the window total only when the buckets tile the window (the [window] line says which span they cover); for one total over the window use loki_query with [$__range]."
       - "Keep label cardinality low (sum by (service_name, level)); more than 500 series is an error."
-      - "Points sit on start + k*step, so the last one can equal the window end: use BETWEEN or <= for the upper bound."
+      - "With $__auto/$__interval the last point is exactly the window end: use BETWEEN or <= for the upper bound (ts < end drops the last bucket)."
     examples:
       - sql: >-
           SELECT service, sum(value) AS error_lines, max(value) AS peak_per_step, arg_max(ts, value) AS peak_at
@@ -257,11 +269,13 @@ tables:
           WHERE query = 'sum by (service_name) (count_over_time({service_name=~".+"} | level="error" [$__auto]))'
             AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
           GROUP BY service ORDER BY error_lines DESC
-        description: Which services logged the most errors during the incident, and when each peaked.
+        description: >-
+          Which services logged the most errors during the incident, and when each peaked (each
+          peak_at is the END of its bucket); for exact totals alone prefer loki_query with [$__range].
         verified: false
       - sql: >-
           SELECT ts, value FROM loki_query_range
-          WHERE query = 'sum(rate({service_name="payment-service"} |= "timeout" [$__auto]))'
+          WHERE query = 'sum(rate({service_name="ledger-service"} |= "timeout" [$__auto]))'
           ORDER BY ts
         description: Timeout lines per second for one service over the analysis window.
     fixtures:
@@ -283,7 +297,9 @@ tables:
       log queries are rejected with HTTP 400). One row per series. The evaluation time is the end
       of the ts range (returned as eval_time; ts itself is only a pushdown column, so strict
       bounds such as ts < X are safe); $__range in the query is replaced by the whole ts window, so
-      sum by (service_name) (count_over_time({...}[$__range])) gives totals for the window.
+      sum by (service_name) (count_over_time({...}[$__range])) gives totals for the window. This is
+      the table for one total (count, rate, quantile) over a window: one aggregation over exactly
+      that window, no bucket edges.
     kind: timeseries
     request:
       method: GET
@@ -317,6 +333,12 @@ tables:
             AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
           ORDER BY error_lines DESC
         description: Error-line totals per service over the incident window.
+      - sql: >-
+          SELECT service, value AS matching_lines FROM loki_query
+          WHERE query = 'sum by (service_name) (count_over_time({service_name=~".+"} |~ "(?i)timeout" [$__range]))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 00:00:00' AND TIMESTAMP '2026-10-02 00:00:00'
+          ORDER BY matching_lines DESC
+        description: Total lines matching a text filter per service over a whole day (one count over exactly the window).
     fixtures:
       - file: query_vector.json
         filters: {query: 'sum(rate({job="varlogs"}[10m])) by (level)'}
@@ -339,7 +361,7 @@ tables:
         end: "{{ time.end | epoch_ns }}"
         query: "{{ filters.query }}"
     filters:
-      - {column: query, description: "Optional stream selector to scope the label names", examples: ['{service_name="webapp"}']}
+      - {column: query, description: "Optional stream selector to scope the label names", examples: ['{service_name="storefront-web"}']}
     time: {column: ts, default_lookback: 6h, max_window: 30d}
     response:
       rows_path: "$.data[*]"
@@ -410,7 +432,7 @@ tables:
         start: "{{ time.start | epoch_ns }}"
         end: "{{ time.end | epoch_ns }}"
     filters:
-      - {column: match, required: true, ops: ["=", "in"], description: "Stream selector, e.g. {service_name=\"webapp\"}", examples: ['{service_name="webapp"}']}
+      - {column: match, required: true, ops: ["=", "in"], description: "Stream selector, e.g. {service_name=\"storefront-web\"}", examples: ['{service_name="storefront-web"}']}
     time: {column: ts, default_lookback: 1h, max_window: 30d}
     response:
       rows_path: "$.data[*]"
@@ -424,7 +446,7 @@ tables:
       - {name: match, filter_only: true}
       - {name: ts, type: TIMESTAMP, filter_only: true}
     examples:
-      - sql: "SELECT DISTINCT namespace, pod, container FROM loki_series WHERE match = '{service_name=\"payment-service\"}'"
+      - sql: "SELECT DISTINCT namespace, pod, container FROM loki_series WHERE match = '{service_name=\"ledger-service\"}'"
         description: Which pods/containers a service logs from.
     fixtures:
       - file: series.json
@@ -448,7 +470,7 @@ tables:
         start: "{{ time.start | epoch_ns }}"
         end: "{{ time.end | epoch_ns }}"
     filters:
-      - {column: query, required: true, ops: ["=", "in"], description: "Stream selector (matchers only)", examples: ['{service_name="webapp"}']}
+      - {column: query, required: true, ops: ["=", "in"], description: "Stream selector (matchers only)", examples: ['{service_name="storefront-web"}']}
     time: {column: ts, default_lookback: 1h, max_window: 30d}
     response:
       rows_path: "$"
@@ -462,7 +484,7 @@ tables:
     pitfalls:
       - "Approximation: excludes data still in ingesters (the most recent minutes to hours) and may double count streams spanning schema periods. Never use it as the error count."
     examples:
-      - sql: "SELECT entries, bytes, streams FROM loki_index_stats WHERE query = '{service_name=\"payment-service\"}'"
+      - sql: "SELECT entries, bytes, streams FROM loki_index_stats WHERE query = '{service_name=\"ledger-service\"}'"
         description: Rough log volume behind a selector before running a heavy query.
     fixtures:
       - file: index_stats.json
@@ -517,7 +539,7 @@ tables:
       - file: volume.json
         filters: {query: '{service_name=~".+"}'}
         expect_rows: 2
-        expect_columns: {service: api-gateway, bytes: 1048576}
+        expect_columns: {service: edge-proxy, bytes: 1048576}
         note: >-
           The docs give no example body, only 'Prometheus style vector response'; built strictly from
           the documented vector schema (same as the /query example) as produced by Loki v3.7.9
@@ -575,7 +597,7 @@ tables:
       - file: volume_range.json
         filters: {query: '{service_name=~".+"}'}
         expect_rows: 4
-        expect_columns: {ts: "2024-03-30T23:00:00Z", bytes: 524288, service: api-gateway}
+        expect_columns: {ts: "2024-03-30T23:00:00Z", bytes: 524288, service: edge-proxy}
         note: >-
           The docs give no example body, only 'Prometheus style matrix response'; built strictly from
           the documented matrix schema (same as the /query_range matrix example) as produced by Loki
@@ -605,7 +627,7 @@ tables:
         end: "{{ time.end | epoch_ns }}"
         step: "{{ filters.step if filters.step else time.step_s }}"
     filters:
-      - {column: query, required: true, ops: ["=", "in"], description: "Stream selector (matchers only, no pipeline)", examples: ['{service_name="payment-service"}']}
+      - {column: query, required: true, ops: ["=", "in"], description: "Stream selector (matchers only, no pipeline)", examples: ['{service_name="ledger-service"}']}
       - {column: step, type: BIGINT, description: "Step between samples in seconds (default auto, ~60 points)"}
     time: {column: ts, default_lookback: 1h, max_window: 7d, target_points: 60, min_step: 10s}
     response:
@@ -626,7 +648,7 @@ tables:
     examples:
       - sql: >-
           SELECT pattern, level, sum(value) AS lines FROM loki_patterns
-          WHERE query = '{service_name="payment-service"}'
+          WHERE query = '{service_name="ledger-service"}'
             AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
           GROUP BY pattern, level ORDER BY lines DESC LIMIT 15
         description: Dominant log patterns of a service during the incident.
@@ -662,7 +684,7 @@ tables:
         line_limit: "{{ filters.line_limit }}"
         limit: "{{ limit }}"
     filters:
-      - {column: query, required: true, description: "Stream selector", examples: ['{service_name="api-gateway"}']}
+      - {column: query, required: true, description: "Stream selector", examples: ['{service_name="edge-proxy"}']}
       - {column: line_limit, type: BIGINT, description: "Lines scanned per shard (default 100); raise for rare fields"}
     time: {column: ts, default_lookback: 1h, max_window: 7d}
     response:
@@ -680,7 +702,7 @@ tables:
       - "Sampled: only line_limit lines per shard are scanned, so rare fields can be missing."
       - "Available in Loki 3.x; older versions return 404."
     examples:
-      - sql: "SELECT field, type, cardinality, parsers FROM loki_detected_fields WHERE query = '{service_name=\"api-gateway\"}' ORDER BY cardinality DESC"
+      - sql: "SELECT field, type, cardinality, parsers FROM loki_detected_fields WHERE query = '{service_name=\"edge-proxy\"}' ORDER BY cardinality DESC"
         description: Which fields the service's log lines carry.
     fixtures:
       - file: detected_fields.json
@@ -707,7 +729,7 @@ tables:
         limit: "{{ limit }}"
     filters:
       - {column: field, required: true, description: "Detected field name", examples: [level]}
-      - {column: query, required: true, description: "Stream selector", examples: ['{service_name="api-gateway"}']}
+      - {column: query, required: true, description: "Stream selector", examples: ['{service_name="edge-proxy"}']}
       - {column: line_limit, type: BIGINT, description: "Lines scanned per shard (default 100)"}
     time: {column: ts, default_lookback: 1h, max_window: 7d}
     response:
@@ -719,7 +741,7 @@ tables:
       - {name: line_limit, type: BIGINT, filter_only: true}
       - {name: ts, type: TIMESTAMP, filter_only: true}
     examples:
-      - sql: "SELECT value FROM loki_detected_field_values WHERE field = 'status' AND query = '{service_name=\"api-gateway\"}'"
+      - sql: "SELECT value FROM loki_detected_field_values WHERE field = 'status' AND query = '{service_name=\"edge-proxy\"}'"
         description: Which HTTP status values appear in a service's logs.
     fixtures:
       - file: detected_field_values.json

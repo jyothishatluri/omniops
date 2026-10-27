@@ -102,6 +102,9 @@ TRANSCRIPT_TEXT_MAX_CHARS = 2000
 _WRITE_OUTCOME = re.compile(r"(?:Approved by \S+ (?:and executed|but the write failed)|Cancelled by \S+;)[^\n]*")
 _SLACK_USER = re.compile(r"<@[A-Z0-9_]+>")
 WRITE_OUTCOME_MAX_CHARS = 500
+# Heads the approval outcomes appended to the final answer: what changed once the user approved
+# (adapter wording only; the outcome lines are the bot's own approval cards).
+WRITE_OUTCOME_HEADING = "Update after approval:"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -591,7 +594,7 @@ async def run_task(
         builder.extra["final_answer_source"] = "run_result"
     outcomes = [o for o in write_outcomes(transcript) if o not in answer]
     if answer and outcomes:      # the approval card is the bot's last Slack message: the user sees both
-        answer = answer + "\n\nStaged writes:\n" + "\n".join(f"- {o}" for o in outcomes)
+        answer = answer + f"\n\n{WRITE_OUTCOME_HEADING}\n" + "\n".join(f"- {o}" for o in outcomes)
     if answer:
         builder.set_final(answer)
     else:

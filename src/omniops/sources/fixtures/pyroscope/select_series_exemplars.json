@@ -2,7 +2,7 @@
   "series": [
     {
       "labels": [
-        {"name": "service_name", "value": "order-service"}
+        {"name": "service_name", "value": "billing-api"}
       ],
       "points": [
         {
@@ -15,7 +15,7 @@
               "spanId": "00f067aa0ba902b7",
               "value": "2450000000",
               "labels": [
-                {"name": "pod", "value": "order-service-7d9f8c6b5-x2x9q"},
+                {"name": "pod", "value": "billing-api-7d9f8c6b5-x2x9q"},
                 {"name": "service_version", "value": "1.4.3"}
               ],
               "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -25,7 +25,7 @@
               "profileId": "0b2d1f8e-55aa-4c11-9e3f-1f2e3d4c5b6a",
               "value": "910000000",
               "labels": [
-                {"name": "pod", "value": "order-service-7d9f8c6b5-k8j2m"}
+                {"name": "pod", "value": "billing-api-7d9f8c6b5-k8j2m"}
               ]
             }
           ]

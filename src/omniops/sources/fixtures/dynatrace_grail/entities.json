@@ -35,7 +35,7 @@
    {
     "id": "SERVICE-9A1B2C3D4E5F6071",
     "type": "SERVICE",
-    "name": "payment-service",
+    "name": "ledger-service",
     "tags": [
      "env:prod"
     ]

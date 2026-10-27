@@ -5,7 +5,7 @@ Manifest: `src/omniops/sources/manifests/grafana_loki.yaml` (`extends: loki`; ev
 back to `src/omniops/sources/fixtures/loki/` (the proxy returns Loki's body unchanged).
 
 Use this source when the investigator can reach Grafana but not Loki directly (Grafana Cloud,
-locked-down networks, the o11y-bench stack). Grafana forwards the request to the URL configured on
+locked-down networks, a local Grafana stack). Grafana forwards the request to the URL configured on
 the datasource and injects the datasource's own Loki credentials and tenant header.
 
 ## Tables
@@ -29,7 +29,7 @@ Roles: same as `loki` (`logs`, `log_counts`, `services`, `alert_rules`, `active_
 |---|---|
 | Grafana service account token (recommended; a role with `datasources:query` on the Loki datasource, e.g. Viewer) | `GRAFANA_TOKEN` -> `Authorization: Bearer ...` |
 | Basic auth (only if enabled in Grafana) | `GRAFANA_USERNAME`, `GRAFANA_PASSWORD` |
-| Anonymous access (o11y-bench: `GF_AUTH_ANONYMOUS_ENABLED=true`) | none |
+| Anonymous access (`GF_AUTH_ANONYMOUS_ENABLED=true`) | none |
 | Non-default org | `GRAFANA_ORG_ID` -> `X-Grafana-Org-Id` |
 
 RBAC: `datasources:query` with scope `datasources:uid:<uid>` or `datasources:*`
@@ -38,12 +38,12 @@ Never send `X-Scope-OrgID` yourself: the tenant comes from the datasource settin
 
 ## Base URLs
 
-`GRAFANA_URL` = Grafana root (`http://localhost:3000` for o11y-bench, `https://<stack>.grafana.net`
-for Grafana Cloud). `GRAFANA_LOKI_UID` defaults to `loki` (the uid provisioned by o11y-bench's
-`docker/datasources.yaml`, `access: proxy`, url `http://localhost:3100`); find others with
+`GRAFANA_URL` = Grafana root (`http://localhost:3000` for a local stack, `https://<stack>.grafana.net`
+for Grafana Cloud). `GRAFANA_LOKI_UID` defaults to `loki` (the usual uid of a file-provisioned Loki
+data source, `access: proxy`, url `http://localhost:3100`); find others with
 `GET /api/datasources`. The uid-based proxy route exists since Grafana 9.0. Starting in Grafana 13
 the `/api` routes are "legacy" in favour of `/apis`, but "remain fully accessible and operative"
-(o11y-bench runs Grafana 13.2.4).
+(checked against Grafana 13.2).
 
 ## Limits
 

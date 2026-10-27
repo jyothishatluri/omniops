@@ -19,7 +19,7 @@ Proxy reference: https://grafana.com/docs/grafana/latest/developer-resources/api
 (`GET /api/datasources/proxy/uid/:uid/*` "Proxies all calls to the actual data source").
 
 Use it when Prometheus/Mimir is only reachable or credentialed through Grafana (Grafana Cloud,
-o11y-bench, locked-down networks). For other data sources use `grafana_ds_query`.
+a local Grafana stack, locked-down networks). For other data sources use `grafana_ds_query`.
 
 ## Tables
 
@@ -45,11 +45,11 @@ Deep links (`ui_link`) open Grafana Explore with the query and window instead of
 
 | Env | Meaning |
 |---|---|
-| `GRAFANA_URL` (required) | Grafana root URL, e.g. `http://localhost:3000` (o11y-bench) |
+| `GRAFANA_URL` (required) | Grafana root URL, e.g. `http://localhost:3000` or `https://<stack>.grafana.net` |
 | `GRAFANA_TOKEN` | Service account token, sent as `Authorization: Bearer`; needs `datasources:query` on the data source. Optional with anonymous access. |
 | `GRAFANA_USERNAME` / `GRAFANA_PASSWORD` | Basic auth fallback (self-hosted) |
 | `GRAFANA_ORG_ID` | Optional `X-Grafana-Org-Id` |
-| `GRAFANA_PROMETHEUS_UID` | Data source uid, default `prometheus` (o11y-bench). Grafana Cloud stacks usually name it `grafanacloud-prom`; look it up with `SELECT uid, type FROM grafana_datasources WHERE type = 'prometheus'`. |
+| `GRAFANA_PROMETHEUS_UID` | Data source uid, default `prometheus` (common for file-provisioned data sources). Grafana Cloud stacks usually name it `grafanacloud-prom`; look it up with `SELECT uid, type FROM grafana_datasources WHERE type = 'prometheus'`. |
 
 Grafana injects the data source's own credentials when proxying; the caller never needs the
 Prometheus credentials.
@@ -74,7 +74,9 @@ Prometheus accepts RFC 3339 or Unix seconds; the template sends Unix **seconds**
    (those are `grafana_alert_rule_status`, `grafana_active_alerts`).
 4. An unknown metric or label yields 0 series, not an error: discover with
    `grafana_prometheus_labels` / `grafana_prometheus_label_values` first.
-5. o11y-bench metric names: `http_requests_total{job, instance, status}`,
-   `http_request_duration_seconds_bucket`, `service_retry_queue_depth`,
-   `service_cache_refresh_lag_seconds`, `process_cpu_seconds_total`,
-   `process_resident_memory_bytes`, `go_goroutines`, `up`.
+5. Label conventions differ per instrumentation: services are usually `job` (sometimes `service`
+   or `service_name`) and the HTTP status-code label is `status` or `code`. Check
+   `grafana_prometheus_labels` / `grafana_prometheus_label_values` before filtering.
+6. A peak over a window read from range-query samples misses spikes between steps: put
+   `max_over_time(...[<step or more>])` inside the query (or run an instant
+   `max_over_time(...[<window>])`).

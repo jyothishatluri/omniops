@@ -23,7 +23,7 @@
   "records": [
    {
     "timestamp": "2026-10-01T11:42:07.512000000Z",
-    "content": "ERROR c.s.checkout.PaymentClient - POST /charge failed: connection refused (payment-service:8080)",
+    "content": "ERROR c.s.checkout.PaymentClient - POST /charge failed: connection refused (ledger-service:8080)",
     "loglevel": "ERROR",
     "status": "ERROR",
     "dt.service.name": "checkout-service",

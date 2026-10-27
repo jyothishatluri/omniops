@@ -2,7 +2,7 @@
   "traces": [
     {
       "traceID": "4bf92f3577b34da6a3ce929d0e0e4736",
-      "rootServiceName": "webapp",
+      "rootServiceName": "storefront-web",
       "rootTraceName": "POST /api/orders",
       "startTimeUnixNano": "1792478178000000000",
       "durationMs": 1800,
@@ -18,7 +18,7 @@
                 {
                   "key": "service.name",
                   "value": {
-                    "stringValue": "order-service"
+                    "stringValue": "billing-api"
                   }
                 },
                 {
@@ -68,7 +68,7 @@
                 {
                   "key": "service.name",
                   "value": {
-                    "stringValue": "payment-service"
+                    "stringValue": "ledger-service"
                   }
                 },
                 {
@@ -108,17 +108,17 @@
         }
       ],
       "serviceStats": {
-        "webapp": {
+        "storefront-web": {
           "spanCount": 2
         },
-        "api-gateway": {
+        "edge-proxy": {
           "spanCount": 2
         },
-        "order-service": {
+        "billing-api": {
           "spanCount": 3,
           "errorCount": 1
         },
-        "payment-service": {
+        "ledger-service": {
           "spanCount": 2,
           "errorCount": 1
         }
@@ -126,7 +126,7 @@
     },
     {
       "traceID": "b7ad6b7169203331",
-      "rootServiceName": "webapp",
+      "rootServiceName": "storefront-web",
       "rootTraceName": "POST /api/orders",
       "startTimeUnixNano": "1792478238000000000",
       "durationMs": 950,
@@ -142,7 +142,7 @@
                 {
                   "key": "service.name",
                   "value": {
-                    "stringValue": "order-service"
+                    "stringValue": "billing-api"
                   }
                 },
                 {
@@ -182,13 +182,13 @@
         }
       ],
       "serviceStats": {
-        "webapp": {
+        "storefront-web": {
           "spanCount": 2
         },
-        "api-gateway": {
+        "edge-proxy": {
           "spanCount": 2
         },
-        "order-service": {
+        "billing-api": {
           "spanCount": 2,
           "errorCount": 1
         }

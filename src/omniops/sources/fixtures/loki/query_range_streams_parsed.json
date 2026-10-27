@@ -5,13 +5,13 @@
     "result": [
       {
         "stream": {
-          "job": "payment-service",
-          "service": "payment-service",
+          "job": "ledger-service",
+          "service": "ledger-service",
           "level": "error",
-          "service_name": "payment-service",
+          "service_name": "ledger-service",
           "timestamp": "2026-10-01T11:42:31.123Z",
           "level_extracted": "error",
-          "service_extracted": "payment-service",
+          "service_extracted": "ledger-service",
           "method": "POST",
           "path": "/api/payments",
           "status": "503",
@@ -22,7 +22,7 @@
         "values": [
           [
             "1790854951123000000",
-            "{\"timestamp\": \"2026-10-01T11:42:31.123Z\", \"level\": \"error\", \"service\": \"payment-service\", \"method\": \"POST\", \"path\": \"/api/payments\", \"status\": 503, \"duration_ms\": 1840.5, \"trace_id\": \"0af7651916cd43dd8448eb211c80319c\", \"message\": \"database connection timeout\"}"
+            "{\"timestamp\": \"2026-10-01T11:42:31.123Z\", \"level\": \"error\", \"service\": \"ledger-service\", \"method\": \"POST\", \"path\": \"/api/payments\", \"status\": 503, \"duration_ms\": 1840.5, \"trace_id\": \"0af7651916cd43dd8448eb211c80319c\", \"message\": \"database connection timeout\"}"
           ]
         ]
       }

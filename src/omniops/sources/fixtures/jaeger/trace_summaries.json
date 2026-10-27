@@ -2,7 +2,7 @@
   "summaries": [
     {
       "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
-      "rootServiceName": "webapp",
+      "rootServiceName": "storefront-web",
       "rootOperationName": "POST /api/orders",
       "minStartTimeUnixNano": "1792478178000000000",
       "maxEndTimeUnixNano": "1792478179000000000",
@@ -10,28 +10,28 @@
       "errorSpanCount": 3,
       "services": [
         {
-          "name": "api-gateway",
+          "name": "edge-proxy",
           "spanCount": 1
         },
         {
-          "name": "order-service",
+          "name": "billing-api",
           "spanCount": 2,
           "errorSpanCount": 2
         },
         {
-          "name": "payment-service",
+          "name": "ledger-service",
           "spanCount": 1,
           "errorSpanCount": 1
         },
         {
-          "name": "webapp",
+          "name": "storefront-web",
           "spanCount": 1
         }
       ]
     },
     {
       "traceId": "00000000000000000b7ad6b716920333",
-      "rootServiceName": "webapp",
+      "rootServiceName": "storefront-web",
       "rootOperationName": "POST /api/orders",
       "minStartTimeUnixNano": "1792478238000000000",
       "maxEndTimeUnixNano": "1792478238950000000",
@@ -40,16 +40,16 @@
       "orphanSpanCount": 1,
       "services": [
         {
-          "name": "api-gateway",
+          "name": "edge-proxy",
           "spanCount": 1
         },
         {
-          "name": "order-service",
+          "name": "billing-api",
           "spanCount": 2,
           "errorSpanCount": 1
         },
         {
-          "name": "webapp",
+          "name": "storefront-web",
           "spanCount": 1
         }
       ]

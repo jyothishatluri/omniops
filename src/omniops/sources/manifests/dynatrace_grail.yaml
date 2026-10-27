@@ -495,12 +495,12 @@ tables:
       - file: problems.json
         note: "Documented QueryPollResponse envelope (query:poll docs); records built strictly from the documented dt.davis.problems fields (semantic dictionary 'Davis AI': event.*, display_id, root_cause_*, affected_entity_*, smartscape.*, dt.davis.*, resolved_problem_duration)."
         expect_rows: 2
-        expect_columns: {id: "-2045823616914785224_1727778600000V2", display_id: P-24101234, status: ACTIVE, severity: 2, ts: "2026-10-01T11:40:00Z", root_cause_entity_name: payment-service, service: checkout-service, affected_users: 1840, affected_entities: checkout-service, muted: false}
+        expect_columns: {id: "-2045823616914785224_1727778600000V2", display_id: P-24101234, status: ACTIVE, severity: 2, ts: "2026-10-01T11:40:00Z", root_cause_entity_name: ledger-service, service: checkout-service, affected_users: 1840, affected_entities: checkout-service, muted: false}
       - file: problems_smartscape_only.json
         note: "Documented QueryPollResponse envelope; one record carrying only the non-deprecated smartscape.affected_entities / root_cause.smartscape_entity fields (semantic dictionary), proving names/ids are read from them."
         filters: {service: checkout-service}
         expect_rows: 1
-        expect_columns: {display_id: P-24101301, service: checkout-service, root_cause_entity_id: SERVICE-9A1B2C3D4E5F6071, root_cause_entity_name: payment-service, affected_entities: "checkout-service, frontend", status: CLOSED, duration_ms: 1500000.0}
+        expect_columns: {display_id: P-24101301, service: checkout-service, root_cause_entity_id: SERVICE-9A1B2C3D4E5F6071, root_cause_entity_name: ledger-service, affected_entities: "checkout-service, frontend", status: CLOSED, duration_ms: 1500000.0}
     docs_url: https://docs.dynatrace.com/docs/semantic-dictionary/model/davis
     ui_link: "{{ source.base_url }}/ui/apps/dynatrace.davis.problems"
 
@@ -609,7 +609,7 @@ tables:
             | fields ts, end_time, timestamp, event.kind, event.type, event.status, event.name, event.provider, service, version, stage, revision, cicd.deployment.id, cicd.deployment.name, cicd.deployment.namespace, cicd.deployment.status, task.name, task.outcome, vcs.repository.url.full, vcs.ref.base.name, dt.event.deployment.ci_back_link, dt.source_entity
       - *grail_poll
     filters:
-      - {column: service, description: "Deployed component (case-insensitive substring of dt.service.name / service.name / cicd.deployment.name / dt.event.deployment.name)", examples: ['payment']}
+      - {column: service, description: "Deployed component (case-insensitive substring of dt.service.name / service.name / cicd.deployment.name / dt.event.deployment.name)", examples: ['ledger']}
       - {column: stage, description: "Release stage, e.g. production (cicd.deployment.release_stage / dt.event.deployment.release_stage)", examples: [production]}
       - {column: kind, description: "SDLC_EVENT | DAVIS_EVENT"}
     time: {column: ts, default_lookback: 24h, max_window: 90d, control_lookback: 7d}
@@ -644,14 +644,14 @@ tables:
     examples:
       - sql: "SELECT ts, service, version, env, status, deployment_status, revision, url FROM dynatrace_grail_changes ORDER BY ts DESC"
         description: All deployments/config changes in the window (change correlation).
-      - sql: "SELECT ts, ref, revision, deployment_status, outcome FROM dynatrace_grail_changes WHERE service = 'payment' AND kind = 'SDLC_EVENT' AND status = 'finished' ORDER BY ts DESC"
+      - sql: "SELECT ts, ref, revision, deployment_status, outcome FROM dynatrace_grail_changes WHERE service = 'ledger' AND kind = 'SDLC_EVENT' AND status = 'finished' ORDER BY ts DESC"
         description: Finished deployments of one component with commit sha and result.
     fixtures:
       - file: changes.json
         note: "Documented QueryPollResponse envelope; records built strictly from the documented SDLC deployment finished event fields (semantic dictionary 'SDLC events': event.*, start_time, end_time, task.*, cicd.deployment.*, vcs.ref.base.*, vcs.repository.url.full) and Davis CUSTOM_DEPLOYMENT properties (dt.event.deployment.*), plus the table's computed ts/service/version/stage/revision."
-        filters: {service: payment}
+        filters: {service: ledger}
         expect_rows: 2
-        expect_columns: {ts: "2026-10-01T11:31:12Z", kind: SDLC_EVENT, event_type: deployment, service: payment, env: production, deployment_status: succeeded, revision: d4322ab6cba38d21ad83c9de3046a8c19b2a3f11, ref: main, namespace: shop, version: null}
+        expect_columns: {ts: "2026-10-01T11:31:12Z", kind: SDLC_EVENT, event_type: deployment, service: ledger, env: production, deployment_status: succeeded, revision: d4322ab6cba38d21ad83c9de3046a8c19b2a3f11, ref: main, namespace: shop, version: null}
     docs_url: https://docs.dynatrace.com/docs/semantic-dictionary/model/sdlc-events
 
   # ------------------------------------------------------------------------------------------
@@ -760,8 +760,8 @@ tables:
     examples:
       - sql: "SELECT start_name, neighbor_name, neighbor_type FROM dynatrace_grail_topology WHERE start_name = 'checkout-service' AND relationship = 'calls'"
         description: Downstream dependencies of checkout-service (services and databases it calls).
-      - sql: "SELECT neighbor_name AS caller FROM dynatrace_grail_topology WHERE start_name = 'payment-service' AND relationship = 'calls' AND direction = 'backward'"
-        description: Who calls payment-service (upstream blast radius).
+      - sql: "SELECT neighbor_name AS caller FROM dynatrace_grail_topology WHERE start_name = 'ledger-service' AND relationship = 'calls' AND direction = 'backward'"
+        description: Who calls ledger-service (upstream blast radius).
       - sql: "SELECT start_name AS service, neighbor_type, neighbor_name FROM dynatrace_grail_topology WHERE start_name = 'checkout-service' AND relationship = 'runs_on'"
         description: Hosts / pods / containers a service runs on.
     fixtures:
@@ -769,7 +769,7 @@ tables:
         note: "Documented QueryPollResponse envelope; records shaped exactly as this table's traverse + fields pipeline emits them (traverse output node id/type/name plus dt.traverse.history[0] id/edge_type/direction and the fieldsKeep'd name, per the DQL Smartscape commands docs)."
         filters: {start_name: checkout-service, relationship: calls}
         expect_rows: 2
-        expect_columns: {start_id: SERVICE-5D53A2A6A1F2C3B4, start_name: checkout-service, relationship: calls, direction: forward, neighbor_id: SERVICE-9A1B2C3D4E5F6071, neighbor_type: SERVICE, neighbor_name: payment-service}
+        expect_columns: {start_id: SERVICE-5D53A2A6A1F2C3B4, start_name: checkout-service, relationship: calls, direction: forward, neighbor_id: SERVICE-9A1B2C3D4E5F6071, neighbor_type: SERVICE, neighbor_name: ledger-service}
     docs_url: https://docs.dynatrace.com/docs/platform/grail/dynatrace-query-language/commands/smartscape-commands
 
   # ------------------------------------------------------------------------------------------

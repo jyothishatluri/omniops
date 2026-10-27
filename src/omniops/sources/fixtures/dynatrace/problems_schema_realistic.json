@@ -17,7 +17,7 @@
     {"entityId": {"id": "SERVICE-5D53A2A6A1F2C3B4", "type": "SERVICE"}, "name": "checkout-service"},
     {"entityId": {"id": "APPLICATION-EA7C4B59F27D43EB", "type": "APPLICATION"}, "name": "web-store"}
    ],
-   "rootCauseEntity": {"entityId": {"id": "SERVICE-9A1B2C3D4E5F6071", "type": "SERVICE"}, "name": "payment-service"},
+   "rootCauseEntity": {"entityId": {"id": "SERVICE-9A1B2C3D4E5F6071", "type": "SERVICE"}, "name": "ledger-service"},
    "managementZones": [{"id": "9130632296508575249", "name": "shop-prod"}],
    "entityTags": [
     {"context": "CONTEXTLESS", "key": "env", "value": "prod", "stringRepresentation": "env:prod"},

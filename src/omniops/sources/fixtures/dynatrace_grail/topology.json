@@ -30,7 +30,7 @@
     "direction": "forward",
     "neighbor_id": "SERVICE-9A1B2C3D4E5F6071",
     "neighbor_type": "SERVICE",
-    "neighbor_name": "payment-service"
+    "neighbor_name": "ledger-service"
    },
    {
     "start_id": "SERVICE-5D53A2A6A1F2C3B4",

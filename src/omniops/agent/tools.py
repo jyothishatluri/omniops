@@ -13,7 +13,8 @@ Retrospective lessons encoded here:
          errored; a twin issued in the same step waits for the first and shares its id; a hard stop
          after 5 duplicates.
 - 3.4    Every result (and every failure, as a stub) becomes an evidence record; the model sees
-         "E7 | <result>" so citations pair by id, never by position.
+         "E7 | purpose: <purpose> | sql: <query, shortened>" then the result, so citations pair by
+         id, never by position, and each result maps back to its query without re-running it.
 - 3.9.3  The tool output is clipped to ~12k chars by the engine's row-preserving renderer, with an
          explicit sized marker; the full result stays on the evidence record.
 - 3.10.6 Raw, unclipped results are scanned for artifact leads; later queries mark them followed;
@@ -67,6 +68,8 @@ GAP_CONTINUATIONS = 2
 GAP_MIN_HEADROOM_S = 45.0
 NEAR_DUP_BUCKET_S = 300
 RAW_SCAN_CAP = 2_000_000
+ECHO_PURPOSE_CHARS = 160       # the run_sql header echoes the purpose and the query, each cut to this
+ECHO_SQL_CHARS = 160
 DEFAULT_LESSON = "describe the table (describe_table) and fix the query; do not repeat the same query"
 # Failures whose lesson is "not a schema problem": they never count against a query shape's retries.
 NOT_QUERY_ERRORS = (RateLimitError, QueryTimeoutError, AuthError, NotConfiguredError)
@@ -163,6 +166,28 @@ def clip(text: str, limit: int, eid: str | None = None) -> str:
     where = f"; the full result is kept as {eid}" if eid else ""
     return (text[:cut] + f"\n[clipped] showing {cut} of {len(text)} chars{where}. Aggregate in SQL (GROUP BY, "
             "time_bucket), select fewer columns or add filters to see the rest.")
+
+
+def shorten(text: str, cap: int, *, middle: bool = False) -> str:
+    """One line (whitespace collapsed) of at most ``cap`` chars. ``middle`` keeps the head and the tail
+    (a query's table and its trailing filters/window) and elides the middle."""
+    line = normalize_sql(text)
+    if len(line) <= cap:
+        return line
+    if not middle:
+        return line[:cap - 4].rstrip() + " ..."
+    keep = cap - 5
+    head = keep * 2 // 3
+    return line[:head].rstrip() + " ... " + line[head - keep:].lstrip()
+
+
+def result_header(eid: str, purpose: str, sql: str) -> str:
+    """'E7 | purpose: ... | sql: ...': the evidence id with the query that produced it (3.4)."""
+    parts = [eid]
+    if purpose.strip():
+        parts.append(f"purpose: {shorten(purpose, ECHO_PURPOSE_CHARS)}")
+    parts.append(f"sql: {shorten(sql, ECHO_SQL_CHARS, middle=True)}")
+    return " | ".join(parts)
 
 
 def error_text(exc: BaseException, lesson: str | None = None) -> str:
@@ -425,7 +450,7 @@ class _Toolset:
         if result.total_rows and rec.row_count == 0:   # an aggregate over 0 input rows (count=0, all-NULL row)
             fix_note += (f"\n[empty] {rec.id}: the aggregate ran over 0 input rows (a count of 0 or an all-NULL row): "
                          "INCONCLUSIVE, not a measured value and not proof of absence; check the filters and window")
-        out = f"{rec.id} | {shown}{fix_note}{self._lead_notes(sql, result, rec.id)}"
+        out = f"{result_header(rec.id, purpose, sql)}\n{shown}{fix_note}{self._lead_notes(sql, result, rec.id)}"
         return ToolOutput(out, evidence_id=rec.id, data={"row_count": result.total_rows}), seen
 
     def _lead_notes(self, sql: str, result: QueryResult, eid: str) -> str:
@@ -570,7 +595,8 @@ _DESCRIBE_DESC = (
     "pitfalls, and VERIFIED QUERY SHAPES. Copy the verified shapes; never guess column names.")
 _RUN_SQL_DESC = (
     "Run ONE read-only DuckDB SELECT over catalog tables. It fetches live data from the observability APIs "
-    "and returns an evidence id then the result ('E7 | ...'): digests first (onset/peak/recovery, top "
+    "and returns a header with the evidence id, your purpose and the query shortened ('E7 | purpose: ... | "
+    "sql: ...'), then the result: digests first (onset/peak/recovery, top "
     "messages), then rows; every truncation is marked. Cite the E# id for every claim. Rules: include each "
     "table's required filters; now(), INTERVAL arithmetic and an omitted time filter are pinned to the "
     "incident window; put independent queries in separate run_sql calls in the same step; aggregate in SQL "

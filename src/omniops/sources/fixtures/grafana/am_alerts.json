@@ -1,7 +1,7 @@
 [
   {
     "annotations": {
-      "summary": "payment-service 5xx ratio above 5%",
+      "summary": "ledger-service 5xx ratio above 5%",
       "runbook_url": "https://runbooks.example.com/payments/5xx"
     },
     "endsAt": "2026-10-01T12:04:00.000Z",
@@ -12,7 +12,7 @@
       "alertname": "PaymentServiceHighErrorRate",
       "grafana_folder": "Payments",
       "severity": "critical",
-      "service": "payment-service"
+      "service": "ledger-service"
     },
     "receivers": [
       {
@@ -29,7 +29,7 @@
   },
   {
     "annotations": {
-      "summary": "order-service p95 latency above 1s"
+      "summary": "billing-api p95 latency above 1s"
     },
     "endsAt": "2026-10-01T12:04:00.000Z",
     "fingerprint": "0a9b8c7d6e5f4321",
@@ -39,7 +39,7 @@
       "alertname": "OrderServiceLatencyHigh",
       "grafana_folder": "Orders",
       "severity": "warning",
-      "service": "order-service"
+      "service": "billing-api"
     },
     "receivers": [
       {

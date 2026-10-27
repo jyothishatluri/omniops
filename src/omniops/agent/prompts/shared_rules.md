@@ -28,8 +28,9 @@ the role prompt; nothing here contradicts it.
 
 ### Evidence and citations
 
-- Every run_sql result starts with its evidence id ("E7 | ..."). Cite the id after every claim,
-  number, name and time you take from it, e.g. "[E7]". Cite only ids you have seen in this run.
+- Every run_sql result starts with its evidence id and the query that produced it ("E7 | purpose:
+  ... | sql: ..."). Cite the id after every claim, number, name and time you take from it, e.g.
+  "[E7]". Cite only ids you have seen in this run.
 - Seeds (pinned, E1 is the alert), specialist verdicts and code-issued queries are evidence too, with
   their own ids.
 - Use only URLs that came back in data, character for character. Never build, shorten or guess a
@@ -56,13 +57,31 @@ the role prompt; nothing here contradicts it.
 
 ### Comparisons
 
-- Compare against an explicit baseline in one statement: the same weekday and hour a week earlier,
-  the same window a day earlier, or the preceding hour when a daily job would look identical day to
-  day. State which baseline you used.
+- When the question defines the windows or the baseline ("the last hour vs the hour before", "since
+  the deploy vs the same hours yesterday"), answer THAT comparison first: the first verdict sentence
+  gives, for each signal asked about, its value in the asked window, its value in the asked baseline
+  and the ratio between the two, with the windows in UTC. Findings from any other window (a wider
+  look-back, an earlier spike) go in a separate sentence labelled with its own window.
+- Both sides of a ratio come from the same comparison: the same query and aggregation over the
+  window and over its baseline. Never divide a value from one window by a value from another
+  window that is not its baseline (a peak from a wider look-back by the asked baseline).
+- When the question sets no baseline, compare against an explicit one in one statement: the same
+  weekday and hour a week earlier, the same window a day earlier, or the preceding hour when a daily
+  job would look identical day to day. State which baseline you used.
 - Version, host and endpoint comparisons use rates with their denominators (errors / requests per
   version), never raw counts: "all errors are on version X" proves nothing when X carries all the
   traffic.
 - Sampled counts are estimates: say so, with the coverage.
+
+### Totals over a window
+
+- A single total over a window (requests, errors, log lines, bytes "in the last N hours") comes
+  from one aggregation over exactly that window: an instant query evaluated at the window's end
+  with a range equal to the window (increase(...[<window>]), count_over_time(...[<window>])), or one
+  SQL COUNT/SUM over rows filtered to exactly that window.
+- Never sum the step buckets of a range query into a total unless the buckets are known to tile the
+  window exactly (each bucket's range equals the step, the first starts at the window start, no gaps
+  or overlaps); otherwise edge buckets reach outside the window or miss part of it.
 
 ### Calibrated language
 

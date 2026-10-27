@@ -51,6 +51,14 @@ def test_summary_is_deterministic_digest_with_whole_rows_and_links_from_data() -
     assert len(urls) == len(set(urls)) == 6
 
 
+def test_summary_window_line_carries_what_the_step_buckets_cover() -> None:
+    note = "step 300s (4 point(s), each counting the step ending at its ts); buckets cover A -> B"
+    r = record_from_result(result([(T0, "x")], window_notes={"loki_logs": note}), agent="primary", purpose="p")
+    assert r.summary.splitlines()[0] == ("1 row(s) x 2 col(s) from loki_logs; window loki_logs: "
+                                         f"2026-10-01T11:45:00Z -> 2026-10-01T12:05:00Z ({note})")
+    assert r.window == ("2026-10-01T11:45:00Z", "2026-10-01T12:05:00Z")
+
+
 def test_confidence_drops_for_partial_and_truncated_results() -> None:
     rows = [(T0, "x")]
     partial = record_from_result(result(rows, notes=["loki_logs: PARTIAL: 1 of 3 request(s) failed: 503"]),

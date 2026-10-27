@@ -483,7 +483,7 @@ tables:
         pageSize: 500
     filters:
       - {column: to_type, description: "Type of the TO entities (default SERVICE)", examples: [SERVICE]}
-      - {column: to_name, ops: ["=", "in", "like"], fan_out: false, description: "TO entity display name", examples: ['payment-service']}
+      - {column: to_name, ops: ["=", "in", "like"], fan_out: false, description: "TO entity display name", examples: ['ledger-service']}
       - {column: to_id, ops: ["=", "in"], fan_out: false, description: "TO entity id(s)", examples: ['SERVICE-9A1B2C3D4E5F6071']}
       - {column: tag, description: "Tag filter on the TO entities"}
       - {column: entity_selector, description: "Raw entity selector for the TO entities"}
@@ -506,8 +506,8 @@ tables:
       - {name: entity_selector, filter_only: true}
       - {name: ts, type: TIMESTAMP, filter_only: true}
     examples:
-      - sql: "SELECT from_id, from_type FROM dynatrace_relationships_in WHERE to_name = 'payment-service' AND relationship = 'calls'"
-        description: Who calls payment-service (upstream blast radius).
+      - sql: "SELECT from_id, from_type FROM dynatrace_relationships_in WHERE to_name = 'ledger-service' AND relationship = 'calls'"
+        description: Who calls ledger-service (upstream blast radius).
     fixtures:
       - file: entities_single_service.json
         note: "EntitiesList envelope wrapping the verbatim 'GET an entity' example entity from the official docs (2 callers)."
@@ -656,7 +656,7 @@ tables:
       - file: problems_schema_realistic.json
         note: "Built strictly from the documented Problems/Problem/EntityStub/METag schema (docs only show placeholder values): one OPEN service problem, one CLOSED host problem."
         expect_rows: 2
-        expect_columns: {id: "-2045823616914785224_1727778600000V2", display_id: P-24101234, status: OPEN, end_ts: null, root_cause_entity_name: payment-service, service: checkout-service, namespace: shop, ts: "2024-10-01T10:30:00Z"}
+        expect_columns: {id: "-2045823616914785224_1727778600000V2", display_id: P-24101234, status: OPEN, end_ts: null, root_cause_entity_name: ledger-service, service: checkout-service, namespace: shop, ts: "2024-10-01T10:30:00Z"}
     docs_url: https://docs.dynatrace.com/docs/dynatrace-api/environment-api/problems-v2/problems/get-problems-list
     ui_link: "{{ source.base_url }}/#problems"
 

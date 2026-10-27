@@ -65,7 +65,7 @@
         1790854920000
       ],
       [
-        "PaymentServiceHighErrorRate {alertname=PaymentServiceHighErrorRate, service=payment-service} - B=0.12"
+        "PaymentServiceHighErrorRate {alertname=PaymentServiceHighErrorRate, service=ledger-service} - B=0.12"
       ],
       [
         "Pending"

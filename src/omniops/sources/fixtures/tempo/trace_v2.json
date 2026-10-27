@@ -7,7 +7,7 @@
             {
               "key": "service.name",
               "value": {
-                "stringValue": "webapp"
+                "stringValue": "storefront-web"
               }
             },
             {
@@ -25,7 +25,7 @@
             {
               "key": "k8s.pod.name",
               "value": {
-                "stringValue": "webapp-7d9f8c6b5-x2x4q"
+                "stringValue": "storefront-web-7d9f8c6b5-x2x4q"
               }
             },
             {
@@ -82,7 +82,7 @@
             {
               "key": "service.name",
               "value": {
-                "stringValue": "api-gateway"
+                "stringValue": "edge-proxy"
               }
             },
             {
@@ -100,7 +100,7 @@
             {
               "key": "k8s.pod.name",
               "value": {
-                "stringValue": "api-gateway-7d9f8c6b5-x2x4q"
+                "stringValue": "edge-proxy-7d9f8c6b5-x2x4q"
               }
             },
             {
@@ -158,7 +158,7 @@
             {
               "key": "service.name",
               "value": {
-                "stringValue": "order-service"
+                "stringValue": "billing-api"
               }
             },
             {
@@ -176,7 +176,7 @@
             {
               "key": "k8s.pod.name",
               "value": {
-                "stringValue": "order-service-7d9f8c6b5-x2x4q"
+                "stringValue": "billing-api-7d9f8c6b5-x2x4q"
               }
             },
             {
@@ -230,7 +230,7 @@
               {
                 "traceId": "S/kvNXezTaajzpKdDg5HNg==",
                 "spanId": "3d3d3d3d3d0=",
-                "name": "call payment-service",
+                "name": "call ledger-service",
                 "kind": "SPAN_KIND_CLIENT",
                 "startTimeUnixNano": "1792478178020000000",
                 "endTimeUnixNano": "1792478178870000000",
@@ -238,7 +238,7 @@
                   {
                     "key": "peer.service",
                     "value": {
-                      "stringValue": "payment-service"
+                      "stringValue": "ledger-service"
                     }
                   },
                   {
@@ -270,7 +270,7 @@
             {
               "key": "service.name",
               "value": {
-                "stringValue": "payment-service"
+                "stringValue": "ledger-service"
               }
             },
             {
@@ -288,7 +288,7 @@
             {
               "key": "k8s.pod.name",
               "value": {
-                "stringValue": "payment-service-7d9f8c6b5-x2x4q"
+                "stringValue": "ledger-service-7d9f8c6b5-x2x4q"
               }
             },
             {

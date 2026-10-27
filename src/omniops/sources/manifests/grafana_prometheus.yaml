@@ -1,7 +1,7 @@
 # Prometheus HTTP API reached through Grafana's data-source proxy:
 #   {GRAFANA_URL}/api/datasources/proxy/uid/{GRAFANA_PROMETHEUS_UID}/api/v1/...
-# Use this when only Grafana is reachable / credentialed (Grafana Cloud, o11y-bench, locked-down
-# Prometheus behind Grafana). Every table comes from templates/prometheus.yaml (renamed to the
+# Use this when only Grafana is reachable / credentialed (Grafana Cloud, a local Grafana stack,
+# locked-down Prometheus behind Grafana). Every table comes from templates/prometheus.yaml (renamed to the
 # grafana_prometheus_ prefix); this file only swaps base URL + auth and adds Grafana deep links,
 # doc links, fixture provenance and a label-names table.
 # Research notes: docs/sources/grafana_prometheus.md
@@ -17,12 +17,12 @@ categories: [metrics, alerts]
 base_url: "{{ env.GRAFANA_URL.rstrip('/') }}/api/datasources/proxy/uid/{{ env.GRAFANA_PROMETHEUS_UID }}"
 ui_base_url: "{{ env.GRAFANA_URL.rstrip('/') }}"
 env:
-  - {name: GRAFANA_URL, description: "Grafana root URL incl. any sub-path, no trailing /api. o11y-bench: http://localhost:3000"}
-  - {name: GRAFANA_TOKEN, description: "Service account token (needs datasources:query on the Prometheus data source). Optional with anonymous access (o11y-bench)", secret: true}
+  - {name: GRAFANA_URL, description: "Grafana root URL incl. any sub-path, no trailing /api, e.g. http://localhost:3000 or https://<stack>.grafana.net"}
+  - {name: GRAFANA_TOKEN, description: "Service account token (needs datasources:query on the Prometheus data source). Optional with anonymous access", secret: true}
   - {name: GRAFANA_USERNAME, description: "Basic-auth user (self-hosted only; used when GRAFANA_TOKEN is unset)"}
   - {name: GRAFANA_PASSWORD, description: "Basic-auth password", secret: true}
   - {name: GRAFANA_ORG_ID, description: "Optional X-Grafana-Org-Id header"}
-  - {name: GRAFANA_PROMETHEUS_UID, description: "uid of the Prometheus-type data source to proxy (o11y-bench: prometheus; Grafana Cloud: usually grafanacloud-prom)", default: prometheus}
+  - {name: GRAFANA_PROMETHEUS_UID, description: "uid of the Prometheus-type data source to proxy (often prometheus when provisioned from files; Grafana Cloud: usually grafanacloud-prom)", default: prometheus}
 required_env: [GRAFANA_URL]
 auth:
   type: headers
@@ -52,12 +52,12 @@ tables:
           WHERE query = 'sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))'
             AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
           GROUP BY 1 ORDER BY peak DESC
-        description: Peak 5xx rate per service (o11y-bench uses label status) over an hour, and when it peaked.
+        description: Peak 5xx rate per service over an hour, and when it peaked (the status-code label is status or code depending on the instrumentation).
       - sql: >-
           SELECT ts, value FROM grafana_prometheus_query_range
-          WHERE query = 'max(service_cache_refresh_lag_seconds{job="user-service"})'
+          WHERE query = 'max(max_over_time(process_resident_memory_bytes{job="api"}[5m]))'
           ORDER BY value DESC LIMIT 1
-        description: Peak cache refresh lag of user-service in the window.
+        description: Peak resident memory of a job in the window (max_over_time inside the query keeps spikes that fall between steps).
     fixtures:
       - file: query_range.json
         filters: {query: up}
@@ -169,4 +169,4 @@ roles:
   metrics:
     table: grafana_prometheus_query_range
     query_language: promql
-    notes: "o11y-bench: services are the job label (webapp, api-gateway, user-service, order-service, payment-service); HTTP status label is status."
+    notes: "Services are usually the job label (sometimes service or service_name): list label values before filtering. The HTTP status-code label is status or code depending on the instrumentation."

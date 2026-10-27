@@ -5,11 +5,11 @@
       "spanKind": "server"
     },
     {
-      "name": "call payment-service",
+      "name": "call ledger-service",
       "spanKind": "client"
     },
     {
-      "name": "call user-service",
+      "name": "call accounts-api",
       "spanKind": "client"
     }
   ]

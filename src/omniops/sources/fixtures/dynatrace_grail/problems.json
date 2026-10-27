@@ -33,11 +33,11 @@
     "event.end": null,
     "timestamp": "2026-10-01T11:45:00.000000000Z",
     "root_cause_entity_id": "SERVICE-9A1B2C3D4E5F6071",
-    "root_cause_entity_name": "payment-service",
+    "root_cause_entity_name": "ledger-service",
     "root_cause.smartscape_entity": {
      "id": "SERVICE-9A1B2C3D4E5F6071",
      "type": "service",
-     "name": "payment-service"
+     "name": "ledger-service"
     },
     "affected_entity_ids": [
      "SERVICE-5D53A2A6A1F2C3B4"

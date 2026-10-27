@@ -118,7 +118,7 @@ deployment-specific; an empty window older than retention is "gone", not "absent
 - Search-span `kind`/`status` come back as intrinsic attributes (`kind`, `status`) with
   `stringValue`/enum values; the `select(...)` that `tempo_search_spans` appends is what makes
   `service`, `kind`, `status` and the HTTP attributes present on every row.
-- Edge spans (webapp, api-gateway) repeat the downstream error/latency: blame the deepest error
+- Edge spans (storefront-web, edge-proxy) repeat the downstream error/latency: blame the deepest error
   span or the span with the most self time (examples in the template).
 - HTTP 400 `invalid TraceQL query` = syntax error; 400 about the range = window longer than
   `max_duration`. `tempo_trace` `span_filter` rejects pipelines, structural operators and

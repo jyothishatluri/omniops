@@ -7,11 +7,11 @@
           "alertname": "PaymentServiceHighErrorRate",
           "grafana_folder": "Payments",
           "severity": "critical",
-          "service": "payment-service",
+          "service": "ledger-service",
           "__alert_rule_uid__": "pay-err-rate"
         },
         "annotations": {
-          "summary": "payment-service 5xx ratio above 5%"
+          "summary": "ledger-service 5xx ratio above 5%"
         },
         "state": "Alerting",
         "activeAt": "2026-10-01T11:42:00Z",
@@ -19,14 +19,14 @@
       },
       {
         "labels": {
-          "alertname": "CacheRefreshLagHigh",
-          "grafana_folder": "Users",
+          "alertname": "QueueBacklogHigh",
+          "grafana_folder": "Workers",
           "severity": "warning",
-          "service": "user-service",
-          "__alert_rule_uid__": "cache-lag"
+          "service": "worker",
+          "__alert_rule_uid__": "queue-backlog"
         },
         "annotations": {
-          "summary": "user-service cache refresh lag above 60s"
+          "summary": "worker queue backlog above 1000 jobs"
         },
         "state": "Pending",
         "activeAt": "2026-10-01T11:55:00Z",
@@ -37,7 +37,7 @@
           "alertname": "OrderServiceLatencyHigh",
           "grafana_folder": "Orders",
           "severity": "warning",
-          "service": "order-service",
+          "service": "billing-api",
           "__alert_rule_uid__": "ord-latency"
         },
         "annotations": {},

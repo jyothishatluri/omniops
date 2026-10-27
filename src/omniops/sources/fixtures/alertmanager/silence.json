@@ -10,5 +10,5 @@
   "startsAt": "2026-10-01T11:30:00.000Z",
   "endsAt": "2026-10-01T13:30:00.000Z",
   "createdBy": "jane.doe",
-  "comment": "Planned api-gateway rollout, latency expected"
+  "comment": "Planned edge-proxy rollout, latency expected"
 }

@@ -24,8 +24,8 @@ categories: [dashboards, alerts, events, logs, metrics, changes]
 base_url: "{{ env.GRAFANA_URL.rstrip('/') }}"
 ui_base_url: "{{ env.GRAFANA_URL.rstrip('/') }}"
 env:
-  - {name: GRAFANA_URL, description: "Grafana root URL incl. any sub-path, no trailing /api. o11y-bench: http://localhost:3000; Cloud: https://<stack>.grafana.net"}
-  - {name: GRAFANA_TOKEN, description: "Service account token (glsa_...). Optional only when anonymous access is enabled (o11y-bench runs anonymous Admin)", secret: true}
+  - {name: GRAFANA_URL, description: "Grafana root URL incl. any sub-path, no trailing /api. Local: http://localhost:3000; Cloud: https://<stack>.grafana.net"}
+  - {name: GRAFANA_TOKEN, description: "Service account token (glsa_...). Optional only when anonymous access is enabled", secret: true}
   - {name: GRAFANA_USERNAME, description: "Basic-auth user (self-hosted only; used when GRAFANA_TOKEN is unset)"}
   - {name: GRAFANA_PASSWORD, description: "Basic-auth password", secret: true}
   - {name: GRAFANA_ORG_ID, description: "Optional X-Grafana-Org-Id header (multi-org self-hosted)"}
@@ -87,7 +87,7 @@ tables:
       - {column: tag, ops: ["=", "in"], description: "Dashboard tag, exact. IN fans out one request per tag (OR semantics); de-duplicate on uid.", examples: ["prod"]}
       - {column: type, description: "dash-db (dashboards) or dash-folder (folders)", examples: ["dash-db"]}
       - {column: folder_uid, ops: ["=", "in"], description: "Only dashboards inside this folder uid", examples: ["000000163"]}
-      - {column: uid, ops: ["=", "in"], fan_out: false, description: "Dashboard uid(s); IN is sent as repeated dashboardUIDs in one request", examples: ["svc-overview"]}
+      - {column: uid, ops: ["=", "in"], fan_out: false, description: "Dashboard uid(s); IN is sent as repeated dashboardUIDs in one request", examples: ["my-dashboard-uid"]}
       - {column: is_starred, param: starred, type: BOOLEAN, description: "true = only dashboards starred by the token's user"}
     pagination: {type: page, page_param: query.page, limit_param: query.limit, page_size: 1000, start: 1, max_pages: 5}
     response:
@@ -198,7 +198,7 @@ tables:
       method: GET
       path: "/api/dashboards/uid/{{ filters.uid }}"
     filters:
-      - {column: uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid (from grafana_search)", examples: ["user-access-cache-review"]}
+      - {column: uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid (from grafana_search)", examples: ["my-dashboard-uid"]}
     response:
       rows_path: "$"
     columns:
@@ -233,9 +233,9 @@ tables:
       - "meta fields beyond isStarred/url/folderUid/slug (created, updated, updatedBy, provisioned, canSave) are returned by current Grafana versions but not shown in the docs example; they may be null on old versions."
       - "Panels inside a collapsed row live in that row panel's own panels array; use grafana_dashboard_panels, which flattens them."
     examples:
-      - sql: "SELECT uid, title, version, folder_uid, panel_count, datasource_uids, updated, updated_by FROM grafana_dashboard WHERE uid = 'user-access-cache-review'"
+      - sql: "SELECT uid, title, version, folder_uid, panel_count, datasource_uids, updated, updated_by FROM grafana_dashboard WHERE uid = 'my-dashboard-uid'"
         description: Inspect a dashboard and who changed it last before repairing it.
-      - sql: "SELECT dashboard_json FROM grafana_dashboard WHERE uid = 'svc-annotate'"
+      - sql: "SELECT dashboard_json FROM grafana_dashboard WHERE uid = 'my-dashboard-uid'"
         description: Fetch the full JSON to edit and save back through grafana_dashboard_write.
     fixtures:
       - file: dashboard_by_uid.json
@@ -243,11 +243,11 @@ tables:
         expect_rows: 1
         expect_columns: {uid: cIBgcSjkk, title: Production Overview, version: 0, folder_uid: l3KqBxCMz, url: /d/cIBgcSjkk/production-overview, panel_count: null}
         note: "Official docs example for GET /api/dashboards/uid/:uid (Dashboard API, legacy section, v12.4 docs); the '//deprecated' comment removed."
-      - file: dashboard_cache_review.json
-        filters: {uid: user-access-cache-review}
+      - file: dashboard_checkout_review.json
+        filters: {uid: checkout-review}
         expect_rows: 1
-        expect_columns: {uid: user-access-cache-review, title: User Access Cache Review, panel_count: 3, datasource_uids: "prometheus,loki", annotation_names: Deployments}
-        note: "Documented GET envelope {dashboard, meta} wrapping the o11y-bench task dashboard 'dashboard-repair-cache-review' exactly as o11y_stack.provision_task_resources.build_dashboard POSTs it."
+        expect_columns: {uid: checkout-review, title: Checkout Review, panel_count: 3, datasource_uids: "prometheus,loki", annotation_names: Deployments}
+        note: "Documented GET envelope {dashboard, meta} around a dashboard built strictly from the dashboard JSON model docs: Prometheus timeseries + instant stat targets, a Loki logs target and a Loki annotation query."
     ui_link: "{{ source.base_url }}/d/{{ filters.uid }}"
     docs_url: https://grafana.com/docs/grafana/v12.4/developers/http_api/dashboard/#get-dashboard-by-uid
 
@@ -263,7 +263,7 @@ tables:
       method: GET
       path: "/api/dashboards/uid/{{ filters.dashboard_uid }}"
     filters:
-      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["svc-overview"]}
+      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["my-dashboard-uid"]}
     response:
       rows_path: "$.dashboard.panels[*]"
       expand:
@@ -294,21 +294,21 @@ tables:
       - {name: target, type: JSON, expr: "ct if c else t", description: "Full target object"}
       - {name: panel_json, type: JSON, expr: "c if c else _", description: "Full panel object (for repairs)"}
     pitfalls:
-      - "expr may reference dashboard variables ($service, ${service:regex}, $__range, $__rate_interval); substitute them before running the query through grafana_ds_query or grafana_prometheus_query_range."
+      - "expr keeps the dashboard's variables ($service, ${service:regex}, $__range, $__rate_interval). To see what a panel shows, run it with grafana_ds_query on the panel's datasource_uid and set ts to the dashboard time range: Grafana's Prometheus and Loki backends expand the built-in $__interval, $__rate_interval and $__range from that window and step. Only dashboard-defined variables need a value: use the matcher the variable renders (one value -> label=\"v\"; several values or All -> label=~\"v1|v2|...\", or the variable's all_value)."
       - "Library panels store their queries in the library element, not the dashboard: library_panel_uid is set and target is null."
       - "Old dashboards reference data sources by name (panel_datasource is a string) or via ${DS_...} variables; datasource_uid is null then."
       - "Rows of an expanded (not collapsed) row are siblings in the panel list, so parent_row is only known for collapsed rows."
     examples:
-      - sql: "SELECT panel_title, panel_type, datasource_type, ref_id, expr FROM grafana_dashboard_panels WHERE dashboard_uid = 'svc-overview' ORDER BY panel_id, ref_id"
-        description: What does each panel of the Service Overview dashboard query?
-      - sql: "SELECT dashboard_uid, panel_title FROM grafana_dashboard_panels WHERE dashboard_uid IN ('svc-overview', 'user-access-cache-review') AND expr LIKE '%service_cache_refresh_lag_seconds%'"
-        description: Which panels already chart the cache-lag metric?
+      - sql: "SELECT panel_title, panel_type, datasource_type, ref_id, expr FROM grafana_dashboard_panels WHERE dashboard_uid = 'my-dashboard-uid' ORDER BY panel_id, ref_id"
+        description: What does each panel of a dashboard query?
+      - sql: "SELECT dashboard_uid, panel_title FROM grafana_dashboard_panels WHERE dashboard_uid IN ('my-dashboard-uid', 'other-dashboard-uid') AND expr LIKE '%http_request_duration_seconds%'"
+        description: Which panels already chart the request-latency histogram?
     fixtures:
-      - file: dashboard_cache_review.json
-        filters: {dashboard_uid: user-access-cache-review}
+      - file: dashboard_checkout_review.json
+        filters: {dashboard_uid: checkout-review}
         expect_rows: 3
-        expect_columns: {panel_id: 1, panel_title: User P95 Latency, panel_type: timeseries, ref_id: A, datasource_uid: prometheus, expr: "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"user-service\"}[5m])) by (le))"}
-        note: "Documented GET envelope wrapping the o11y-bench task dashboard 'dashboard-repair-cache-review' as provisioned by o11y_stack.provision_task_resources."
+        expect_columns: {panel_id: 1, panel_title: P95 Latency, panel_type: timeseries, ref_id: A, datasource_uid: prometheus, expr: "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"checkout\"}[$__rate_interval])))"}
+        note: "Documented GET envelope around a dashboard built strictly from the dashboard JSON model docs (timeseries, instant stat and logs panels with datasource refs and targets)."
       - file: dashboard_docs_model.json
         filters: {dashboard_uid: gdxccn}
         expect_rows: 1
@@ -333,7 +333,7 @@ tables:
       method: GET
       path: "/api/dashboards/uid/{{ filters.dashboard_uid }}"
     filters:
-      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["service-overview-variable-audit"]}
+      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["my-dashboard-uid"]}
     response:
       rows_path: "$.dashboard.templating.list[*]"
     columns:
@@ -360,15 +360,16 @@ tables:
     pitfalls:
       - "multi / includeAll are omitted (null) when false in many saved dashboards; treat null as false."
       - "Panels use a variable when their expr contains $name or ${name...}: join with grafana_dashboard_panels on expr LIKE '%$' || name || '%' OR expr LIKE '%${' || name || '%'."
+      - "A multi-value or include_all variable renders several values (a|b|c) once more than one value or All is selected: inside an '=' matcher (label=\"$name\") it then matches nothing. Such variables belong in regex matchers (label=~\"${name:regex}\" or label=~\"$name\")."
     examples:
-      - sql: "SELECT name, type, query, multi, include_all, datasource_uid FROM grafana_dashboard_variables WHERE dashboard_uid = 'service-overview-variable-audit'"
+      - sql: "SELECT name, type, query, multi, include_all, datasource_uid FROM grafana_dashboard_variables WHERE dashboard_uid = 'my-dashboard-uid'"
         description: Does the dashboard have a multi-select service dropdown with All?
     fixtures:
-      - file: dashboard_variable_audit.json
-        filters: {dashboard_uid: service-overview-variable-audit}
+      - file: dashboard_request_variables.json
+        filters: {dashboard_uid: request-overview}
         expect_rows: 1
         expect_columns: {name: service, type: query, query: "label_values(http_requests_total, job)", multi: true, include_all: true, datasource_uid: prometheus}
-        note: "Documented GET envelope wrapping the o11y-bench task dashboard 'audit-service-overview-variable' as provisioned by o11y_stack.provision_task_resources."
+        note: "Documented GET envelope around a dashboard built strictly from the dashboard JSON model docs (templating.list query variable in object form {query, refId}, multi + includeAll, panels using ${service:regex})."
       - file: dashboard_templating.json
         filters: {dashboard_uid: cLV5GDCkz}
         expect_rows: 2
@@ -388,7 +389,7 @@ tables:
       method: GET
       path: "/api/dashboards/uid/{{ filters.dashboard_uid }}"
     filters:
-      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["svc-annotate"]}
+      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 20, description: "Dashboard uid", examples: ["my-dashboard-uid"]}
     response:
       rows_path: "$.dashboard.annotations.list[*]"
     columns:
@@ -407,14 +408,14 @@ tables:
       - {name: target, type: JSON, path: target}
       - {name: annotation_json, type: JSON, path: "."}
     examples:
-      - sql: "SELECT name, enable, datasource_type, expr, title_format FROM grafana_dashboard_annotation_queries WHERE dashboard_uid = 'user-access-cache-review'"
+      - sql: "SELECT name, enable, datasource_type, expr, title_format FROM grafana_dashboard_annotation_queries WHERE dashboard_uid = 'my-dashboard-uid'"
         description: Which deployment markers does the dashboard show, and from which service?
     fixtures:
-      - file: dashboard_cache_review.json
-        filters: {dashboard_uid: user-access-cache-review}
+      - file: dashboard_checkout_review.json
+        filters: {dashboard_uid: checkout-review}
         expect_rows: 1
-        expect_columns: {name: Deployments, enable: true, datasource_uid: loki, expr: "{job=\"payment-service\"} | json | event=\"deployment\"", title_format: "{{ service }} {{ version }}"}
-        note: "Documented GET envelope wrapping the o11y-bench task dashboard 'dashboard-repair-cache-review'."
+        expect_columns: {name: Deployments, enable: true, datasource_uid: loki, expr: "{service_name=\"checkout\"} | json | event=\"deploy\"", title_format: "{{ service_name }} {{ version }}"}
+        note: "Documented GET envelope around a dashboard built from the dashboard JSON model docs; annotations.list holds one Loki annotation query (expr, titleFormat, textFormat)."
       - file: dashboard_docs_model.json
         filters: {dashboard_uid: gdxccn}
         expect_rows: 1
@@ -436,7 +437,7 @@ tables:
       query:
         limit: "{{ limit or 100 }}"
     filters:
-      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Dashboard uid", examples: ["svc-overview"]}
+      - {column: dashboard_uid, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Dashboard uid", examples: ["my-dashboard-uid"]}
     response:
       # Grafana 12+ returns {continueToken, versions: [...]}; Grafana <= 11 returns a bare array.
       # rows_path "$" + keep_empty explode handles both: v is the version on 12+, _ on <= 11.
@@ -458,7 +459,7 @@ tables:
       - "Only [dashboards] versions_to_keep versions (default 20) are retained."
       - "Response shape changed in Grafana 12 (object with continueToken) vs <= 11 (bare array); both are handled."
     examples:
-      - sql: "SELECT version, ts, author, message FROM grafana_dashboard_versions WHERE dashboard_uid = 'svc-overview' ORDER BY version DESC LIMIT 5"
+      - sql: "SELECT version, ts, author, message FROM grafana_dashboard_versions WHERE dashboard_uid = 'my-dashboard-uid' ORDER BY version DESC LIMIT 5"
         description: Recent edits of a dashboard (did someone change the panel queries before the incident?).
     fixtures:
       - file: dashboard_versions.json
@@ -508,9 +509,9 @@ tables:
       - "Only the last [dashboards] versions_to_keep versions (default 20) exist; older numbers return 404."
       - "Restoring an old version is a write: take dashboard_json from here, set version to the CURRENT version (grafana_dashboard.version) and save with grafana_dashboard_write."
     examples:
-      - sql: "SELECT version, ts, author, message, panel_titles FROM grafana_dashboard_version WHERE dashboard_uid = 'svc-overview' AND version IN (6, 7)"
+      - sql: "SELECT version, ts, author, message, panel_titles FROM grafana_dashboard_version WHERE dashboard_uid = 'my-dashboard-uid' AND version IN (6, 7)"
         description: Compare two versions around a suspicious dashboard edit.
-      - sql: "SELECT dashboard_json FROM grafana_dashboard_version WHERE dashboard_uid = 'user-access-cache-review' AND version = 1"
+      - sql: "SELECT dashboard_json FROM grafana_dashboard_version WHERE dashboard_uid = 'my-dashboard-uid' AND version = 1"
         description: The originally saved JSON, to restore broken panels during a repair.
     fixtures:
       - file: dashboard_version.json
@@ -617,7 +618,7 @@ tables:
       - "Not paginated; returns up to 5000 data sources by default."
     examples:
       - sql: "SELECT uid, name, type, is_default, datasource_url FROM grafana_datasources ORDER BY type, name"
-        description: Which data sources exist (o11y-bench - prometheus, loki, tempo) and which is default.
+        description: Which data sources exist (their uids are what grafana_ds_query and the proxy sources need) and which is default.
     fixtures:
       - file: datasources.json
         expect_rows: 1
@@ -736,7 +737,7 @@ tables:
             intervalMs: "{{ (filters.step or time.step_s) * 1000 }}"
             maxDataPoints: 11000
     filters:
-      - {column: datasource_uid, required: true, ops: ["=", "in"], max_fan_out: 5, description: "Data source uid (grafana_datasources.uid); o11y-bench: prometheus, loki, tempo", examples: ["prometheus"]}
+      - {column: datasource_uid, required: true, ops: ["=", "in"], max_fan_out: 5, description: "Data source uid (grafana_datasources.uid, not the display name)", examples: ["prometheus"]}
       - {column: datasource_type, description: "Optional plugin id (prometheus, loki, tempo...)"}
       - {column: expr, description: "PromQL / LogQL expression", examples: ['sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))']}
       - {column: query, description: "Query text for data sources whose model field is 'query' (Tempo TraceQL, Elasticsearch Lucene...)"}
@@ -790,7 +791,7 @@ tables:
       - "from/to are sent as epoch-millisecond strings; intervalMs is the Prometheus min step, so step = filters.step or the auto step."
       - "NaN / +Inf samples are encoded as null in data frames (with a separate entities list): value is NULL for them."
       - "Wide/table frames with several number columns: value/series only show the first; read the rest from fields->>'<column>'. Duplicate field names in one frame collapse."
-      - "Dashboard variables ($service, $__range, $__rate_interval) are NOT expanded by this endpoint unless the data source does it; substitute literal values."
+      - "Grafana's Prometheus and Loki backends expand the built-in $__interval and $__range (Prometheus also $__rate_interval, Loki also $__auto) from the ts window and step, so panel expressions run unchanged; with instant = true, max_over_time(<gauge>[$__range]) is the exact peak over the whole window (an expression needs a subquery: max_over_time(sum(rate(x[5m]))[$__range:])). Dashboard-defined variables ($service, ${service:regex}) are expanded only by dashboards: write the matcher they render instead."
       - "A failing query returns HTTP 400 with results.<refId>.error (207 Multi-Status when the datasourceQueryMultiStatus feature toggle is on); both are raised as errors."
     examples:
       - sql: >-
@@ -803,14 +804,14 @@ tables:
         description: Peak 5xx rate per service through Grafana's Prometheus data source.
       - sql: >-
           SELECT ts, labels->>'job' AS job, message FROM grafana_ds_query
-          WHERE datasource_uid = 'loki' AND expr = '{job="payment-service", level="error"} | json'
+          WHERE datasource_uid = 'loki' AND expr = '{service_name="checkout"} | json | level="error"'
             AND max_lines = 200
           ORDER BY ts DESC
         description: Recent error log lines of a service through Grafana's Loki data source.
       - sql: >-
           SELECT fields FROM grafana_ds_query
           WHERE datasource_uid = 'tempo' AND query_type = 'traceql'
-            AND query = '{ resource.service.name = "order-service" && status = error }' AND max_results = 20
+            AND query = '{ resource.service.name = "checkout" && status = error }' AND max_results = 20
         description: TraceQL search through Grafana's Tempo data source (trace table rows are in fields).
     fixtures:
       - file: ds_query_testdata.json
@@ -1281,7 +1282,7 @@ tables:
         filter: "{{ filters.matcher }}"
         ruleMetadata: true
     filters:
-      - {column: matcher, description: "Only silences matching this label matcher, e.g. service=\"order-service\""}
+      - {column: matcher, description: "Only silences matching this label matcher, e.g. service=\"checkout\""}
       - {column: alertmanager, description: "grafana (default) or an external Alertmanager data source uid"}
     response:
       rows_path: "$"
@@ -1342,7 +1343,7 @@ tables:
       - {column: panel_id, type: BIGINT, description: "With dashboard_uid"}
       - {column: label_name, description: "Instance label name to filter on (with label_value)"}
       - {column: label_value, description: "Instance label value"}
-      - {column: matcher, ops: ["=", "in"], fan_out: false, description: "Prometheus-style label matchers on instance labels, e.g. service=\"payment-service\" or {severity=~\"crit.*\"} (repeated matchers param; Loki backend only)"}
+      - {column: matcher, ops: ["=", "in"], fan_out: false, description: "Prometheus-style label matchers on instance labels, e.g. service=\"checkout\" or {severity=~\"crit.*\"} (repeated matchers param; Loki backend only)"}
     time: {column: ts, default_lookback: 24h, max_window: 30d}
     response:
       rows_path: "$"
@@ -1570,8 +1571,8 @@ tables:
   - name: grafana_dashboard_write
     title: Save (create or update) a dashboard
     description: >-
-      WRITE, human-approved. Saves a dashboard (POST /api/dashboards/db) - used for dashboard
-      repair tasks. Provide uid and dashboard_json (the complete dashboard model, normally
+      WRITE, human-approved. Saves a dashboard (POST /api/dashboards/db) - used to create, extend
+      or repair dashboards. Provide uid and dashboard_json (the complete dashboard model, normally
       grafana_dashboard.dashboard_json edited), plus folder_uid (copy grafana_dashboard.folder_uid,
       or the dashboard moves to the root folder), message, and overwrite (default false).
     kind: write
@@ -1586,10 +1587,10 @@ tables:
         "message": {{ (filters.message or 'Saved by OmniOps (approved in Slack)') | tojson }},
         "overwrite": {{ 'true' if (filters.overwrite | string | lower) in ['true', '1'] else 'false' }}}
     filters:
-      - {column: uid, required: true, description: "uid of the dashboard being saved; must equal dashboard_json's uid", examples: ["user-access-cache-review"]}
-      - {column: dashboard_json, required: true, description: "Complete dashboard JSON object (string). Keep uid and the current version for optimistic locking; id may be kept or null.", examples: ['{"uid": "user-access-cache-review", "title": "User Access Cache Review", "version": 1, "panels": []}']}
+      - {column: uid, required: true, description: "uid of the dashboard being saved; must equal dashboard_json's uid", examples: ["my-dashboard-uid"]}
+      - {column: dashboard_json, required: true, description: "Complete dashboard JSON object (string). Keep uid and the current version for optimistic locking; id may be kept or null.", examples: ['{"uid": "my-dashboard-uid", "title": "My Dashboard", "version": 1, "panels": []}']}
       - {column: folder_uid, description: "Target folder uid (omit = root folder!)"}
-      - {column: message, description: "Version-history commit message", examples: ["Repair cache review dashboard: user-service cache lag panels"]}
+      - {column: message, description: "Version-history commit message", examples: ["Add p95 latency panel"]}
       - {column: overwrite, type: BOOLEAN, description: "true = ignore version conflicts / replace a dashboard with the same uid"}
     response:
       rows_path: "$"
@@ -1609,12 +1610,15 @@ tables:
       - "HTTP 412 status=version-mismatch: someone saved in between; re-read grafana_dashboard and re-apply, or set overwrite = true. name-exists: uid already used by another dashboard. plugin-dashboard: owned by a plugin."
       - "The engine cannot merge JSON, so uid is not injected: dashboard_json must already contain the same uid, else a different dashboard is created/overwritten."
       - "Provisioned (file-based) dashboards may be reverted on restart; check grafana_dashboard.provisioned."
-      - "Change only what the task asks: keep existing panels (ids, gridPos, targets) and settings unchanged so diffs stay minimal."
+      - "Change only what was asked: keep existing panels (ids, gridPos, targets), variables and settings unchanged so diffs stay minimal."
+      - "A panel that shows one number for the dashboard time range (peak, total or average in a stat / gauge / bar gauge) computes it in the query as an instant target: {\"expr\": \"max_over_time(<gauge>[$__range])\", \"instant\": true, \"range\": false}; an expression needs a subquery, max_over_time(sum(rate(x[5m]))[$__range:]); totals use sum(increase(x[$__range])); Loki uses queryType instant with count_over_time(...[$__range]). A range target plus a display reducer (reduceOptions.calcs max / mean) only sees the samples at the panel's step and misses peaks between them."
+      - "Saved queries keep Grafana's variables so panels follow the time picker and dropdowns: $__range / $__rate_interval / $__interval rather than fixed windows, and an existing dashboard variable (grafana_dashboard_variables) rather than one of its values typed in. Grafana fills them in when the dashboard renders."
+      - "Never put a multi-value or include-All variable inside an '=' label matcher: with two values or All selected it renders a|b|... and label=\"$var\" matches nothing. Use label=~\"$var\" (or label=~\"${var:regex}\"); '=' is only safe for single-value variables."
     examples:
       - sql: >-
           SELECT uid, version, url, status FROM grafana_dashboard_write
-          WHERE uid = 'svc-annotate' AND folder_uid = '' AND message = 'Add order/payment deployment annotations'
-            AND dashboard_json = '{"uid": "svc-annotate", "title": "Service Overview Annotate", "version": 1, "panels": [], "annotations": {"list": []}}'
+          WHERE uid = 'my-dashboard-uid' AND folder_uid = '' AND message = 'Add deployment annotation query'
+            AND dashboard_json = '{"uid": "my-dashboard-uid", "title": "My Dashboard", "version": 1, "panels": [], "annotations": {"list": []}}'
         description: Stage a dashboard save (executed only after a human approves it in Slack).
     fixtures:
       - file: dashboard_save.json
@@ -1643,7 +1647,7 @@ tables:
         tags: "{{ filters.tag | as_list }}"
         text: "{{ filters.text }}"
     filters:
-      - {column: text, required: true, description: "Annotation text", examples: ["INC-42: payment-service 5xx spike, rollback started"]}
+      - {column: text, required: true, description: "Annotation text", examples: ["INC-42: checkout 5xx spike, rollback started"]}
       - {column: tag, ops: ["=", "in"], fan_out: false, description: "Tags (IN = several tags on one annotation)", examples: ["incident"]}
       - {column: dashboard_uid, description: "Attach to a dashboard (else org-wide)"}
       - {column: panel_id, type: BIGINT, description: "Attach to one panel (with dashboard_uid)"}
@@ -1664,7 +1668,7 @@ tables:
       - "time/timeEnd are epoch milliseconds (the manifest converts ts)."
       - "An org annotation (no dashboard_uid) only shows on dashboards whose built-in annotation query filters by its tags."
     examples:
-      - sql: "SELECT id, message FROM grafana_annotation_write WHERE text = 'INC-42 mitigated: rolled back payment-service v2.3.1' AND tag IN ('incident', 'omniops') AND dashboard_uid = 'svc-overview'"
+      - sql: "SELECT id, message FROM grafana_annotation_write WHERE text = 'INC-42 mitigated: rolled back checkout v2.3.1' AND tag IN ('incident', 'omniops') AND dashboard_uid = 'my-dashboard-uid'"
         description: Stage an annotation marking the mitigation on the service dashboard.
     fixtures:
       - file: annotation_create.json

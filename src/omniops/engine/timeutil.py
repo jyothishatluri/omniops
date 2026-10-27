@@ -154,6 +154,52 @@ def auto_step(start: datetime, end: datetime, target_points: int = 300, min_step
     return int(max(raw, floor))
 
 
+@dataclass(frozen=True)
+class BucketGrid:
+    """Evaluation points of a range query whose range equals its step ([$__auto], [$__interval]).
+
+    Each point counts the step ENDING at its timestamp, so a series started at the window start
+    counts one step BEFORE the window as well (one extra step of data in every sum). These
+    points start one step after the window start and end exactly at the window end: the buckets
+    tile the window when it is a whole number of steps. Otherwise the leftover seconds at the
+    window start are not counted; a window shorter than one step gets one point at its end whose
+    bucket reaches back before the window. ``cover_start`` says which applies.
+    """
+
+    step_s: int
+    start: datetime  # first evaluation point: send this as the query start
+    end: datetime  # last evaluation point = the window end
+    points: int
+    cover_start: datetime  # the buckets cover (cover_start, end]
+    window_start: datetime
+
+    @property
+    def exact(self) -> bool:
+        return self.cover_start == self.window_start
+
+    def describe(self) -> str:
+        """One line for the [window] header: effective step and the span the buckets cover."""
+        out = (f"step {self.step_s}s ({self.points} point(s), each counting the step ending at its ts); "
+               f"buckets cover {fmt_rfc3339(self.cover_start)} -> {fmt_rfc3339(self.end)}")
+        gap = (self.cover_start - self.window_start).total_seconds()
+        if gap > 0:
+            out += f" (the first {gap:g}s of the window are not counted: it is not a whole number of steps)"
+        elif gap < 0:
+            out += f" (the window is shorter than one step: the one bucket starts {-gap:g}s before it)"
+        return out
+
+
+def bucket_grid(start: datetime, end: datetime, step_s: float) -> BucketGrid:
+    """Points for step-sized buckets over [start, end]: last point at ``end``, first at ``start + step``
+    when the window is a whole number of steps (see ``BucketGrid``)."""
+    step = max(1, int(step_s))
+    whole = int((end - start).total_seconds() // step)
+    if whole < 1:
+        return BucketGrid(step, end, end, 1, end - timedelta(seconds=step), start)
+    first = end - timedelta(seconds=(whole - 1) * step)
+    return BucketGrid(step, first, end, whole, end - timedelta(seconds=whole * step), start)
+
+
 @dataclass
 class TimeAnchor:
     """The run's single time source. ``now`` is what relative times are pinned to."""

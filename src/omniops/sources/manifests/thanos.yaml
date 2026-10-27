@@ -157,8 +157,8 @@ tables:
       - {column: replica_labels, ops: ["=", "in"], fan_out: false, description: "Replica label name(s) to deduplicate on (replicaLabels[])"}
       - {column: store_match, ops: ["=", "in"], fan_out: false, description: "storeMatch[] selector on __address__ restricting which StoreAPIs answer"}
     columns:
-      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
-      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: ts, type: TIMESTAMP, expr: "_.value[0] if _ else root.data.result[0]", transform: epoch_s, description: "Evaluation time"}
+      - {name: value, type: DOUBLE, expr: "_.value[1] if _ else root.data.result[1]", description: "Sample value (or the scalar)"}
       - {name: metric, path: "metric.__name__"}
       - {name: labels, type: JSON, path: metric}
       - {name: warnings, type: JSON, expr: "root.warnings or root.data.warnings", description: "Partial-response / store warnings"}

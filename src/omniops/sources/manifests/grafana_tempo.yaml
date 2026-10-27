@@ -5,8 +5,8 @@
 # Grafana forwards the request to the Tempo URL configured on the datasource and injects the
 # datasource's own credentials / tenant headers, so only a Grafana token is needed here. Bodies
 # come back unchanged, so every table, fixture and role comes from templates/tempo.yaml (tables
-# are renamed grafana_tempo_*). This is how the o11y-bench stack exposes Tempo (datasource uid
-# "tempo", Grafana on :3000 with anonymous Admin).
+# are renamed grafana_tempo_*). The datasource uid defaults to "tempo" (the usual uid when
+# provisioned from files).
 source: grafana_tempo
 display_name: Grafana Tempo (via Grafana datasource proxy)
 vendor: Grafana Labs
@@ -16,7 +16,7 @@ base_url: "{{ env.GRAFANA_URL }}/api/datasources/proxy/uid/{{ env.GRAFANA_TEMPO_
 ui_base_url: "{{ env.GRAFANA_URL }}"
 env:
   - {name: GRAFANA_URL, description: "Grafana base URL, e.g. http://localhost:3000 or https://<stack>.grafana.net (no trailing slash)"}
-  - {name: GRAFANA_TOKEN, description: "Grafana service account token (Viewer is enough: datasources:query). Optional when anonymous access is enabled (o11y-bench).", secret: true}
+  - {name: GRAFANA_TOKEN, description: "Grafana service account token (Viewer is enough: datasources:query). Optional when anonymous access is enabled.", secret: true}
   - {name: GRAFANA_USERNAME, description: "Optional Grafana basic-auth user (only if basic auth is enabled; GRAFANA_TOKEN wins)"}
   - {name: GRAFANA_PASSWORD, description: "Optional Grafana basic-auth password", secret: true}
   - {name: GRAFANA_TEMPO_UID, description: "UID of the Tempo datasource in Grafana (Connections > Data sources, or GET /api/datasources)", default: tempo}
@@ -42,7 +42,7 @@ pitfalls:
   - "OpenTelemetry semantic conventions changed: older SDKs emit span.http.method / span.http.status_code / span.http.url, newer ones span.http.request.method / span.http.response.status_code / span.url.full. The http_* columns accept both; inside TraceQL you must use the attribute your services actually emit."
   - "TraceQL metrics duration values (quantile_over_time(duration, .99), avg_over_time(duration) ...) are in SECONDS; span/trace search durations in these tables are milliseconds (duration_ms)."
   - "Trace IDs in search results have leading zeros trimmed; grafana_tempo_trace accepts both forms. Compare with ltrim(trace_id, '0') when joining across tables."
-  - "Edge spans (webapp, api-gateway) wrap the backend call and repeat its error/latency: attribute blame to the deepest failing span or the span with the most own (self) time, not to the root."
+  - "Edge spans (frontend, API gateway) wrap the backend call and repeat its error/latency: attribute blame to the deepest failing span or the span with the most own (self) time, not to the root."
   - "Grafana's data proxy gives up after 30s by default (HTTP 502/504): narrow the window or the query - that is not a schema problem."
   - "HTTP 401/403 is a Grafana permission problem (token lacks datasources:query on this datasource); 404 'data source not found' means GRAFANA_TEMPO_UID is wrong (list datasources to find the uid). A 404 from grafana_tempo_trace with Tempo's own 'trace not found' body is a missing trace and returns 0 rows."
   - "Do not send X-Scope-OrgID yourself: the tenant comes from the datasource configuration in Grafana."

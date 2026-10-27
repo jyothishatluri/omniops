@@ -445,8 +445,8 @@ async def send(rt: SourceRuntime, rr: RenderedRequest, *, table: str, logs: list
             if r.status_code == 404:
                 raise NotFoundError(f"{rt.name}/{table}: HTTP 404 not found: {snippet}", status=404, url=rr.url,
                                     body=snippet)
-            raise FetchError(f"{rt.name}/{table}: HTTP {r.status_code}: {snippet}", status=r.status_code,
-                             url=rr.url, body=snippet)
+            raise with_hint(FetchError(f"{rt.name}/{table}: HTTP {r.status_code}: {snippet}", status=r.status_code,
+                                       url=rr.url, body=snippet), snippet)
         body, text = _parse_body(r, rr.response_format)
         return Response(r.status_code, r.headers, body, text, str(r.url))
 
@@ -647,11 +647,60 @@ def _has_more(pag: PaginationSpec, resp: Response, n: int) -> bool:
 
 
 def time_ctx(start: datetime, end: datetime, target_points: int = 300, min_step: str = "10s") -> dict[str, Any]:
+    """The ``time`` template context of one request window.
+
+    ``bucket_start`` / ``bucket_points`` / ``bucket_cover_start`` describe step-sized buckets at the
+    auto step that tile the window (``timeutil.BucketGrid``). ``buckets(step)`` returns that grid for
+    an explicit step (seconds or a duration; empty = the auto step) and records it under
+    ``buckets_used``, so the engine can report the effective step and the span the buckets cover.
+    Templates call it for the query start when the range of a range query equals its step.
+    """
     step_s = timeutil.auto_step(start, end, target_points, min_step)
-    return {
+    grid = timeutil.bucket_grid(start, end, step_s)
+    out: dict[str, Any] = {
         "start": start,
         "end": end,
         "step_s": step_s,
         "step": timedelta(seconds=step_s),
         "range_s": int((end - start).total_seconds()),
+        "bucket_start": grid.start,
+        "bucket_points": grid.points,
+        "bucket_cover_start": grid.cover_start,
     }
+
+    def buckets(step: Any = None) -> timeutil.BucketGrid:
+        used = grid
+        if step:  # None, "" and Jinja's Undefined mean the auto step
+            used = timeutil.bucket_grid(start, end, timeutil.parse_duration(step).total_seconds())
+        out["buckets_used"] = used
+        return used
+
+    out["buckets"] = buckets
+    return out
+
+
+# Lessons for query-language errors whose server message names the symptom but not the fix. They are
+# matched on the error text of any source: PromQL is spoken by Prometheus, Mimir, Thanos,
+# VictoriaMetrics, managed Prometheus services and Grafana's data-source proxy alike.
+_ERROR_HINTS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'expected type scalar in call to function \\?"?vector\b', re.IGNORECASE),
+     ("vector() takes only a scalar (a number, time(), scalar(x)); sum()/count()/avg()/max() ... already "
+      "return an instant vector, so drop the vector() wrapper (to turn 'no series' into 0 append "
+      "'or vector(0)')")),
+]
+
+
+def error_hint(text: str) -> str | None:
+    """The fix for a known query-language error message, if ``text`` contains one."""
+    for rx, hint in _ERROR_HINTS:
+        if rx.search(text or ""):
+            return hint
+    return None
+
+
+def with_hint(exc: BaseException, text: str) -> BaseException:
+    """Prepend the known fix for ``text`` (an API error message) to the exception's lesson."""
+    hint = error_hint(text)
+    if hint:
+        exc.lesson = f"{hint}; {getattr(exc, 'lesson', '')}".rstrip("; ")  # type: ignore[attr-defined]
+    return exc

@@ -7,7 +7,7 @@
             {
               "key": "service.name",
               "value": {
-                "stringValue": "webapp"
+                "stringValue": "storefront-web"
               }
             },
             {
@@ -70,7 +70,7 @@
             {
               "key": "service.name",
               "value": {
-                "stringValue": "api-gateway"
+                "stringValue": "edge-proxy"
               }
             },
             {
@@ -134,7 +134,7 @@
             {
               "key": "service.name",
               "value": {
-                "stringValue": "order-service"
+                "stringValue": "billing-api"
               }
             },
             {
@@ -200,7 +200,7 @@
               {
                 "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
                 "spanId": "dddddddddddddddd",
-                "name": "call payment-service",
+                "name": "call ledger-service",
                 "kind": 3,
                 "startTimeUnixNano": "1792478178020000000",
                 "endTimeUnixNano": "1792478178870000000",
@@ -208,7 +208,7 @@
                   {
                     "key": "peer.service",
                     "value": {
-                      "stringValue": "payment-service"
+                      "stringValue": "ledger-service"
                     }
                   },
                   {
@@ -246,7 +246,7 @@
             {
               "key": "service.name",
               "value": {
-                "stringValue": "payment-service"
+                "stringValue": "ledger-service"
               }
             },
             {

@@ -64,7 +64,9 @@ query_languages:
     PromQL (Mimir runs the Prometheus engine, or its streaming engine with identical semantics). Selectors use
     braces: metric{label="value"}. rate()/increase() need a range vector [5m]. Aggregate with sum by (label)
     (...). Histograms: histogram_quantile(0.95, sum by (le) (rate(x_bucket[5m]))); native histograms:
-    histogram_quantile(0.95, sum(rate(x[5m]))). Instant tables need vector results; wrap scalars with vector().
+    histogram_quantile(0.95, sum(rate(x[5m]))). vector(s) takes only a scalar (a number, time(), scalar(x)):
+    sum(), count(), max() ... already return instant vectors, so never wrap them in vector(); use
+    '... or vector(0)' to turn 'no series' into 0.
 pitfalls:
   - "An unknown metric or label returns 0 series, not an error: list label values first (mimir_label_values), then filter."
   - "Without X-Scope-OrgID on a multi-tenant Mimir every request fails with 401 'no org id'; a wrong tenant silently returns 0 series."
@@ -142,8 +144,8 @@ tables:
         query: "{{ filters.query }}"
         time: "{{ time.end | epoch_s }}"
     columns:
-      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
-      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: ts, type: TIMESTAMP, expr: "_.value[0] if _ else root.data.result[0]", transform: epoch_s, description: "Evaluation time"}
+      - {name: value, type: DOUBLE, expr: "_.value[1] if _ else root.data.result[1]", description: "Sample value (or the scalar)"}
       - {name: metric, path: "metric.__name__"}
       - {name: labels, type: JSON, path: metric}
       - {name: warnings, type: JSON, path: "$.warnings", description: "Response-level PromQL warnings"}

@@ -89,7 +89,7 @@
             "targets": [
               {
                 "refId": "A",
-                "expr": "{job=\"payment-service\"} |= \"error\""
+                "expr": "{job=\"ledger-service\"} |= \"error\""
               }
             ]
           }

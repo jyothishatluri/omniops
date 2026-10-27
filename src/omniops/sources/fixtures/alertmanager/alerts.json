@@ -1,7 +1,7 @@
 [
   {
     "annotations": {
-      "summary": "High 5xx error rate on payment-service",
+      "summary": "High 5xx error rate on ledger-service",
       "description": "5xx ratio > 5% for 5m",
       "runbook_url": "https://runbooks.example.com/HighErrorRate"
     },
@@ -11,12 +11,12 @@
     "updatedAt": "2026-10-01T11:54:00.000Z",
     "endsAt": "2026-10-01T11:58:00.000Z",
     "status": {"state": "active", "silencedBy": [], "inhibitedBy": [], "mutedBy": []},
-    "labels": {"alertname": "HighErrorRate", "service": "payment-service", "severity": "critical", "instance": "payment-service:8084"},
+    "labels": {"alertname": "HighErrorRate", "service": "ledger-service", "severity": "critical", "instance": "ledger-service:8084"},
     "generatorURL": "http://prometheus:9090/graph?g0.expr=job%3Aerrors%3Aratio5m+%3E+0.05"
   },
   {
     "annotations": {
-      "summary": "p99 latency above 2s on api-gateway"
+      "summary": "p99 latency above 2s on edge-proxy"
     },
     "receivers": [{"name": "slack-oncall"}, {"name": "pagerduty-critical"}],
     "fingerprint": "9a0b1c2d3e4f5061",
@@ -24,7 +24,7 @@
     "updatedAt": "2026-10-01T11:54:00.000Z",
     "endsAt": "2026-10-01T11:58:00.000Z",
     "status": {"state": "suppressed", "silencedBy": ["7d8f9e0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a"], "inhibitedBy": [], "mutedBy": []},
-    "labels": {"alertname": "HighLatency", "service": "api-gateway", "severity": "warning", "instance": "api-gateway:8081"},
+    "labels": {"alertname": "HighLatency", "service": "edge-proxy", "severity": "warning", "instance": "edge-proxy:8081"},
     "generatorURL": "http://prometheus:9090/graph?g0.expr=job%3Alatency%3Ap99+%3E+2"
   }
 ]

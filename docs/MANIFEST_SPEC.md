@@ -121,6 +121,7 @@ Template context:
 | `filters.<param>` | pushed-down filter value (scalar per fan-out request; list when `fan_out: false`) |
 | `time.start`, `time.end` | aware UTC datetimes of the resolved window |
 | `time.step_s`, `time.step`, `time.range_s` | auto step (~300 points, nice values) and window length |
+| `time.bucket_start`, `time.bucket_points`, `time.bucket_cover_start`, `time.buckets(step)` | step-sized buckets that tile exactly the window: the first point is window start + step, the last the window end (use as `start` when a query's range equals the step, e.g. `[$__auto]`) |
 | `limit` | SQL LIMIT if any (else None) |
 | `page.offset`, `page.number`, `page.size` | pagination state |
 | `captures.<name>` | values captured by earlier `steps` |

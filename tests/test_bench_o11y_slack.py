@@ -132,7 +132,7 @@ async def test_dm_to_approved_dashboard_write_through_the_real_simulator(tmp_pat
     assert "tool_calls" not in final
     assert final["message"] == outcome.answer == final_answer(data)
     assert outcome.answer.startswith("Two datasources are configured: Prometheus (prometheus) and Loki (loki).")
-    assert ("Staged writes:\n- Approved by the on-call user and executed (1 row(s)). uid=svc-annotate"
+    assert ("Update after approval:\n- Approved by the on-call user and executed (1 row(s)). uid=svc-annotate"
             in outcome.answer)
     assert "<@" not in outcome.answer and ":white_check_mark:" not in outcome.answer
     assert data["extra"]["final_answer_source"] == "slack_reply"

@@ -36,7 +36,7 @@
     "http.request.method": "POST",
     "http.response.status_code": "500",
     "span.status_code": "error",
-    "span.status_message": "upstream payment-service returned 503",
+    "span.status_message": "upstream ledger-service returned 503",
     "request.is_failed": true,
     "transaction.is_failed": true,
     "request.is_root_span": true,
@@ -70,7 +70,7 @@
     "k8s.pod.name": "checkout-service-7895755b94-mzs5m",
     "host.name": "ip-10-0-1-17.eu-west-1.compute.internal",
     "db.system": null,
-    "server.address": "payment-service",
+    "server.address": "ledger-service",
     "dt.entity.service": "SERVICE-5D53A2A6A1F2C3B4"
    }
   ],

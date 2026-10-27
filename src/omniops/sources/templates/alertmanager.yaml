@@ -32,7 +32,7 @@ tables:
       Every alert Alertmanager currently holds (GET /api/v2/alerts) with its processing state
       (active | suppressed | unprocessed), the silences/inhibitions muting it, the receivers it is
       routed to, and its labels/annotations. One row per alert. Optional server-side filters:
-      alertname, severity, matcher (any Alertmanager matcher such as service="payment-service" or
+      alertname, severity, matcher (any Alertmanager matcher such as service="ledger-service" or
       service=~"pay.*"), receiver (regex) and state (active -> silenced=false&inhibited=false,
       suppressed -> active=false). service/env/host are derived columns (several label names),
       so filter them in SQL or pass an explicit matcher.
@@ -53,7 +53,7 @@ tables:
       - {column: alertname, ops: ["=", "in"], description: "Alert name (sent as filter=alertname=\"...\")", examples: [HighErrorRate]}
       - {column: severity, ops: ["=", "in"], description: "severity label (sent as a matcher)", examples: [critical]}
       - {column: state, ops: ["=", "in"], description: "active | suppressed | unprocessed (active and suppressed are pushed down as the active/silenced/inhibited flags)", examples: [active]}
-      - {column: matcher, ops: ["=", "in"], description: "Raw Alertmanager matcher, e.g. service=\"payment-service\" or instance=~\"api-.*\" (one matcher per value; IN = union)", examples: ['service="payment-service"']}
+      - {column: matcher, ops: ["=", "in"], description: "Raw Alertmanager matcher, e.g. service=\"ledger-service\" or instance=~\"api-.*\" (one matcher per value; IN = union)", examples: ['service="ledger-service"']}
       - {column: receiver, description: "Regex on receiver names (e.g. slack-.*)", examples: ['slack-.*']}
     response:
       rows_path: "$[*]"
@@ -100,7 +100,7 @@ tables:
     fixtures:
       - file: alerts.json
         expect_rows: 2
-        expect_columns: {fingerprint: 4f1c3e9a8b7d6c50, alertname: HighErrorRate, state: active, severity: critical, service: payment-service, host: "payment-service:8084", title: High 5xx error rate on payment-service, starts_at: "2026-10-01T11:42:30Z", receivers: slack-oncall, silenced_by: "[]"}
+        expect_columns: {fingerprint: 4f1c3e9a8b7d6c50, alertname: HighErrorRate, state: active, severity: critical, service: ledger-service, host: "ledger-service:8084", title: High 5xx error rate on ledger-service, starts_at: "2026-10-01T11:42:30Z", receivers: slack-oncall, silenced_by: "[]"}
         note: >-
           The v2 API reference (OpenAPI spec) has no example bodies; built strictly from the
           gettableAlerts / gettableAlert / alertStatus / receiverReference definitions of
@@ -127,7 +127,7 @@ tables:
         inhibited: "{{ False if filters.state == 'active' else None }}"
     filters:
       - {column: alertname, ops: ["=", "in"], description: "Alert name", examples: [HighErrorRate]}
-      - {column: matcher, ops: ["=", "in"], description: "Raw Alertmanager matcher, e.g. service=\"payment-service\"", examples: ['severity="critical"']}
+      - {column: matcher, ops: ["=", "in"], description: "Raw Alertmanager matcher, e.g. service=\"ledger-service\"", examples: ['severity="critical"']}
       - {column: receiver, ops: ["="], description: "Regex on the receiver name", examples: [slack-oncall]}
       - {column: state, ops: ["=", "in"], description: "Alert state inside the group: active | suppressed | unprocessed (active/suppressed pushed down as the active/silenced/inhibited flags)", examples: [active]}
     response:
@@ -161,7 +161,7 @@ tables:
     fixtures:
       - file: alert_groups.json
         expect_rows: 2
-        expect_columns: {receiver: slack-oncall, alertname: HighErrorRate, state: active, service: payment-service, starts_at: "2026-10-01T11:42:30Z"}
+        expect_columns: {receiver: slack-oncall, alertname: HighErrorRate, state: active, service: ledger-service, starts_at: "2026-10-01T11:42:30Z"}
         note: >-
           Built strictly from the alertGroups / alertGroup / gettableAlert definitions of
           api/v2/openapi.yaml v0.34.1 (no example bodies in the reference). Values are illustrative.
@@ -219,7 +219,7 @@ tables:
     fixtures:
       - file: silences.json
         expect_rows: 2
-        expect_columns: {id: 7d8f9e0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a, state: active, alertname: HighLatency, service: "api-.*", created_by: jane.doe, starts_at: "2026-10-01T11:30:00Z", title: "Alertmanager silence (active) by jane.doe: Planned api-gateway rollout, latency expected"}
+        expect_columns: {id: 7d8f9e0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a, state: active, alertname: HighLatency, service: "api-.*", created_by: jane.doe, starts_at: "2026-10-01T11:30:00Z", title: "Alertmanager silence (active) by jane.doe: Planned edge-proxy rollout, latency expected"}
         note: >-
           Built strictly from the gettableSilences / gettableSilence / silence / matcher /
           silenceStatus definitions of api/v2/openapi.yaml v0.34.1 (no example bodies in the

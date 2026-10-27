@@ -2,7 +2,7 @@
   "series": [
     {
       "labels": [
-        {"name": "service_name", "value": "order-service"}
+        {"name": "service_name", "value": "billing-api"}
       ],
       "points": [
         {"value": 4200000000, "timestamp": "1790852400000"},
@@ -12,7 +12,7 @@
     },
     {
       "labels": [
-        {"name": "service_name", "value": "payment-service"}
+        {"name": "service_name", "value": "ledger-service"}
       ],
       "points": [
         {"value": 1100000000, "timestamp": "1790852400000"},

@@ -9,8 +9,8 @@ annotations, Grafana-managed alert rules, silences, contact points). This manife
 stored objects plus the unified query endpoint `/api/ds/query`, which runs a query against any
 backend data source by uid and returns data frames.
 
-Research date: 2026-10-26. Reference stack: o11y-bench (Grafana 13.2.4 on `:3000`, anonymous
-Admin, data sources `prometheus`, `loki`, `tempo` from `vendor/o11y-bench/docker/datasources.yaml`).
+Research date: 2026-10-26. Reference stack: a local Grafana 13.2 on `:3000` with anonymous access
+and file-provisioned data sources `prometheus`, `loki`, `tempo` (uids equal to the plugin names).
 
 ## Tables
 
@@ -68,7 +68,9 @@ v12.4 reference, which documents the legacy routes that Grafana 13 still serves.
 - Real backend outputs: Prometheus / Loki data frames from the Grafana plugins' golden files.
 - Built strictly from schemas (docs give none): Prometheus-compatible rule status / instances,
   Alertmanager alerts / silences, state history frames (Loki and annotation backends),
-  notification policies, mute timings, a timeseries library panel, the o11y-bench dashboards.
+  notification policies, mute timings, a timeseries library panel, the panel / variable /
+  annotation-query dashboards (`dashboard_checkout_review.json`, `dashboard_request_variables.json`,
+  `dashboard_collapsed_row.json`, built from the dashboard JSON model and schema).
 - Error fixtures (`expect_error`): a 207/400 `/api/ds/query` body with `results.A.error`
   (backend.DataResponse encoding) and a `status: error` Prometheus-compatible body; both prove
   the 2xx error rules fire.
@@ -93,8 +95,8 @@ v12.4 reference, which documents the legacy routes that Grafana 13 still serves.
   Docs: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/authentication/
 - Basic auth (self-hosted only) when `GRAFANA_TOKEN` is unset and `GRAFANA_USERNAME` is set
   (same variable names as `grafana_loki` / `grafana_tempo`).
-- No header when neither is set: works with anonymous access (o11y-bench sets
-  `GF_AUTH_ANONYMOUS_ENABLED=true`, `GF_AUTH_ANONYMOUS_ORG_ROLE=Admin`).
+- No header when neither is set: works with anonymous access (`GF_AUTH_ANONYMOUS_ENABLED=true`,
+  role from `GF_AUTH_ANONYMOUS_ORG_ROLE`).
 - `X-Grafana-Org-Id` from `GRAFANA_ORG_ID` selects the organization (optional).
 - Permissions that matter (RBAC action names from
   https://grafana.com/docs/grafana/latest/administration/roles-and-permissions/access-control/custom-role-actions-scopes/):
@@ -108,7 +110,7 @@ v12.4 reference, which documents the legacy routes that Grafana 13 still serves.
 
 | Deployment | `GRAFANA_URL` |
 |---|---|
-| o11y-bench / local | `http://localhost:3000` |
+| Local / docker-compose | `http://localhost:3000` |
 | Grafana Cloud | `https://<stack>.grafana.net` |
 | Self-hosted behind a sub-path | include it, e.g. `https://ops.example.com/grafana` |
 
@@ -172,8 +174,13 @@ and `grafana-loki-datasource` `streams_simple.golden.jsonc`, wrapped in the docu
    (documented). 412 responses: `version-mismatch`, `name-exists`, `plugin-dashboard`.
 6. Panels inside a collapsed row are nested in the row's `panels`; library panels keep their
    targets outside the dashboard. Old dashboards reference data sources by name.
-7. Panel `expr` contains dashboard variables (`$service`, `${service:regex}`, `$__range`,
-   `$__rate_interval`); `/api/ds/query` does not expand dashboard variables.
+7. Panel `expr` contains variables (`$service`, `${service:regex}`, `$__range`, `$__rate_interval`).
+   `/api/ds/query` runs them through the data-source backend, which expands Grafana's built-in
+   interval variables (Prometheus: `$__interval`, `$__rate_interval`, `$__range` and their `_ms`/`_s`
+   forms, `pkg/promlib/models/query.go`; Loki: `$__interval`, `$__range`, `$__auto`,
+   `pkg/tsdb/loki/parse_query.go`) from the request window and `intervalMs`. Dashboard-defined
+   variables are expanded only by the dashboard frontend, so ad hoc runs need the matcher the
+   variable renders.
 8. Grafana-managed rules are not in Prometheus' `/api/v1/rules`; use the Grafana tables.
 9. Prometheus-compatible instance `state` strings carry reasons (`Alerting (NoData)`), and the
    `/alerts` list includes Normal instances.
@@ -197,12 +204,21 @@ and `grafana-loki-datasource` `streams_simple.golden.jsonc`, wrapped in the docu
     error, recovering (else HTTP 400); `health` ok, error, nodata. Set `limit_alerts` for rules with
     many instances.
 
-## o11y-bench notes
+## Dashboard authoring notes
 
-- Data sources: `prometheus` (default), `loki` (derived field `trace_id` -> `tempo`), `tempo`.
-- Services: webapp, api-gateway, user-service, order-service, payment-service. Prometheus label
-  `job` (+ `instance`, `status` on `http_requests_total`); Loki stream labels `job`, `service`, `level`
-  with JSON log lines (`| json`).
-- Dashboard tasks provision dashboards with `POST /api/dashboards/db` (`overwrite: true`,
-  `folderId: 0`) and grade the saved JSON via `GET /api/dashboards/uid/:uid`; repairs should
-  change only what the task asks (rubrics check the dashboard diff).
+These rules are repeated as `grafana_dashboard_write` / `grafana_dashboard_variables` pitfalls.
+
+- Single-number panels (stat, gauge, bar gauge) that summarise the dashboard time range compute
+  the summary in the query and run it as an instant target (`"instant": true, "range": false`):
+  `max_over_time(<gauge>[$__range])`, `max_over_time(sum(rate(x[5m]))[$__range:])` for an
+  expression, `sum(increase(x[$__range]))` for totals, Loki `count_over_time(...[$__range])` with
+  `queryType: instant`. A range target reduced by the panel (`reduceOptions.calcs`) only sees the
+  samples at the panel step, so peaks between steps are lost and the value changes with the
+  panel width.
+- Saved queries keep `$__range` / `$__rate_interval` / `$__interval` and existing dashboard
+  variables instead of literal windows or values, so panels follow the time picker and dropdowns.
+- Multi-value / include-All variables render `a|b|...` when more than one value (or All) is
+  selected: they only work in regex matchers (`label=~"$var"`, `label=~"${var:regex}"`); inside an
+  `=` matcher they match nothing.
+- `POST /api/dashboards/db` replaces the whole model: start from `grafana_dashboard.dashboard_json`,
+  keep `uid`, `version`, panel ids, `gridPos` and untouched targets, and pass `folder_uid` back.

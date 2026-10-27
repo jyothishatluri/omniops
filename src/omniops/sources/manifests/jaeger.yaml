@@ -62,7 +62,7 @@ tables:
       - file: services.json
         note: "Built from the OpenAPI schema jaeger.api_v3.GetServicesResponse {services: [string]} (no example body in the docs)."
         expect_rows: 4
-        expect_columns: {service: api-gateway}
+        expect_columns: {service: edge-proxy}
     docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
 
   - name: jaeger_operations
@@ -76,7 +76,7 @@ tables:
         service: "{{ filters.service }}"
         "{{ 'span_kind' if env.JAEGER_LEGACY_PARAMS == 'true' else 'spanKind' }}": "{{ filters.span_kind }}"
     filters:
-      - {column: service, required: true, ops: ["=", "in"], description: "Service name (exact)", examples: [order-service]}
+      - {column: service, required: true, ops: ["=", "in"], description: "Service name (exact)", examples: [billing-api]}
       - {column: span_kind, description: "server | client | producer | consumer | internal"}
     response:
       rows_path: "$.operations[*]"
@@ -85,15 +85,15 @@ tables:
       - {name: span_kind, path: spanKind, description: "server | client | producer | consumer | internal"}
       - {name: service, filter_only: true}
     examples:
-      - sql: "SELECT operation, span_kind FROM jaeger_operations WHERE service = 'order-service' ORDER BY operation"
+      - sql: "SELECT operation, span_kind FROM jaeger_operations WHERE service = 'billing-api' ORDER BY operation"
         description: Operations of one service.
         verified: false
     fixtures:
       - file: operations.json
-        filters: {service: order-service}
+        filters: {service: billing-api}
         note: "Built from the OpenAPI schema jaeger.api_v3.GetOperationsResponse {operations: [{name, spanKind}]}."
         expect_rows: 3
-        expect_columns: {operation: handle POST /api/orders, span_kind: server, service: order-service}
+        expect_columns: {operation: handle POST /api/orders, span_kind: server, service: billing-api}
     docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
 
   - name: jaeger_traces
@@ -130,7 +130,7 @@ tables:
           {%- else -%}{{ filters.attributes_filter or '' }}{%- endif -%}
       accept_status: [404]
     filters:
-      - {column: service, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Service name (exact)", examples: [order-service]}
+      - {column: service, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Service name (exact)", examples: [billing-api]}
       - {column: operation, ops: ["=", "in"], description: "Operation / span name (exact)", examples: ["handle POST /api/orders"]}
       - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<=", "between"], description: "Span duration in ms (sent as durationMin / durationMax in seconds, e.g. 0.500000s)", examples: ["500"]}
       - {column: status, description: "'error' sends the attribute filter error=true (Jaeger's error tag)", examples: [error]}
@@ -181,17 +181,17 @@ tables:
           SELECT trace_id, max(duration_ms) AS trace_ms,
                  arg_max(service || ' / ' || name, duration_ms) AS slowest_span
           FROM jaeger_traces
-          WHERE service = 'order-service' AND operation = 'handle POST /api/orders' AND duration_ms > 500
+          WHERE service = 'billing-api' AND operation = 'handle POST /api/orders' AND duration_ms > 500
             AND ts >= now() - INTERVAL 1 HOUR
           GROUP BY trace_id ORDER BY trace_ms DESC LIMIT 10
-        description: Slow checkout traces handled by order-service.
+        description: Slow checkout traces handled by billing-api.
         verified: false
       - sql: >-
           SELECT service, name, http_status_code, status_message, count(*) AS error_spans, any_value(trace_id) AS example_trace
           FROM jaeger_traces
-          WHERE service = 'payment-service' AND status = 'error' AND ts >= now() - INTERVAL 6 HOUR
+          WHERE service = 'ledger-service' AND status = 'error' AND ts >= now() - INTERVAL 6 HOUR
           GROUP BY service, name, http_status_code, status_message ORDER BY error_spans DESC
-        description: Error spans in traces through payment-service (status re-applied to the rows).
+        description: Error spans in traces through ledger-service (status re-applied to the rows).
         verified: false
     fixtures:
       - file: find_traces_otlp_example.json
@@ -200,10 +200,10 @@ tables:
         expect_rows: 1
         expect_columns: {trace_id: 5b8efff798038103d269b633813fc60c, span_id: eee19b7ec3c1b174, parent_span_id: eee19b7ec3c1b173, service: my.service, name: "I'm a server span", kind: server, ts: "2018-12-13T14:51:00Z", duration_ms: 1000.0, status: unset, scope_name: my.library}
       - file: find_traces_checkout.json
-        filters: {service: order-service}
-        note: "Built strictly from the OTLP/JSON encoding (hex ids, SpanKind/StatusCode integers, int64 strings) inside the GRPCGatewayWrapper schema; a webapp -> api-gateway -> order-service -> payment-service checkout trace."
+        filters: {service: billing-api}
+        note: "Built strictly from the OTLP/JSON encoding (hex ids, SpanKind/StatusCode integers, int64 strings) inside the GRPCGatewayWrapper schema; a storefront-web -> edge-proxy -> billing-api -> ledger-service checkout trace."
         expect_rows: 5
-        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, parent_span_id: null, service: webapp, kind: server, status: unset, is_root: true, http_status_code: 500}
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, parent_span_id: null, service: storefront-web, kind: server, status: unset, is_root: true, http_status_code: 500}
     docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
 
   - name: jaeger_trace_summaries
@@ -238,7 +238,7 @@ tables:
           {%- elif hc -%}{{ {'http.status_code': hc | string} | tojson }}
           {%- else -%}{{ filters.attributes_filter or '' }}{%- endif -%}
     filters:
-      - {column: service, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Service name (exact)", examples: [order-service]}
+      - {column: service, required: true, ops: ["=", "in"], max_fan_out: 10, description: "Service name (exact)", examples: [billing-api]}
       - {column: operation, ops: ["=", "in"], description: "Operation / span name (exact)"}
       - {column: duration_ms, type: DOUBLE, ops: [">", ">=", "<", "<=", "between"], description: "A span's duration in ms (durationMin/durationMax match spans, not the trace)"}
       - {column: status, description: "'error' -> attribute filter error=true"}
@@ -273,16 +273,16 @@ tables:
       - sql: >-
           SELECT trace_id, ts, duration_ms, root_name, error_services, span_count
           FROM jaeger_trace_summaries
-          WHERE service = 'order-service' AND status = 'error' AND ts >= now() - INTERVAL 6 HOUR
+          WHERE service = 'billing-api' AND status = 'error' AND ts >= now() - INTERVAL 6 HOUR
           ORDER BY ts DESC
-        description: Recent failing traces through order-service and which services own the errors.
+        description: Recent failing traces through billing-api and which services own the errors.
         verified: false
     fixtures:
       - file: trace_summaries.json
-        filters: {service: order-service}
+        filters: {service: billing-api}
         note: "Built from the OpenAPI schema jaeger.api_v3.FindTraceSummariesResponse / TraceSummary / ServiceSummary (int64 nanos as strings)."
         expect_rows: 2
-        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, ts: "2026-10-20T06:36:18Z", duration_ms: 1000.0, root_service: webapp, root_name: POST /api/orders, span_count: 5, error_count: 3, services: "api-gateway,order-service,payment-service,webapp", error_services: "order-service,payment-service"}
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, ts: "2026-10-20T06:36:18Z", duration_ms: 1000.0, root_service: storefront-web, root_name: POST /api/orders, span_count: 5, error_count: 3, services: "edge-proxy,billing-api,ledger-service,storefront-web", error_services: "billing-api,ledger-service"}
     docs_url: https://github.com/jaegertracing/jaeger-idl/blob/main/swagger/api_v3/query_service.openapi.yaml
 
   - name: jaeger_trace
@@ -359,7 +359,7 @@ tables:
         filters: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736}
         note: "GET /api/v3/traces/{trace_id} returns the same GRPCGatewayWrapper {result: TracesData} shape as FindTraces; OTLP/JSON encoding, schema-built."
         expect_rows: 5
-        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, service: webapp, name: POST /api/orders, duration_ms: 1000.0, is_root: true, http_route: /api/orders, env: prod}
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, service: storefront-web, name: POST /api/orders, duration_ms: 1000.0, is_root: true, http_route: /api/orders, env: prod}
       - file: find_traces_otlp_example.json
         filters: {trace_id: 5b8efff798038103d269b633813fc60c}
         note: "Official OTLP/JSON example (opentelemetry-proto examples/trace.json) in the GRPCGatewayWrapper."
@@ -383,7 +383,7 @@ tables:
         lookback: "{{ time.range_s * 1000 }}"
         service: "{{ filters.service }}"
     filters:
-      - {column: service, description: "Keep only links where this service is parent or child", examples: [order-service]}
+      - {column: service, description: "Keep only links where this service is parent or child", examples: [billing-api]}
     time: {column: ts, default_lookback: 24h, max_window: 30d}
     response:
       rows_path: "$.data[*]"
@@ -397,15 +397,15 @@ tables:
       - "Internal, undocumented API (the UI uses it) - stable in practice but not versioned."
       - "Cassandra / Elasticsearch / OpenSearch deployments return nothing unless the spark-dependencies job runs; empty is then not proof of no calls."
     examples:
-      - sql: "SELECT parent, child, call_count FROM jaeger_dependencies WHERE service = 'order-service' ORDER BY call_count DESC"
-        description: Who order-service calls and who calls it.
+      - sql: "SELECT parent, child, call_count FROM jaeger_dependencies WHERE service = 'billing-api' ORDER BY call_count DESC"
+        description: Who billing-api calls and who calls it.
         verified: false
     fixtures:
       - file: dependencies.json
-        filters: {service: order-service}
+        filters: {service: billing-api}
         note: "Built from the v2.22.0 source (http_handler.go structuredResponse {data,total,limit,offset,errors} with ui.DependencyLink {parent, child, callCount}); the endpoint is internal and has no documented example."
         expect_rows: 2
-        expect_columns: {parent: api-gateway, child: order-service, call_count: 1520, service: order-service}
+        expect_columns: {parent: edge-proxy, child: billing-api, call_count: 1520, service: billing-api}
     docs_url: https://www.jaegertracing.io/docs/latest/architecture/apis/#service-dependencies-graph
 
 roles:

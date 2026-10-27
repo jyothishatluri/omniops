@@ -6,7 +6,7 @@ fixture check falls back to `src/omniops/sources/fixtures/tempo/` because the pr
 Tempo's bodies unchanged.
 
 Use this source when the investigator can reach Grafana but not Tempo directly (Grafana Cloud,
-locked-down networks, the o11y-bench stack). Grafana forwards the request to the Tempo URL of
+locked-down networks, a local Grafana stack). Grafana forwards the request to the Tempo URL of
 the datasource and injects the datasource's own credentials and tenant header.
 
 ## Tables
@@ -42,16 +42,16 @@ Roles: same as `tempo` (`traces`, `trace_detail`, `services`) on the `grafana_te
 |---|---|
 | Grafana service account token (recommended; Viewer with `datasources:query` on the Tempo datasource) | `GRAFANA_TOKEN` -> `Authorization: Bearer ...` |
 | Basic auth (only if enabled in Grafana) | `GRAFANA_USERNAME`, `GRAFANA_PASSWORD` |
-| Anonymous access (o11y-bench: anonymous Admin) | none |
+| Anonymous access (`GF_AUTH_ANONYMOUS_ENABLED=true`) | none |
 | Non-default org | `GRAFANA_ORG_ID` -> `X-Grafana-Org-Id` |
 
 Never send `X-Scope-OrgID` yourself: the tenant comes from the datasource settings.
 
 ## Base URLs
 
-`GRAFANA_URL` = Grafana root (`http://localhost:3000` for o11y-bench, `https://<stack>.grafana.net`
-for Grafana Cloud). `GRAFANA_TEMPO_UID` defaults to `tempo` (the uid provisioned by o11y-bench's
-`docker/datasources.yaml`); find others with `GET /api/datasources`. The uid-based proxy route
+`GRAFANA_URL` = Grafana root (`http://localhost:3000` for a local stack, `https://<stack>.grafana.net`
+for Grafana Cloud). `GRAFANA_TEMPO_UID` defaults to `tempo` (the usual uid of a file-provisioned
+Tempo data source); find others with `GET /api/datasources`. The uid-based proxy route
 exists since Grafana 9.0; the `/api` routes are documented as "legacy" but fully supported.
 
 ## Limits
@@ -59,7 +59,7 @@ exists since Grafana 9.0; the `/api` routes are documented as "legacy" but fully
 - Grafana data proxy timeout: `[dataproxy] timeout` default 30s -> HTTP 502/504 on heavy searches
   or metrics queries; narrow the window or the TraceQL.
 - All Tempo per-query limits apply behind the proxy (see tempo.md): search window 168h, metrics
-  window 24h by default (o11y-bench: 72h for both), `spss` max 100, exemplars max 100.
+  window 24h by default (both configurable per deployment), `spss` max 100, exemplars max 100.
 
 ## Retention / time formats
 

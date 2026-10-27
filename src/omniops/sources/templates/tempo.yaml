@@ -48,7 +48,7 @@ pitfalls:
   - "OpenTelemetry semantic conventions changed: older SDKs emit span.http.method / span.http.status_code / span.http.url, newer ones span.http.request.method / span.http.response.status_code / span.url.full. The http_* columns accept both; inside TraceQL you must use the attribute your services actually emit (check tempo_tag_names)."
   - "TraceQL metrics duration values (quantile_over_time(duration, .99), avg_over_time(duration) ...) are in SECONDS; span/trace search durations in these tables are milliseconds (duration_ms)."
   - "Trace IDs in search results have leading zeros trimmed (Tempo prints 'abc123' for 00000000000abc123); tempo_trace accepts both forms. Compare with ltrim(trace_id, '0') when joining across tables."
-  - "Edge spans (webapp, api-gateway) wrap the backend call and repeat its error/latency: attribute blame to the deepest failing span or the span with the most own (self) time, not to the root."
+  - "Edge spans (storefront-web, edge-proxy) wrap the backend call and repeat its error/latency: attribute blame to the deepest failing span or the span with the most own (self) time, not to the root."
   - "Without a time window Tempo only searches recent data in the live store; the engine always sends start/end (epoch seconds) so the backend blocks are searched too. Tempo keeps 14 days by default (compactor block_retention 336h; Grafana Cloud 30 days) - older windows are simply gone."
   - "HTTP 400 'invalid TraceQL query' means a syntax error: fix the query instead of retrying. HTTP 400 'range specified ... exceeds the maximum' means the window is longer than the query frontend allows (search 168h, metrics 24h by default)."
 tables:
@@ -97,8 +97,8 @@ tables:
         description: >-
           TraceQL search query (spanset filter / pipeline, not a metrics query). Default { } (any
           span). The other pushdown filters are AND-ed onto the matched spans.
-        examples: ['{ resource.service.name = "order-service" && status = error }']
-      - {column: service, ops: ["=", "in"], description: "resource.service.name of a matched span (pushed into TraceQL)", examples: [order-service]}
+        examples: ['{ resource.service.name = "billing-api" && status = error }']
+      - {column: service, ops: ["=", "in"], description: "resource.service.name of a matched span (pushed into TraceQL)", examples: [billing-api]}
       - {column: name, ops: ["=", "in"], description: "Span name of a matched span (exact; use query with name =~ for regex)", examples: ["handle POST /api/orders"]}
       - {column: status, description: "Status of a matched span: error | ok | unset", examples: [error]}
       - {column: kind, description: "Kind of a matched span: server | client | producer | consumer | internal", examples: [server]}
@@ -175,9 +175,9 @@ tables:
         expect_columns: {trace_id: d6e9329d67b6146a, root_service: frontend, root_name: /cart, duration_ms: 611.0, matched: 0}
       - file: search_selected_spans.json
         filters: {query: '{ span.http.route = "/api/orders" && status = error }'}
-        note: "Built strictly from the tempo.proto SearchResponse schema (TraceSearchMetadata with spanSets and serviceStats, Span with name/attributes) as the query frontend serialises it with jsonpb (uint64 as strings, zero errorCount omitted); same shape as the /api/search payload in o11y-bench grading tests."
+        note: "Built strictly from the tempo.proto SearchResponse schema (TraceSearchMetadata with spanSets and serviceStats, Span with name/attributes) as the query frontend serialises it with jsonpb (uint64 as strings, zero errorCount omitted)."
         expect_rows: 2
-        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, root_service: webapp, root_name: POST /api/orders, duration_ms: 1800.0, matched: 2, span_count: 9, error_count: 2, services: "api-gateway,order-service,payment-service,webapp", error_services: "order-service,payment-service"}
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, root_service: storefront-web, root_name: POST /api/orders, duration_ms: 1800.0, matched: 2, span_count: 9, error_count: 2, services: "billing-api,edge-proxy,ledger-service,storefront-web", error_services: "billing-api,ledger-service"}
     docs_url: https://grafana.com/docs/tempo/latest/api_docs/#search
 
   - name: tempo_search_spans
@@ -228,7 +228,7 @@ tables:
           TraceQL search query; the matched (right-hand) spans become rows. Default { }. Use
           structural operators to get downstream spans: { name = "handle POST /api/orders" } > { }.
         examples: ['{ name =~ "handle POST /api/(orders|payments)" && duration > 300ms }']
-      - {column: service, ops: ["=", "in"], description: "resource.service.name of the span (pushed into TraceQL)", examples: [payment-service]}
+      - {column: service, ops: ["=", "in"], description: "resource.service.name of the span (pushed into TraceQL)", examples: [ledger-service]}
       - {column: name, ops: ["=", "in"], description: "Exact span name (pushed into TraceQL)", examples: ["handle POST /api/payments"]}
       - {column: status, description: "error | ok | unset (pushed into TraceQL)", examples: [error]}
       - {column: kind, description: "server | client | producer | consumer | internal (pushed into TraceQL)", examples: [server]}
@@ -294,10 +294,10 @@ tables:
       - sql: >-
           SELECT name, service, count(*) AS calls, round(median(duration_ms), 1) AS p50_ms, round(quantile_cont(duration_ms, 0.95), 1) AS p95_ms
           FROM tempo_search_spans
-          WHERE query = '{ resource.service.name = "order-service" && name = "handle POST /api/orders" } > { }'
+          WHERE query = '{ resource.service.name = "billing-api" && name = "handle POST /api/orders" } > { }'
             AND ts >= now() - INTERVAL 6 HOUR
           GROUP BY name, service ORDER BY p95_ms DESC
-        description: What order-service calls underneath checkout (direct children) and how long each call takes.
+        description: What billing-api calls underneath checkout (direct children) and how long each call takes.
         verified: false
     fixtures:
       - file: search_traceql.json
@@ -309,7 +309,7 @@ tables:
         filters: {query: '{ span.http.route = "/api/orders" && status = error }'}
         note: "Built from the tempo.proto SearchResponse/Span schema with the attributes a select(...) returns (service.name, kind, status, http.*)."
         expect_rows: 3
-        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: order-service, name: handle POST /api/orders, kind: server, status: error, http_route: /api/orders, http_method: POST, http_status_code: 500, duration_ms: 1296.0, matched: 2, trace_duration_ms: 1800.0}
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: billing-api, name: handle POST /api/orders, kind: server, status: error, http_route: /api/orders, http_method: POST, http_status_code: 500, duration_ms: 1296.0, matched: 2, trace_duration_ms: 1800.0}
     docs_url: https://grafana.com/docs/tempo/latest/api_docs/#search
 
   - name: tempo_trace
@@ -428,9 +428,9 @@ tables:
     fixtures:
       - file: trace_v2.json
         filters: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736}
-        note: "The docs give no example body for /api/v2/traces; built strictly from the tempo.proto TraceByIDResponse schema (trace.resourceSpans per the OpenTelemetry trace.proto) as Tempo's query frontend writes it with gogo jsonpb: base64 span ids, SPAN_KIND_*/STATUS_CODE_* enum names, nanosecond strings. Trace layout mirrors the o11y-bench grading-test checkout trace (webapp -> api-gateway -> order-service -> payment-service)."
+        note: "The docs give no example body for /api/v2/traces; built strictly from the tempo.proto TraceByIDResponse schema (trace.resourceSpans per the OpenTelemetry trace.proto) as Tempo's query frontend writes it with gogo jsonpb: base64 span ids, SPAN_KIND_*/STATUS_CODE_* enum names, nanosecond strings. Trace layout is an illustrative checkout trace (storefront-web -> edge-proxy -> billing-api -> ledger-service)."
         expect_rows: 5
-        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, parent_span_id: null, service: webapp, name: POST /api/orders, kind: server, ts: "2026-10-20T06:36:18Z", duration_ms: 1000.0, status: unset, is_root: true, http_route: /api/orders, http_method: POST, http_status_code: 500, env: prod, version: "1.4.2", response_status: COMPLETE}
+        expect_columns: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: aaaaaaaaaaaaaaaa, parent_span_id: null, service: storefront-web, name: POST /api/orders, kind: server, ts: "2026-10-20T06:36:18Z", duration_ms: 1000.0, status: unset, is_root: true, http_route: /api/orders, http_method: POST, http_status_code: 500, env: prod, version: "1.4.2", response_status: COMPLETE}
     docs_url: https://grafana.com/docs/tempo/latest/api_docs/#query-v2
 
   - name: tempo_trace_attributes
@@ -477,7 +477,7 @@ tables:
         filters: {trace_id: 4bf92f3577b34da6a3ce929d0e0e4736}
         note: "Same schema-built /api/v2/traces body as tempo_trace (see that fixture note)."
         expect_rows: 16
-        expect_columns: {span_id: aaaaaaaaaaaaaaaa, service: webapp, name: POST /api/orders, key: http.route, value: /api/orders, value_type: string}
+        expect_columns: {span_id: aaaaaaaaaaaaaaaa, service: storefront-web, name: POST /api/orders, key: http.route, value: /api/orders, value_type: string}
     docs_url: https://grafana.com/docs/tempo/latest/api_docs/#query-v2
 
   - name: tempo_metrics_range
@@ -522,9 +522,10 @@ tables:
       - {name: step, type: BIGINT, filter_only: true}
     pitfalls:
       - "Durations (quantile_over_time(duration, ...), avg_over_time(duration) ...) are SECONDS: multiply by 1000 for ms."
+      - "quantile_over_time() is computed from power-of-two (log2) duration buckets, so a p95/p99 is approximate and can be off by up to 2x (one bucket width). Use it to compare and rank; when an exact number matters, compute it from span durations over the same window (tempo_search_spans duration_ms, within its sampling limits) and say which you report."
       - "count_over_time() counts spans per step, rate() is spans per second; for one total over the window use tempo_metrics_instant."
       - "Range is capped by query_frontend.metrics.max_duration (24h by default) - longer windows are clamped to the most recent 24h here."
-      - "Spans with errors only on the edge (webapp/api-gateway) are relays; group by resource.service.name and compare with kind = server."
+      - "Spans with errors only on the edge (storefront-web/edge-proxy) are relays; group by resource.service.name and compare with kind = server."
     examples:
       - sql: >-
           SELECT service, max(value) AS peak_errors_per_s, arg_max(ts, value) AS peak_at
@@ -547,7 +548,7 @@ tables:
         filters: {query: '{ span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)'}
         note: "The docs give no example body for /api/metrics/query_range; built strictly from tempo.proto QueryRangeResponse (series[].labels KeyValue, samples[].timestampMs as int64 string, value double, metrics) in jsonpb encoding; the second sample of the first series has value 0, which jsonpb omits."
         expect_rows: 5
-        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 1.296, service: order-service, p: 0.99, series: "order-service, 0.99"}
+        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 1.296, service: billing-api, p: 0.99, series: "billing-api, 0.99"}
     docs_url: https://grafana.com/docs/tempo/latest/api_docs/#traceql-metrics
 
   - name: tempo_metrics_instant
@@ -585,6 +586,7 @@ tables:
       - {name: ts, type: TIMESTAMP, filter_only: true, description: "Window bounds (predicate only)"}
     pitfalls:
       - "Durations are in SECONDS (value * 1000 = ms)."
+      - "quantile_over_time() is computed from power-of-two (log2) duration buckets, so a p95/p99 is approximate and can be off by up to 2x (one bucket width). Use it to compare and rank; when an exact number matters, compute it from span durations over the same window (tempo_search_spans duration_ms, within its sampling limits) and say which you report."
       - "rate() is averaged over the window; count_over_time() gives the total span count over the window."
       - "Window capped at 24h by default (query_frontend.metrics.max_duration)."
     examples:
@@ -613,9 +615,9 @@ tables:
     fixtures:
       - file: metrics_query_instant.json
         filters: {query: '{ span.http.route = "/api/orders" } | quantile_over_time(duration, .99) by (resource.service.name)'}
-        note: "The docs give no example body for /api/metrics/query; built from tempo.proto QueryInstantResponse (series[].labels, value, metrics) - identical in shape to the payload used in the o11y-bench grading tests."
+        note: "The docs give no example body for /api/metrics/query; built from tempo.proto QueryInstantResponse (series[].labels, value, metrics)."
         expect_rows: 2
-        expect_columns: {value: 7.32, service: order-service, p: 0.99, series: "order-service, 0.99", response_status: COMPLETE}
+        expect_columns: {value: 7.32, service: billing-api, p: 0.99, series: "billing-api, 0.99", response_status: COMPLETE}
     docs_url: https://grafana.com/docs/tempo/latest/api_docs/#instant
 
   - name: tempo_metrics_exemplars
@@ -671,7 +673,7 @@ tables:
         filters: {query: '{ span.http.route = "/api/orders" && kind = server } | quantile_over_time(duration, .99) by (resource.service.name)'}
         note: "Schema-built QueryRangeResponse (tempo.proto Exemplar: labels, value, timestampMs) - see tempo_metrics_range."
         expect_rows: 2
-        expect_columns: {ts: "2026-10-01T11:01:00Z", value: 1.41, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: order-service}
+        expect_columns: {ts: "2026-10-01T11:01:00Z", value: 1.41, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: billing-api}
     docs_url: https://grafana.com/docs/tempo/latest/api_docs/#traceql-metrics
 
   - name: tempo_tag_names
@@ -694,7 +696,7 @@ tables:
         limit: "{{ filters.tag_limit }}"
     filters:
       - {column: scope, description: "resource | span | intrinsic | event | link | instrumentation (default all)", examples: [span]}
-      - {column: query, description: "Single spanset filter, e.g. { resource.service.name = \"order-service\" }"}
+      - {column: query, description: "Single spanset filter, e.g. { resource.service.name = \"billing-api\" }"}
       - {column: tag_limit, type: BIGINT, description: "Max names per scope"}
     time: {column: ts, default_lookback: 24h, max_window: 168h}
     response:
@@ -761,7 +763,7 @@ tables:
         verified: false
       - sql: >-
           SELECT value AS route FROM tempo_tag_values
-          WHERE tag = 'span.http.route' AND query = '{ resource.service.name = "order-service" }'
+          WHERE tag = 'span.http.route' AND query = '{ resource.service.name = "billing-api" }'
         description: Routes served by one service.
         verified: false
     fixtures:

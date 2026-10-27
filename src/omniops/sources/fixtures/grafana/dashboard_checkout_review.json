@@ -23,16 +23,16 @@
             "uid": "loki"
           },
           "enable": true,
-          "titleFormat": "{{ service }} {{ version }}",
+          "titleFormat": "{{ service_name }} {{ version }}",
           "textFormat": "{{ message }}",
-          "expr": "{job=\"payment-service\"} | json | event=\"deployment\""
+          "expr": "{service_name=\"checkout\"} | json | event=\"deploy\""
         }
       ]
     },
     "panels": [
       {
         "id": 1,
-        "title": "User P95 Latency",
+        "title": "P95 Latency",
         "type": "timeseries",
         "gridPos": {
           "h": 8,
@@ -46,14 +46,14 @@
         },
         "targets": [
           {
-            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"user-service\"}[5m])) by (le))",
+            "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"checkout\"}[$__rate_interval])))",
             "refId": "A"
           }
         ]
       },
       {
         "id": 2,
-        "title": "Cache Lag",
+        "title": "Peak Memory",
         "type": "stat",
         "gridPos": {
           "h": 8,
@@ -65,16 +65,25 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ]
+          }
+        },
         "targets": [
           {
-            "expr": "max_over_time(service_retry_queue_depth{job=\"payment-service\"}[$__range])",
+            "expr": "max(max_over_time(process_resident_memory_bytes{job=\"checkout\"}[$__range]))",
+            "instant": true,
+            "range": false,
             "refId": "A"
           }
         ]
       },
       {
         "id": 3,
-        "title": "Warning Logs",
+        "title": "Error Logs",
         "type": "logs",
         "gridPos": {
           "h": 8,
@@ -88,20 +97,20 @@
         },
         "targets": [
           {
-            "expr": "{job=\"payment-service\",level=\"warn\"} | json",
+            "expr": "{service_name=\"checkout\"} | json | level=\"error\"",
             "refId": "A"
           }
         ]
       }
     ],
-    "uid": "user-access-cache-review",
-    "title": "User Access Cache Review"
+    "uid": "checkout-review",
+    "title": "Checkout Review"
   },
   "meta": {
     "isStarred": false,
-    "url": "/d/user-access-cache-review/user-access-cache-review",
+    "url": "/d/checkout-review/checkout-review",
     "folderId": 0,
     "folderUid": "",
-    "slug": "user-access-cache-review"
+    "slug": "checkout-review"
   }
 }

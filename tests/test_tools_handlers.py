@@ -106,7 +106,9 @@ async def test_run_sql_returns_evidence_id_and_records_everything(ctx: RunContex
 
     out = await call(t, "run_sql", sql=RANGE_SQL, purpose="api up over the incident window")
     assert not out.is_error and out.evidence_id == "E1"
-    assert out.content.startswith("E1 | [result] ")
+    header, body = out.content.split("\n", 1)
+    assert header == f"E1 | purpose: api up over the incident window | sql: {RANGE_SQL}"
+    assert body.startswith("[result] ")
     assert "[digest]" in out.content and "onset" in out.content
     rec = ctx.board.get("E1")
     assert rec is not None and rec.meaningful and rec.confidence == 1.0
@@ -121,6 +123,33 @@ async def test_run_sql_returns_evidence_id_and_records_everything(ctx: RunContex
 
     out2 = await call(t, "run_sql", sql=RANGE_SQL.replace("'up'", "'process_up'"), purpose="second")
     assert out2.evidence_id == "E2" and ctx.board.meaningful_count() == 2
+
+
+@respx.mock
+async def test_run_sql_header_echoes_purpose_and_a_shortened_query(ctx: RunContext) -> None:
+    """Results map back to their queries without re-running them: the header line carries the purpose and
+    the query (one line, cut to ~160 chars keeping the table and the trailing window)."""
+    respx.get(f"{PROM}/query_range").mock(side_effect=lambda r: httpx.Response(200, json=_matrix(dict(r.url.params))))
+    t = tools_by_name(build_tools(ctx))
+    long_sql = ("SELECT ts, labels->>'job' AS job, value\nFROM prometheus_query_range\n"
+                "WHERE query = 'sum by (job) (rate(http_server_requests_seconds_count{status=~\"5..\"}[5m]))'\n"
+                "  AND ts >= now() - INTERVAL 2 HOUR AND ts < now() - INTERVAL 1 HOUR\nORDER BY ts DESC")
+    purpose = "5xx request rate per job in the hour before the alert, " * 5
+    out = await call(t, "run_sql", sql=long_sql, purpose=purpose)
+    assert not out.is_error and out.evidence_id == "E1"
+    header, body = out.content.split("\n", 1)
+    eid, said_purpose, said_sql = header.split(" | ", 2)
+    assert eid == "E1" and body.startswith("[result] ")
+    assert said_purpose.startswith("purpose: 5xx request rate per job in the hour before the alert,")
+    assert said_purpose.endswith(" ...") and len(said_purpose) <= len("purpose: ") + 160
+    assert said_sql.startswith("sql: SELECT ts, labels->>'job' AS job, value FROM prometheus_query_range WHERE")
+    assert said_sql.endswith("INTERVAL 1 HOUR ORDER BY ts DESC") and " ... " in said_sql
+    assert "\n" not in said_sql and len(said_sql) <= len("sql: ") + 160
+    rec = ctx.board.get("E1")
+    assert rec is not None and rec.title == purpose.strip()    # the evidence record keeps the full purpose
+
+    short = await call(t, "run_sql", sql=RANGE_SQL, purpose="")
+    assert short.content.split("\n", 1)[0] == f"{short.evidence_id} | sql: {RANGE_SQL}"
 
 
 @respx.mock

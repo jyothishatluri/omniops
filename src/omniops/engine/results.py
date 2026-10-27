@@ -66,6 +66,8 @@ class QueryResult:
     links: list[dict[str, str]] = field(default_factory=list)
     requests: list[dict[str, Any]] = field(default_factory=list)
     windows: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Per table label: what the window's step-sized buckets actually cover (effective step, span).
+    window_notes: dict[str, str] = field(default_factory=dict)
     elapsed_ms: int = 0
     empty_verdict: str | None = None  # "absent" | "inconclusive" | None
     staged_write: dict[str, Any] | None = None
@@ -89,7 +91,8 @@ class QueryResult:
         head = [f"[result] {self.total_rows} row(s) x {len(self.columns)} col(s) from {', '.join(self.tables) or 'sql'}"
                 f" in {self.elapsed_ms} ms"]
         for t, (s, e) in self.windows.items():
-            head.append(f"[window] {t}: {s} -> {e}")
+            note = self.window_notes.get(t)
+            head.append(f"[window] {t}: {s} -> {e}" + (f"; {note}" if note else ""))
         if self.staged_write:
             head.append(f"[staged write] {self.staged_write.get('summary', '')} - awaiting human approval in Slack")
         for n in self.notes:
@@ -181,6 +184,24 @@ class QueryResult:
             keep.add(int(k))
             k += step
         return sorted(keep)[:n]
+
+
+_PLAIN_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def nonfinite_notes(columns: list[str], types: list[str], rows: list[tuple[Any, ...]]) -> list[str]:
+    """Say where NaN/Inf hide: DuckDB sorts NaN above every number, so an unseen NaN becomes the max()
+    or the first row of ORDER BY ... DESC (0/0 ratios, quantiles over empty buckets)."""
+    out = []
+    for i, (col, typ) in enumerate(zip(columns, types)):
+        if not _is_num(typ):
+            continue
+        n = sum(1 for r in rows if isinstance(r[i], float) and not math.isfinite(r[i]))
+        if n:
+            ref = col if _PLAIN_IDENT.match(col) else '"' + col.replace('"', '""') + '"'
+            out.append(f"{n} NaN/Inf value(s) in {col}; filter with isfinite({ref}) (DuckDB sorts NaN above "
+                       "every number, so max() and ORDER BY ... DESC pick it)")
+    return out
 
 
 # ---------------------------------------------------------------------------------------------

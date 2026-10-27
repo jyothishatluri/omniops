@@ -1,13 +1,13 @@
 {
   "data": [
     {
-      "parent": "api-gateway",
-      "child": "order-service",
+      "parent": "edge-proxy",
+      "child": "billing-api",
       "callCount": 1520
     },
     {
-      "parent": "order-service",
-      "child": "payment-service",
+      "parent": "billing-api",
+      "child": "ledger-service",
       "callCount": 1498
     }
   ],

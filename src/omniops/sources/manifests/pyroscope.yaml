@@ -40,7 +40,7 @@ rate_limit:
 retention: {}
 query_languages:
   pyroscope_selector: >-
-    Label selector in Prometheus syntax: {service_name="order-service", namespace="shop"};
+    Label selector in Prometheus syntax: {service_name="billing-api", namespace="shop"};
     =, !=, =~, !~ are supported; {} selects everything. The profile type is NOT part of the
     selector here - set profile_type to an ID from pyroscope_profile_types, e.g.
     process_cpu:cpu:nanoseconds:cpu:nanoseconds (CPU), memory:alloc_space:bytes:space:bytes
@@ -111,7 +111,7 @@ tables:
         start: "{{ time.start | epoch_ms }}"
         end: "{{ time.end | epoch_ms }}"
     filters:
-      - {column: service, description: "Only labels on profiles of this service_name", examples: [order-service]}
+      - {column: service, description: "Only labels on profiles of this service_name", examples: [billing-api]}
       - {column: label_selector, description: "Label selector, e.g. {namespace=\"shop\"} (wins over service)"}
     time: {column: ts, default_lookback: 24h, max_window: 24h}
     response:
@@ -122,15 +122,15 @@ tables:
       - {name: label_selector, filter_only: true}
       - {name: ts, type: TIMESTAMP, filter_only: true}
     examples:
-      - sql: "SELECT label FROM pyroscope_label_names WHERE service = 'order-service' AND label NOT LIKE '\\_\\_%' ESCAPE '\\' ORDER BY label"
+      - sql: "SELECT label FROM pyroscope_label_names WHERE service = 'billing-api' AND label NOT LIKE '\\_\\_%' ESCAPE '\\' ORDER BY label"
         description: Which labels (pod, version, region ...) a service's profiles can be grouped by.
         verified: false
     fixtures:
       - file: label_names.json
-        filters: {service: order-service}
+        filters: {service: billing-api}
         note: "Built from types.proto LabelNamesResponse {names: [string]} (the docs show only the request)."
         expect_rows: 10
-        expect_columns: {label: __name__, service: order-service}
+        expect_columns: {label: __name__, service: billing-api}
     docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierservicelabelnames
 
   - name: pyroscope_label_values
@@ -152,7 +152,7 @@ tables:
         end: "{{ time.end | epoch_ms }}"
     filters:
       - {column: label, required: true, ops: ["=", "in"], description: "Label name, e.g. service_name, pod, service_version, namespace", examples: [service_name]}
-      - {column: service, description: "Only values on profiles of this service_name", examples: [order-service]}
+      - {column: service, description: "Only values on profiles of this service_name", examples: [billing-api]}
       - {column: label_selector, description: "Label selector (wins over service)"}
     time: {column: ts, default_lookback: 24h, max_window: 24h}
     response:
@@ -167,7 +167,7 @@ tables:
       - sql: "SELECT value AS service FROM pyroscope_label_values WHERE label = 'service_name' ORDER BY 1"
         description: Every service that sends profiles.
         verified: false
-      - sql: "SELECT value AS version FROM pyroscope_label_values WHERE label = 'service_version' AND service = 'order-service'"
+      - sql: "SELECT value AS version FROM pyroscope_label_values WHERE label = 'service_version' AND service = 'billing-api'"
         description: Which versions of a service were profiled in the window (deploy overlap).
         verified: false
     fixtures:
@@ -175,7 +175,7 @@ tables:
         filters: {label: service_name}
         note: "Built from types.proto LabelValuesResponse {names: [string]} (the docs show only the request)."
         expect_rows: 3
-        expect_columns: {value: api-gateway, label: service_name}
+        expect_columns: {value: edge-proxy, label: service_name}
     docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierservicelabelvalues
 
   - name: pyroscope_series
@@ -198,7 +198,7 @@ tables:
         start: "{{ time.start | epoch_ms }}"
         end: "{{ time.end | epoch_ms }}"
     filters:
-      - {column: service, ops: ["=", "in"], description: "service_name", examples: [order-service]}
+      - {column: service, ops: ["=", "in"], description: "service_name", examples: [billing-api]}
       - {column: label_selector, description: "Label selector (wins over service)"}
       - {column: label_names, description: "Comma-separated label names to return (default all)"}
     time: {column: ts, default_lookback: 1h, max_window: 24h}
@@ -217,16 +217,16 @@ tables:
     examples:
       - sql: >-
           SELECT version, count(DISTINCT pod) AS pods
-          FROM pyroscope_series WHERE service = 'order-service' AND profile_type = 'process_cpu:cpu:nanoseconds:cpu:nanoseconds'
+          FROM pyroscope_series WHERE service = 'billing-api' AND profile_type = 'process_cpu:cpu:nanoseconds:cpu:nanoseconds'
           GROUP BY version
         description: How many pods of each version were sending CPU profiles (mid-rollout check).
         verified: false
     fixtures:
       - file: series.json
-        filters: {service: order-service}
+        filters: {service: billing-api}
         note: "Built from querier.proto SeriesResponse {labels_set: [types.v1.Labels {labels: [LabelPair {name, value}]}]} in protojson encoding (the docs show only the request)."
         expect_rows: 2
-        expect_columns: {service: order-service, profile_type: "process_cpu:cpu:nanoseconds:cpu:nanoseconds", pod: order-service-7d9f8c6b5-x2x9q, namespace: shop, version: "1.4.2"}
+        expect_columns: {service: billing-api, profile_type: "process_cpu:cpu:nanoseconds:cpu:nanoseconds", pod: billing-api-7d9f8c6b5-x2x9q, namespace: shop, version: "1.4.2"}
     docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierserviceseries
 
   - name: pyroscope_select_series
@@ -253,9 +253,9 @@ tables:
         aggregation: "{{ 'TIME_SERIES_AGGREGATION_TYPE_AVERAGE' if (filters.aggregation or '') | lower in ['avg', 'average'] else 'TIME_SERIES_AGGREGATION_TYPE_SUM' }}"
         limit: "{{ filters.series_limit }}"
     filters:
-      - {column: service, ops: ["=", "in"], description: "service_name (pushed into labelSelector)", examples: [order-service]}
+      - {column: service, ops: ["=", "in"], description: "service_name (pushed into labelSelector)", examples: [billing-api]}
       - {column: profile_type, description: "Profile type ID (default process_cpu:cpu:nanoseconds:cpu:nanoseconds)", examples: ["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]}
-      - {column: label_selector, description: "Full label selector, e.g. {service_name=\"order-service\", namespace=\"shop\"} (wins over service)"}
+      - {column: label_selector, description: "Full label selector, e.g. {service_name=\"billing-api\", namespace=\"shop\"} (wins over service)"}
       - {column: group_by, description: "Comma-separated labels to group by (default service_name), e.g. pod or service_version", examples: [pod]}
       - {column: step, type: DOUBLE, description: "Step in seconds (default: ~300 points over the window)"}
       - {column: aggregation, description: "sum (default) | average - how profiles within a step combine"}
@@ -284,7 +284,7 @@ tables:
       - sql: >-
           SELECT service, ts, round(value / 1e9 / 60, 2) AS cpu_cores
           FROM pyroscope_select_series
-          WHERE service IN ('order-service', 'payment-service') AND step = 60
+          WHERE service IN ('billing-api', 'ledger-service') AND step = 60
             AND ts BETWEEN TIMESTAMP '2026-10-01 10:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
           ORDER BY service, ts
         description: CPU cores used per minute by two services around an incident.
@@ -292,24 +292,24 @@ tables:
       - sql: >-
           SELECT labels->>'service_version' AS version, round(avg(value) / 1e9 / 60, 2) AS avg_cores
           FROM pyroscope_select_series
-          WHERE service = 'order-service' AND group_by = 'service_version' AND step = 60 AND ts >= now() - INTERVAL 6 HOUR
+          WHERE service = 'billing-api' AND group_by = 'service_version' AND step = 60 AND ts >= now() - INTERVAL 6 HOUR
           GROUP BY 1 ORDER BY avg_cores DESC
         description: CPU per version of a service (did the new release burn more CPU?).
         verified: false
       - sql: >-
           SELECT labels->>'pod' AS pod, max(value) AS peak_bytes
           FROM pyroscope_select_series
-          WHERE service = 'order-service' AND profile_type = 'memory:inuse_space:bytes:space:bytes' AND group_by = 'pod'
+          WHERE service = 'billing-api' AND profile_type = 'memory:inuse_space:bytes:space:bytes' AND group_by = 'pod'
             AND aggregation = 'average' AND ts >= now() - INTERVAL 3 HOUR
           GROUP BY 1 ORDER BY peak_bytes DESC
         description: Heap in use per pod (memory leak / OOM suspect).
         verified: false
     fixtures:
       - file: select_series.json
-        filters: {service: order-service}
+        filters: {service: billing-api}
         note: "The docs show only the request; built strictly from querier.proto SelectSeriesResponse {series: [types.v1.Series {labels: [LabelPair], points: [Point {value double, timestamp int64}]}]} in protojson (int64 timestamps as strings; the third point has value 0, which protojson omits)."
         expect_rows: 5
-        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 4200000000.0, service: order-service, series: order-service}
+        expect_columns: {ts: "2026-10-01T11:00:00Z", value: 4200000000.0, service: billing-api, series: billing-api}
     docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierserviceselectseries
 
   - name: pyroscope_exemplars
@@ -333,7 +333,7 @@ tables:
         step: "{{ ((filters.step or time.step_s) | float) }}"
         exemplarType: "{{ 'EXEMPLAR_TYPE_SPAN' if (filters.exemplar_type or '') | lower == 'span' else 'EXEMPLAR_TYPE_INDIVIDUAL' }}"
     filters:
-      - {column: service, ops: ["=", "in"], description: "service_name (pushed into labelSelector)", examples: [order-service]}
+      - {column: service, ops: ["=", "in"], description: "service_name (pushed into labelSelector)", examples: [billing-api]}
       - {column: profile_type, description: "Profile type ID (default CPU)"}
       - {column: label_selector, description: "Full label selector (wins over service)"}
       - {column: group_by, description: "Comma-separated labels to group by (default service_name)"}
@@ -369,16 +369,16 @@ tables:
       - sql: >-
           SELECT ts, value / 1e9 AS cpu_s, pod, trace_id, span_id
           FROM pyroscope_exemplars
-          WHERE service = 'order-service' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          WHERE service = 'billing-api' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
           ORDER BY value DESC LIMIT 10
         description: The heaviest individual CPU profiles in a spike, with the trace/span to open.
         verified: false
     fixtures:
       - file: select_series_exemplars.json
-        filters: {service: order-service}
+        filters: {service: billing-api}
         note: "Built strictly from querier.proto SelectSeriesResponse with types.v1.Point.exemplars (types.v1.Exemplar {timestamp, profile_id, span_id, value int64, labels, trace_id}) in protojson encoding; field values follow the proto's documented examples."
         expect_rows: 2
-        expect_columns: {ts: "2026-10-01T11:01:03Z", value: 2450000000.0, profile_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: order-service, pod: order-service-7d9f8c6b5-x2x9q, point_value: 4650000000.0}
+        expect_columns: {ts: "2026-10-01T11:01:03Z", value: 2450000000.0, profile_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7, trace_id: 4bf92f3577b34da6a3ce929d0e0e4736, span_id: 00f067aa0ba902b7, service: billing-api, pod: billing-api-7d9f8c6b5-x2x9q, point_value: 4650000000.0}
     docs_url: https://grafana.com/docs/pyroscope/latest/reference-server-api/#querierv1querierserviceselectseries
 
   - name: pyroscope_top_functions
@@ -395,8 +395,8 @@ tables:
     kind: profiles
     python: "omniops.sources.python.pyroscope:top_functions"
     filters:
-      - {column: service, ops: ["=", "in"], description: "service_name (builds {service_name=\"...\"})", examples: [order-service]}
-      - {column: label_selector, description: "Full label selector (wins over service), e.g. {service_name=\"order-service\", pod=\"order-service-7d9f8c6b5-x2x9q\"}"}
+      - {column: service, ops: ["=", "in"], description: "service_name (builds {service_name=\"...\"})", examples: [billing-api]}
+      - {column: label_selector, description: "Full label selector (wins over service), e.g. {service_name=\"billing-api\", pod=\"billing-api-7d9f8c6b5-x2x9q\"}"}
       - {column: profile_type, description: "Profile type ID (default process_cpu:cpu:nanoseconds:cpu:nanoseconds)", examples: ["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]}
       - {column: span_id, ops: ["=", "in"], fan_out: false, description: "Span id(s), 16 hex chars (spanSelector)"}
       - {column: trace_id, ops: ["=", "in"], fan_out: false, description: "Trace id(s), 32 hex chars (traceIdSelector)"}
@@ -429,21 +429,21 @@ tables:
       - sql: >-
           SELECT function, round(self_pct, 1) AS self_pct, round(total_pct, 1) AS total_pct
           FROM pyroscope_top_functions
-          WHERE service = 'order-service' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
+          WHERE service = 'billing-api' AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
           ORDER BY self DESC LIMIT 15
         description: Hottest functions (CPU) of a service during the incident window.
         verified: false
       - sql: >-
           SELECT function, round(total_pct, 1) AS total_pct, round(self_pct, 1) AS self_pct
           FROM pyroscope_top_functions
-          WHERE service = 'order-service' AND profile_type = 'memory:alloc_space:bytes:space:bytes' AND ts >= now() - INTERVAL 1 HOUR
+          WHERE service = 'billing-api' AND profile_type = 'memory:alloc_space:bytes:space:bytes' AND ts >= now() - INTERVAL 1 HOUR
           ORDER BY total DESC LIMIT 15
         description: Which code paths allocate the most memory.
         verified: false
       - sql: >-
           SELECT function, round(self / 1e6, 1) AS self_ms, round(self_pct, 1) AS self_pct
           FROM pyroscope_top_functions
-          WHERE service = 'order-service' AND span_id = '00f067aa0ba902b7' AND ts >= now() - INTERVAL 1 HOUR
+          WHERE service = 'billing-api' AND span_id = '00f067aa0ba902b7' AND ts >= now() - INTERVAL 1 HOUR
           ORDER BY self DESC LIMIT 10
         description: What CPU one slow span (from tempo_trace) spent its time on.
         verified: false
@@ -463,9 +463,9 @@ tables:
     kind: profiles
     python: "omniops.sources.python.pyroscope:diff_functions"
     filters:
-      - {column: service, ops: ["=", "in"], description: "service_name for both sides (unless label_selector / baseline_selector are given)", examples: [order-service]}
+      - {column: service, ops: ["=", "in"], description: "service_name for both sides (unless label_selector / baseline_selector are given)", examples: [billing-api]}
       - {column: label_selector, description: "Current-side label selector (wins over service)"}
-      - {column: baseline_selector, description: "Baseline-side selector (default: same as current), e.g. {service_name=\"order-service\", service_version=\"1.4.2\"}"}
+      - {column: baseline_selector, description: "Baseline-side selector (default: same as current), e.g. {service_name=\"billing-api\", service_version=\"1.4.2\"}"}
       - {column: baseline_offset, description: "How far back the baseline window is shifted: '1h', '24h', '7d', '0s' (default = window length)", examples: [24h]}
       - {column: profile_type, description: "Profile type ID (default CPU)"}
       - {column: max_nodes, type: BIGINT, description: "Node budget per side (default 8192)"}
@@ -504,7 +504,7 @@ tables:
       - sql: >-
           SELECT function, baseline_self_pct, current_self_pct, self_pct_change
           FROM pyroscope_diff_functions
-          WHERE service = 'order-service' AND baseline_offset = '24h'
+          WHERE service = 'billing-api' AND baseline_offset = '24h'
             AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 11:30:00'
           ORDER BY abs(self_pct_change) DESC LIMIT 15
         description: Which functions got hotter during the incident compared with the same time yesterday.
@@ -512,8 +512,8 @@ tables:
       - sql: >-
           SELECT function, baseline_total_pct, current_total_pct, total_pct_change
           FROM pyroscope_diff_functions
-          WHERE label_selector = '{service_name="order-service", service_version="1.4.3"}'
-            AND baseline_selector = '{service_name="order-service", service_version="1.4.2"}'
+          WHERE label_selector = '{service_name="billing-api", service_version="1.4.3"}'
+            AND baseline_selector = '{service_name="billing-api", service_version="1.4.2"}'
             AND baseline_offset = '0s' AND ts >= now() - INTERVAL 1 HOUR
           ORDER BY total_pct_change DESC LIMIT 15
         description: New release vs previous release over the same hour (canary comparison).

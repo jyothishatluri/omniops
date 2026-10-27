@@ -223,7 +223,7 @@ async def test_staged_write_is_approved_by_the_simulated_user(tmp_path: Path) ->
     user_steps = [s["message"] for s in data["steps"] if s["source"] == "user"]
     assert user_steps[-1].startswith("[Slack] The on-call user clicked Approve on staged write w1")
     assert data["steps"][-1]["source"] == "agent"
-    assert outcome.answer == ("Staged the dashboard for approval.\n\nStaged writes:\n- Approved by the on-call user "
+    assert outcome.answer == ("Staged the dashboard for approval.\n\nUpdate after approval:\n- Approved by the on-call user "
                               "and executed (1 row(s)). uid=svc-overview; url=/d/svc-overview")
     assert final_answer(data) == outcome.answer
 

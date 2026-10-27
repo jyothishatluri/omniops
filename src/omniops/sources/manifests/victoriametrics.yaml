@@ -129,8 +129,8 @@ tables:
       - {column: query, required: true, description: "MetricsQL / PromQL expression", examples: ['topk(5, sum by (instance) (rate(node_cpu_seconds_total{mode!="idle"}[5m])))']}
       - {column: nocache, type: BOOLEAN, description: "true = bypass the rollup result cache"}
     columns:
-      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
-      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: ts, type: TIMESTAMP, expr: "_.value[0] if _ else root.data.result[0]", transform: epoch_s, description: "Evaluation time"}
+      - {name: value, type: DOUBLE, expr: "_.value[1] if _ else root.data.result[1]", description: "Sample value (or the scalar)"}
       - {name: metric, path: "metric.__name__"}
       - {name: labels, type: JSON, path: metric}
       - {name: series_fetched, type: BIGINT, path: "$.stats.seriesFetched"}

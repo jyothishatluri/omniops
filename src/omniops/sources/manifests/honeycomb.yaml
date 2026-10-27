@@ -1123,7 +1123,7 @@ tables:
         query: {"page[size]": 100}
         poll: {until: "response.status != 'pending'", interval_s: 1, timeout_s: 40}
     filters:
-      - {column: service, ops: ["=", "in"], fan_out: false, description: "Only dependencies involving these service node names (one request, all nodes)", examples: ["user-service"]}
+      - {column: service, ops: ["=", "in"], fan_out: false, description: "Only dependencies involving these service node names (one request, all nodes)", examples: ["accounts-api"]}
     time: {column: ts, default_lookback: 2h, max_window: 7d, reapply: false}
     pagination: {type: next_url, next_url_path: "$.links.next", max_pages: 10}
     response:
@@ -1155,7 +1155,7 @@ tables:
     fixtures:
       - file: map_dependencies.json
         expect_rows: 1
-        expect_columns: {parent_service: frontend, child_service: user-service, call_count: 142}
+        expect_columns: {parent_service: frontend, child_service: accounts-api, call_count: 142}
         note: "Built strictly from the GetMapDependenciesResponse / MapDependency / MapNode schema of the official OpenAPI spec and its property examples (docs.honeycomb.io/api/service-maps/get-map-dependencies)."
       - file: map_dependencies_error.json
         expect_error: "service map request failed"

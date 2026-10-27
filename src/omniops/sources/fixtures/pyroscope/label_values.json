@@ -1,7 +1,7 @@
 {
   "names": [
-    "api-gateway",
-    "order-service",
-    "payment-service"
+    "edge-proxy",
+    "billing-api",
+    "ledger-service"
   ]
 }

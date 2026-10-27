@@ -1,1 +1,1 @@
-{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"service_name":"api-gateway"},"values":[[1711839600,"524288"],[1711839900,"524288"]]},{"metric":{"service_name":"payment-service"},"values":[[1711839600,"0"],[1711839900,"262144"]]}],"stats":{}}}
+{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"service_name":"edge-proxy"},"values":[[1711839600,"524288"],[1711839900,"524288"]]},{"metric":{"service_name":"ledger-service"},"values":[[1711839600,"0"],[1711839900,"262144"]]}],"stats":{}}}

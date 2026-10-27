@@ -12,6 +12,8 @@ base_url: "{{ env.PROMETHEUS_URL }}"
 env:
   - {name: PROMETHEUS_URL, description: "Base URL, e.g. http://prometheus:9090 (no trailing /api/v1)"}
   - {name: PROMETHEUS_TOKEN, description: "Optional bearer token", secret: true}
+  # Templates read it with a 15s fallback too, so derived manifests that replace this list still expand the macro.
+  - {name: PROMETHEUS_SCRAPE_INTERVAL, description: "Scrape interval used to expand $__rate_interval (e.g. 15s, 30s, 1m)", default: 15s}
 required_env: [PROMETHEUS_URL]
 auth:
   type: headers
@@ -24,23 +26,54 @@ query_languages:
   promql: >-
     PromQL. Selectors use braces: metric{label="value"}. rate()/increase() need a range vector
     [5m]. Aggregate with sum by (label) (...). Histograms: histogram_quantile(0.95, sum by (le)
-    (rate(x_bucket[5m]))). Instant tables need vector results; wrap scalars with vector().
+    (rate(x_bucket[5m]))). Grafana's interval macros are expanded in the query: $__range (the ts
+    window, e.g. 1h), $__range_s / $__range_ms (its length in seconds / milliseconds),
+    $__interval and $__auto (the step on range tables, the whole window on instant tables),
+    $__interval_ms, and $__rate_interval = max(step + scrape interval, 4 x scrape interval) with
+    the scrape interval from PROMETHEUS_SCRAPE_INTERVAL (default 15s). Each range-query point is
+    the expression evaluated AT its ts, so increase(x[$__interval]) counts the step ending at ts;
+    with $__auto / $__interval the series starts one step after the window start so the steps
+    tile the window. vector(s) takes only a scalar (a number, time(), scalar(x)): sum(), count(),
+    max() ... already return instant vectors, so never wrap them in vector(); use
+    '... or vector(0)' to turn 'no series' into 0.
 pitfalls:
   - "An unknown metric or label returns 0 series, not an error: list label values first, then filter."
   - "Range queries are capped at ~11,000 points per series; the engine auto-sizes step to ~300 points."
+  - "A percentile over a window is histogram_quantile over the bucket rates of the WHOLE window: histogram_quantile(0.95, sum by (le) (rate(x_bucket[$__range]))) on the instant table. The average (or max) of per-step p95 samples is not the window p95. For a baseline run the same expression with offset (e.g. rate(x_bucket[$__range] offset 1d))."
+  - "histogram_quantile only interpolates inside bucket bounds: a result equal to the highest finite le bound means the quantile is AT LEAST that value (the rest sits in the +Inf bucket) - report it as '>= <le>', never as the exact value."
+  - "Gauges (queue depth, memory, temperature, lag) change with deriv() (per-second least-squares slope) or delta() (last minus first over the range); rate()/increase() are for counters only and treat every drop as a counter reset."
+  - "A duration read off a range table (how long a value stayed above a threshold, when it started or ended) is only as precise as the step: state the resolution next to it (e.g. '~25m at 60s steps'), or re-query a narrower window with a smaller step."
+  - "NaN and +Inf/-Inf values are kept (0/0 ratios, histogram_quantile without samples, division by zero). DuckDB sorts NaN above every number, so max() and ORDER BY value DESC return it: filter with isfinite(value) first."
 tables:
   - name: prometheus_query_range
     title: PromQL range query
     description: >-
       Evaluate a PromQL expression over a time range. One row per (series, timestamp).
-      Filter on query (required) and ts (time range). Optional step (seconds).
+      Filter on query (required) and ts (time range). Optional step (seconds). $__range,
+      $__range_s, $__interval, $__auto and $__rate_interval in the query are expanded (see the
+      PromQL notes). With a step-sized range ($__auto / $__interval) the first point is one step
+      after the window start and the last is the window end, so the per-step buckets tile the
+      window; the [window] line shows the step and the span they cover. Use it for shape, peaks
+      and per-step breakdowns; one number over the window (total, average, p95) comes from
+      prometheus_query with [$__range].
     kind: timeseries
     request:
       method: GET
       path: /api/v1/query_range
       query:
-        query: "{{ filters.query }}"
-        start: "{{ time.start | epoch_s }}"
+        query: >-
+          {%- set st = (filters.step | int) if filters.step else time.step_s -%}
+          {%- set scrape = (env.PROMETHEUS_SCRAPE_INTERVAL or '15s') | seconds -%}
+          {{ filters.query
+             | replace('$__rate_interval', ([st + scrape, 4 * scrape] | max) | prom_duration)
+             | replace('$__range_s', time.range_s | string)
+             | replace('$__range_ms', (time.range_s * 1000) | string)
+             | replace('$__range', time.range_s | prom_duration)
+             | replace('$__interval_ms', (st * 1000) | string)
+             | replace('$__interval', st | prom_duration)
+             | replace('$__auto', st | prom_duration) }}
+        # Step-sized ranges: start one step after the window start so the steps tile the window.
+        start: "{{ (time.buckets(filters.step).start if ('$__auto' in filters.query or '$__interval' in filters.query) else time.start) | epoch_s }}"
         end: "{{ time.end | epoch_s }}"
         step: "{{ filters.step if filters.step else time.step_s }}"
     filters:
@@ -53,7 +86,7 @@ tables:
         - {explode: values, as: p}
     columns:
       - {name: ts, type: TIMESTAMP, path: "@p[0]", transform: epoch_s, description: "Sample timestamp (UTC)"}
-      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value (NaN/Inf preserved)"}
+      - {name: value, type: DOUBLE, path: "@p[1]", description: "Sample value. NaN/Inf preserved (0/0 ratios, histogram_quantile with no samples): DuckDB sorts NaN above every number, so filter with isfinite(value) before max() or ORDER BY value DESC"}
       - {name: metric, path: "metric.__name__", description: "Metric name when the expression keeps it"}
       - {name: labels, type: JSON, path: metric, description: "All series labels as JSON; use labels->>'job'"}
       - {name: query, filter_only: true, description: "The PromQL expression"}
@@ -61,6 +94,8 @@ tables:
     pitfalls:
       - "Use rate()/increase() on counters; raw counter values only ever go up."
       - "Group with sum by (...) in PromQL before fetching; it is far cheaper than grouping millions of points in SQL."
+      - "Each point is the expression evaluated AT ts, so increase(x[R]) counts the R ending at ts: a range equal to the step gives non-overlapping per-step buckets, a longer one overlapping windows. The last point can sit exactly on the window end: use BETWEEN or <= for the upper bound."
+      - "Summing or averaging range points only approximates one number over the window (a total, an average, a window p95): evaluate it once on the instant table with a range equal to the window."
     examples:
       - sql: >-
           SELECT labels->>'job' AS job, max(value) AS peak, arg_max(ts, value) AS peak_at
@@ -79,37 +114,82 @@ tables:
 
   - name: prometheus_query
     title: PromQL instant query
-    description: Evaluate a PromQL expression at one instant (ts = evaluation time, default the analysis window end). One row per series.
+    description: >-
+      Evaluate a PromQL expression at one instant (ts = evaluation time, default the analysis
+      window end). One row per series; a scalar result (time(), scalar(x), 1 + 1) is one row with
+      empty labels. $__range / $__range_s (and $__interval / $__auto) in the query are the whole ts
+      window, so sum by (job) (increase(x[$__range])) or histogram_quantile(0.95, sum by (le)
+      (rate(x_bucket[$__range]))) give one value per series for exactly that window. Without ts
+      bounds the window is the run's analysis window, or the last 5m (the default lookback) when
+      there is none, so [$__range] then covers only those 5 minutes.
     kind: timeseries
     request:
       method: GET
       path: /api/v1/query
       query:
-        query: "{{ filters.query }}"
+        query: >-
+          {%- set scrape = (env.PROMETHEUS_SCRAPE_INTERVAL or '15s') | seconds -%}
+          {{ filters.query
+             | replace('$__rate_interval', ([time.range_s + scrape, 4 * scrape] | max) | prom_duration)
+             | replace('$__range_s', time.range_s | string)
+             | replace('$__range_ms', (time.range_s * 1000) | string)
+             | replace('$__range', time.range_s | prom_duration)
+             | replace('$__interval_ms', (time.range_s * 1000) | string)
+             | replace('$__interval', time.range_s | prom_duration)
+             | replace('$__auto', time.range_s | prom_duration) }}
         time: "{{ time.end | epoch_s }}"
     filters:
       - {column: query, required: true, description: "PromQL expression returning an instant vector", examples: ['topk(5, sum by (instance) (rate(node_cpu_seconds_total{mode!="idle"}[5m])))']}
     time: {column: ts, default_lookback: 5m, reapply: false}
     response:
-      rows_path: "$.data.result[*]"
+      rows_path: "$.data"
+      expand:
+        # A vector becomes one scope per series, bound to "_" so relative paths (value[1], metric)
+        # read the series. A scalar/string result has no series and keeps one empty scope that the
+        # columns read from $.data.result; result[0] drops that empty scope for an empty vector.
+        - {zip: {metric: "result[*].metric", value: "result[*].value"}, as: _, keep_empty: true}
+        - {explode: "$.data.result[0]", as: first}
     columns:
-      - {name: ts, type: TIMESTAMP, path: "value[0]", transform: epoch_s}
-      - {name: value, type: DOUBLE, path: "value[1]"}
+      - {name: ts, type: TIMESTAMP, expr: "_.value[0] if _ else root.data.result[0]", transform: epoch_s, description: "Evaluation time"}
+      - {name: value, type: DOUBLE, expr: "_.value[1] if _ else root.data.result[1]", description: "Sample value (or the scalar). NaN/Inf preserved (0/0 ratios, histogram_quantile with no samples): DuckDB sorts NaN above every number, so filter with isfinite(value) before max() or ORDER BY value DESC"}
       - {name: metric, path: "metric.__name__"}
-      - {name: labels, type: JSON, path: metric}
+      - {name: labels, type: JSON, path: metric, description: "Series labels as JSON (empty for a scalar result)"}
       - {name: query, filter_only: true}
     pitfalls:
-      - "Scalar results (e.g. count(x) > 0 without aggregation labels is still a vector, but time() is a scalar) must be wrapped in vector()."
-      - "Evaluation time is the end of the ts range; put the instant you care about as the upper bound."
+      - "Evaluation time is the end of the ts range. Without ts bounds the window is the run's analysis window, or the last 5m (this table's default lookback) when there is none: give the window you mean as ts bounds whenever the query's range should cover it."
+      - "vector() takes only a scalar: never wrap an aggregation (vector(sum(x)) fails with 'expected type scalar in call to function vector'); sum(), count(), max() ... already return a vector."
+      - "Native-histogram samples (histogram instead of value) have no value here: apply histogram_quantile() / histogram_count() / histogram_sum() in the query first. Range selectors (x[5m]) return a matrix: use prometheus_query_range or an *_over_time function."
     examples:
       - sql: "SELECT labels->>'instance' AS instance, value FROM prometheus_query WHERE query = 'up == 0'"
         description: Targets that are down right now (at the anchor time).
         verified: true
+      - sql: >-
+          SELECT labels->>'job' AS job, round(value * 1000) AS p95_ms FROM prometheus_query
+          WHERE query = 'histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket[$__range])))'
+            AND ts BETWEEN TIMESTAMP '2026-10-01 11:00:00' AND TIMESTAMP '2026-10-01 12:00:00'
+            AND isfinite(value)
+          ORDER BY p95_ms DESC
+        description: >-
+          Window-level p95 latency per job over the incident hour: one quantile over the whole
+          window's bucket rates (not an average of p95 samples). Add offset 1d inside rate() for
+          the same hour a day earlier.
     fixtures:
       - file: query_vector.json
         filters: {query: up}
         expect_rows: 2
-        expect_columns: {value: 1.0, metric: up}
+        expect_columns: {ts: "2015-07-01T20:10:51.781Z", value: 1.0, metric: up}
+      - file: query_scalar.json
+        filters: {query: time()}
+        expect_rows: 1
+        expect_columns: {ts: "2015-07-01T20:10:51.781Z", value: 1435781451.781, metric: null, labels: null}
+        note: >-
+          Built strictly from the documented scalar result format ("resultType": "scalar", "result":
+          [<unix_time>, "<scalar_value>"], Prometheus HTTP API 'Expression query result formats')
+          in the documented response envelope; the value is what time() returns at that instant.
+      - file: query_vector_empty.json
+        filters: {query: 'up{job="absent"}'}
+        expect_rows: 0
+        note: "Documented vector envelope with no series: an empty vector must give 0 rows, never an empty placeholder row."
 
   - name: prometheus_series
     title: Series matching selectors

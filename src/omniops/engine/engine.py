@@ -29,7 +29,7 @@ from sqlglot import exp
 
 from omniops.engine import http, pushdown, templating, timeutil, transform
 from omniops.engine.catalog import Catalog, CatalogEntry
-from omniops.engine.results import QueryResult, message_digest, timeseries_digest
+from omniops.engine.results import QueryResult, message_digest, nonfinite_notes, timeseries_digest
 
 MAX_REQUESTS_PER_QUERY = 60
 FETCH_ROW_CAP = 20_000
@@ -89,6 +89,8 @@ class FetchOutcome:
     logs: list[http.RequestLog]
     errors: list[str]
     truncated: bool = False
+    # Step-sized buckets the request asked for (start moved to tile the window), for the [window] line.
+    buckets: timeutil.BucketGrid | None = None
 
 
 class FetchCache:
@@ -424,9 +426,14 @@ class SQLEngine:
             if resp.status >= 400 and resp.status in last.accept_status and resp.status not in last.accept_status_rows:
                 continue
             text = resp.text if t.response.text is not None else None
-            rows.extend(transform.build_rows(t, resp.body, filters=scalar_filters, text=text,
-                                             extra_error_rules=manifest.errors))
-        return FetchOutcome(rows, list(res.notes), logs, [], res.truncated)
+            try:
+                rows.extend(transform.build_rows(t, resp.body, filters=scalar_filters, text=text,
+                                                 extra_error_rules=manifest.errors))
+            except transform.ApiBodyError as exc:
+                http.with_hint(exc, str(exc))
+                raise
+        grid = (ctx.get("time") or {}).get("buckets_used")
+        return FetchOutcome(rows, list(res.notes), logs, [], res.truncated, grid)
 
     async def fetch(self, plan: FetchPlan, start: datetime | None = None, end: datetime | None = None
                     ) -> FetchOutcome:
@@ -448,6 +455,7 @@ class SQLEngine:
         inner_errors: list[str] = []  # partial failures inside a request (a computed table's sources)
         first_exc: BaseException | None = None
         truncated = False
+        grid: timeutil.BucketGrid | None = None
         for r in results:
             if isinstance(r, BaseException):
                 if isinstance(r, asyncio.CancelledError):
@@ -460,6 +468,7 @@ class SQLEngine:
             logs.extend(r.logs)
             inner_errors.extend(r.errors)
             truncated = truncated or r.truncated
+            grid = grid or r.buckets
         if errors and not rows and len(errors) == len(combos) and first_exc is not None:
             raise first_exc
         if errors:
@@ -478,7 +487,7 @@ class SQLEngine:
                 step = _bucket_step(rows, tcol, groups, start, end)
                 if step:
                     rows = transform.zero_fill(rows, tcol, vcol, step, start, end, groups)
-        return FetchOutcome(rows, notes, logs, errors + inner_errors, truncated)
+        return FetchOutcome(rows, notes, logs, errors + inner_errors, truncated, grid)
 
     async def _with_host_variants(self, plan: FetchPlan, out: FetchOutcome) -> FetchOutcome:
         if out.rows:
@@ -503,7 +512,8 @@ class SQLEngine:
                     rows = [{**r, f.column: v} if r.get(f.column) == alt else r for r in alt_out.rows]
                     note = (f"host {v!r} returned nothing; the short/alternate form {alt!r} matched "
                             "(different data types carry different host-name forms)")
-                    return FetchOutcome(rows, [*alt_out.notes, note], alt_out.logs, alt_out.errors, alt_out.truncated)
+                    return FetchOutcome(rows, [*alt_out.notes, note], alt_out.logs, alt_out.errors, alt_out.truncated,
+                                        alt_out.buckets)
             out.notes.append(f"no data for host {v!r} or its alternate forms {alts}")
         return out
 
@@ -592,6 +602,7 @@ class SQLEngine:
         outcomes = await asyncio.gather(*(self.fetch(p) for p in plans), return_exceptions=True)
         notes: list[str] = []
         windows: dict[str, tuple[str, str]] = {}
+        window_notes: dict[str, str] = {}
         links: list[dict[str, str]] = []
         req_logs: list[dict[str, Any]] = []
         fetched: dict[str, int] = {}
@@ -623,6 +634,8 @@ class SQLEngine:
                 notes.append(f"{label}: source data truncated - results may be incomplete")
             if plan.start and plan.end:
                 windows[label] = (timeutil.fmt_rfc3339(plan.start), timeutil.fmt_rfc3339(plan.end))
+                if out.buckets is not None:
+                    window_notes[label] = out.buckets.describe()
             link = self._link(plan)
             if link:
                 links.append({"label": label, "url": link})
@@ -643,9 +656,10 @@ class SQLEngine:
                 notes.append(f"{plan.table}: LIMIT {plan.limit} was sent to the API, which returned {len(out.rows)} "
                              f"row(s); the SQL kept {total}, so more matching rows may exist - drop the LIMIT or "
                              "aggregate in SQL")
+        notes += nonfinite_notes(cols, types, rows)
         res = QueryResult(sql=sql, columns=cols, types=types, rows=rows, total_rows=total,
                           tables=sorted({p.table for p in plans}), notes=notes, links=links, requests=req_logs,
-                          windows=windows, fetched_rows=fetched)
+                          windows=windows, window_notes=window_notes, fetched_rows=fetched)
         res.digests = timeseries_digest(cols, types, rows) + message_digest(cols, rows)
         # Also when an aggregate turned an empty fetch into one row (count(*) = 0, max() = NULL).
         if plans and (total == 0 or all(not o.rows for o in final_outcomes)):
