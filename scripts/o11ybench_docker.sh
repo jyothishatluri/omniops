@@ -34,11 +34,22 @@ while IFS='=' read -r name _; do
   case "$name" in OMNIOPS_*) ENV_ARGS+=(-e "$name") ;; esac
 done < <(env)
 
+# The benchmark checkout may be a symlink to a folder outside an iCloud-synced Documents directory (iCloud
+# makes "name 2" conflict copies and returns EIO under benchmark write load). Mount its real path at the same
+# path too, so both the link and the paths Harbor resolves through it exist inside the container.
+EXTRA_MOUNTS=()
+BENCH="${O11Y_BENCH_DIR:-$PARENT/vendor/o11y-bench}"
+if [ -e "$BENCH" ]; then
+  REAL="$(cd "$BENCH" && pwd -P)"
+  case "$REAL" in "$PARENT"/*) ;; *) EXTRA_MOUNTS+=(-v "$REAL:$REAL") ;; esac
+fi
+
 TTY=()
 [ -t 1 ] && TTY=(-t)
 exec docker run --rm ${TTY[@]+"${TTY[@]}"} \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PARENT:$PARENT" -w "$ROOT" \
+  ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
   -v omniops-o11ybench-uv-cache:/root/.cache/uv \
   -e UV_LINK_MODE=copy \
   ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
