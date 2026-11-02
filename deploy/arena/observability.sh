@@ -63,9 +63,22 @@ install() {
   grafana_token
 }
 
+# GF_SECURITY_ADMIN_PASSWORD only applies when Grafana first creates its database (kept on the lgtm-data
+# volume), so a password that changed afterwards never matches: set the stored one to the file's through
+# Grafana's own CLI, password on stdin, before any API login. No failed logins, so no brute-force lockout.
+# Paths are those of grafana/otel-lgtm 0.36.0 (lgtm.yaml).
+sync_admin_password() {
+  helper gen-password --out "$STATE_DIR/grafana-admin-password"      # normalises an older file
+  kc -n "$OBS_NS" exec -i deploy/lgtm -- sh -c 'cd /otel-lgtm/grafana &&
+    GF_PATHS_DATA=/data/grafana/data GF_PATHS_PLUGINS=/data/grafana/plugins \
+    ./bin/grafana cli --homepath /otel-lgtm/grafana admin reset-admin-password --password-from-stdin' \
+    <"$STATE_DIR/grafana-admin-password" >/dev/null || die "could not set Grafana's admin password"
+}
+
 grafana_token() {
   "$ARENA_DEPLOY_DIR/port-forward.sh" start >/dev/null
   helper wait-http "http://localhost:$GRAFANA_PORT/api/health" --timeout 120
+  sync_admin_password
   helper grafana-token --url "http://localhost:$GRAFANA_PORT" \
     --password-file "$STATE_DIR/grafana-admin-password" --out "$STATE_DIR/grafana-token"
 }

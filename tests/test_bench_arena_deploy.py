@@ -112,6 +112,26 @@ def test_notifications_secret_routes_arena_alerts_to_slack_and_the_bridge(tmp_pa
     assert names == ["omniops-bridge"] and "not configured" in bridge_only.stderr
 
 
+def test_grafana_admin_password_file_has_no_trailing_newline(tmp_path: Path) -> None:
+    new = tmp_path / "new"
+    assert helper("gen-password", "--out", str(new)).returncode == 0
+    first = new.read_text()
+    assert first and first == first.strip() and oct(new.stat().st_mode & 0o777) == "0o600"
+    assert helper("gen-password", "--out", str(new)).returncode == 0 and new.read_text() == first   # kept
+
+    old = tmp_path / "old"
+    old.write_text("written-by-an-older-version\n")
+    assert helper("gen-password", "--out", str(old)).returncode == 0
+    assert old.read_text() == "written-by-an-older-version"
+
+
+def test_observability_sets_grafanas_stored_admin_password_before_the_token_step() -> None:
+    text = (DEPLOY / "observability.sh").read_text()
+    token_fn = text[text.index("grafana_token() {"):]
+    assert token_fn.index("sync_admin_password") < token_fn.index("helper grafana-token")
+    assert "--password-from-stdin" in text and '<"$STATE_DIR/grafana-admin-password"' in text
+
+
 def test_notifications_refuse_omniops_own_bot_token() -> None:
     proc = helper("notifications", "--bridge-url", "http://b/grafana",
                   env={"GRAFANA_SLACK_TOKEN": "xoxb-same", "SLACK_BOT_TOKEN": "xoxb-same", "GRAFANA_SLACK_CHANNEL": "C1"})

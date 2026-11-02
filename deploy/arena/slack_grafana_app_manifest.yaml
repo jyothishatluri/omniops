@@ -1,0 +1,23 @@
+# Slack app manifest for the alert source in live demos and real-Slack Arena runs: Grafana's Slack
+# contact point posts through this app's incoming webhook. It must be a separate app from OmniOps,
+# because OmniOps ignores its own posts.
+#
+# https://api.slack.com/apps -> Create New App -> From a manifest -> paste this -> install, picking the
+# alert channel when Slack asks where the webhook should post. Then copy the webhook URL
+# (Features > Incoming Webhooks) into SLACK_WEBHOOK_URL in omniops/.env.
+display_information:
+  name: Grafana Alerts
+  description: Delivers alerts from the local Grafana (OmniOps test stack) to the alert channel.
+  background_color: "#3d3d3d"
+features:
+  bot_user:
+    display_name: Grafana Alerts
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - incoming-webhook
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

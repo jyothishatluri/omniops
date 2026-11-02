@@ -493,9 +493,15 @@ def cmd_wait_http(a: argparse.Namespace) -> int:
 
 
 def cmd_gen_password(a: argparse.Namespace) -> int:
+    """No trailing newline: the grafana-admin Secret is made from the whole file, so a newline became part of
+    Grafana's admin password while API logins strip it. An older file is normalised in place."""
     out = Path(a.out)
     if not out.is_file():
-        write_private(out, secrets.token_urlsafe(24) + "\n")
+        write_private(out, secrets.token_urlsafe(24))
+    else:
+        text = out.read_text()
+        if text != text.strip():
+            write_private(out, text.strip())
     return 0
 
 

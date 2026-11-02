@@ -65,6 +65,9 @@ the model. `omniops.yaml` (optional) can name instances, e.g. two Prometheus ser
 3. Invite the bot to your alert channels (`/invite @OmniOps`) and list their IDs in `OMNIOPS_ALERT_CHANNELS`.
 4. `uv run omniops serve` (Socket Mode; no public URL needed).
 
+For a live demo with real Grafana alerts posted to the channel and investigated by OmniOps, see
+[docs/SLACK_DEMO.md](docs/SLACK_DEMO.md).
+
 Alerts from Datadog, Grafana Alerting, Alertmanager, Dynatrace, New Relic, PagerDuty, Opsgenie, Sentry,
 CloudWatch (Amazon Q Developer in chat), Azure Monitor, Google Cloud Monitoring, Splunk, Kibana,
 Honeycomb, Sumo Logic, Coralogix, Edge Delta and incident.io are recognised
